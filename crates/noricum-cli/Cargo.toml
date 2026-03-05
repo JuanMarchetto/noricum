@@ -14,6 +14,7 @@ noricum-ir = { workspace = true }
 noricum-tools = { workspace = true }
 noricum-validation = { workspace = true }
 clap = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

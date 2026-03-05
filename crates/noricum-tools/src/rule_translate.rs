@@ -161,7 +161,7 @@ fn find_brace_line(lines: &[&str], start: usize) -> Option<usize> {
 fn extract_braced_block(lines: &[&str], start: usize) -> Option<(String, usize)> {
     // Flatten lines from start onward into a single string, tracking line boundaries
     let mut all_text = String::new();
-    for (_i, line) in lines.iter().enumerate().skip(start) {
+    for line in lines.iter().skip(start) {
         if !all_text.is_empty() {
             all_text.push('\n');
         }
@@ -214,44 +214,49 @@ fn translate_function(func: &CFunction) -> Option<String> {
 
 /// Find variables that are assigned to in the body (to mark params as `mut`).
 fn find_mutated_vars(body: &str) -> Vec<String> {
+    let is_ident = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let mut seen = std::collections::HashSet::new();
     let mut vars = Vec::new();
+
+    let mut add = |name: &str| {
+        if seen.insert(name.to_string()) {
+            vars.push(name.to_string());
+        }
+    };
+
     for line in body.lines() {
         let trimmed = line.trim();
+
         // x = ...; or x += ...; etc.
         for op in &["=", "+=", "-=", "*=", "/=", "%="] {
             if let Some(pos) = trimmed.find(op) {
-                // Make sure it's not == or !=
                 if *op == "=" {
-                    if pos > 0 && matches!(trimmed.as_bytes()[pos - 1], b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%') {
-                        continue;
-                    }
-                    if pos + 1 < trimmed.len() && trimmed.as_bytes()[pos + 1] == b'=' {
+                    let prev_is_compound = pos > 0
+                        && matches!(trimmed.as_bytes()[pos - 1], b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%');
+                    let next_is_eq = pos + 1 < trimmed.len() && trimmed.as_bytes()[pos + 1] == b'=';
+                    if prev_is_compound || next_is_eq {
                         continue;
                     }
                 }
                 let lhs = trimmed[..pos].trim();
-                if lhs.chars().all(|c| c.is_alphanumeric() || c == '_') && !lhs.is_empty() {
-                    if !vars.contains(&lhs.to_string()) {
-                        vars.push(lhs.to_string());
-                    }
+                if is_ident(lhs) {
+                    add(lhs);
                 }
                 break;
             }
         }
-        // x++ or ++x or x-- or --x
+
+        // x++, x--, ++x, --x
         let no_semi = trimmed.strip_suffix(';').unwrap_or(trimmed).trim();
-        if let Some(var) = no_semi.strip_suffix("++").or_else(|| no_semi.strip_suffix("--")) {
-            if var.chars().all(|c| c.is_alphanumeric() || c == '_') && !var.is_empty() {
-                if !vars.contains(&var.to_string()) {
-                    vars.push(var.to_string());
-                }
-            }
-        }
-        if let Some(var) = no_semi.strip_prefix("++").or_else(|| no_semi.strip_prefix("--")) {
-            if var.chars().all(|c| c.is_alphanumeric() || c == '_') && !var.is_empty() {
-                if !vars.contains(&var.to_string()) {
-                    vars.push(var.to_string());
-                }
+        for var in [
+            no_semi.strip_suffix("++"), no_semi.strip_suffix("--"),
+            no_semi.strip_prefix("++"), no_semi.strip_prefix("--"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if is_ident(var) {
+                add(var);
             }
         }
     }
@@ -271,31 +276,29 @@ fn translate_params_with_mut(params: &[(String, String)], mutated: &[String]) ->
     Some(rust_params.join(", "))
 }
 
-fn c_type_to_rust(c_type: &str) -> Option<String> {
+fn c_type_to_rust(c_type: &str) -> Option<&'static str> {
     match c_type.trim() {
-        "int" => Some("i32".to_string()),
-        "unsigned int" | "unsigned" => Some("u32".to_string()),
-        "long" => Some("i64".to_string()),
-        "long long" => Some("i64".to_string()),
-        "unsigned long" => Some("u64".to_string()),
-        "unsigned long long" => Some("u64".to_string()),
-        "short" => Some("i16".to_string()),
-        "unsigned short" => Some("u16".to_string()),
-        "char" => Some("i8".to_string()),
-        "unsigned char" => Some("u8".to_string()),
-        "float" => Some("f32".to_string()),
-        "double" => Some("f64".to_string()),
-        "void" => Some("()".to_string()),
-        "size_t" => Some("usize".to_string()),
-        "int32_t" => Some("i32".to_string()),
-        "uint32_t" => Some("u32".to_string()),
-        "int64_t" => Some("i64".to_string()),
-        "uint64_t" => Some("u64".to_string()),
-        "int16_t" => Some("i16".to_string()),
-        "uint16_t" => Some("u16".to_string()),
-        "int8_t" => Some("i8".to_string()),
-        "uint8_t" => Some("u8".to_string()),
-        "bool" | "_Bool" => Some("bool".to_string()),
+        "int" => Some("i32"),
+        "unsigned int" | "unsigned" => Some("u32"),
+        "long" | "long long" => Some("i64"),
+        "unsigned long" | "unsigned long long" => Some("u64"),
+        "short" => Some("i16"),
+        "unsigned short" => Some("u16"),
+        "char" => Some("i8"),
+        "unsigned char" => Some("u8"),
+        "float" => Some("f32"),
+        "double" => Some("f64"),
+        "void" => Some("()"),
+        "size_t" => Some("usize"),
+        "int32_t" => Some("i32"),
+        "uint32_t" => Some("u32"),
+        "int64_t" => Some("i64"),
+        "uint64_t" => Some("u64"),
+        "int16_t" => Some("i16"),
+        "uint16_t" => Some("u16"),
+        "int8_t" => Some("i8"),
+        "uint8_t" => Some("u8"),
+        "bool" | "_Bool" => Some("bool"),
         _ => None,
     }
 }
@@ -305,6 +308,7 @@ fn c_type_to_rust(c_type: &str) -> Option<String> {
 fn translate_body(body: &str, indent: &str) -> Option<String> {
     let mut output = Vec::new();
     let lines: Vec<&str> = body.lines().collect();
+    let mutated = find_mutated_vars(body);
     let mut i = 0;
 
     while i < lines.len() {
@@ -353,7 +357,16 @@ fn translate_body(body: &str, indent: &str) -> Option<String> {
         i += 1;
     }
 
-    Some(output.join("\n"))
+    let mut result = output.join("\n");
+
+    // Post-process: add `mut` to variable declarations for mutated vars
+    for var in &mutated {
+        let immutable = format!("let {var}:");
+        let mutable = format!("let mut {var}:");
+        result = result.replace(&immutable, &mutable);
+    }
+
+    Some(result)
 }
 
 /// Check if a C expression evaluates to a boolean in Rust but int in C.
@@ -366,18 +379,13 @@ fn is_boolean_expr(expr: &str) -> bool {
     false
 }
 
+const COMPLEX_MARKERS: &[&str] = &[
+    "malloc", "free(", "->", "void *", "goto ", "switch ",
+    "sizeof", "memcpy", "memset", "strcpy", "strcat",
+];
+
 fn is_complex(stmt: &str) -> bool {
-    stmt.contains("malloc")
-        || stmt.contains("free(")
-        || stmt.contains("->")
-        || stmt.contains("void *")
-        || stmt.contains("goto ")
-        || stmt.contains("switch ")
-        || stmt.contains("sizeof")
-        || stmt.contains("memcpy")
-        || stmt.contains("memset")
-        || stmt.contains("strcpy")
-        || stmt.contains("strcat")
+    COMPLEX_MARKERS.iter().any(|marker| stmt.contains(marker))
 }
 
 // --- Statement translation ---
@@ -395,7 +403,7 @@ fn translate_statement(stmt: &str) -> Option<String> {
         let rust_expr = translate_expr(expr)?;
         // If expression is boolean but would be returned as int, cast
         if is_boolean_expr(expr) {
-            return Some(format!("return {rust_expr} as i32;"));
+            return Some(format!("return ({rust_expr}) as i32;"));
         }
         return Some(format!("return {rust_expr};"));
     }
@@ -472,27 +480,19 @@ fn translate_statement(stmt: &str) -> Option<String> {
 
 fn try_translate_inc_dec(stmt: &str) -> Option<String> {
     let no_semi = stmt.strip_suffix(';')?.trim();
-    if let Some(var) = no_semi.strip_suffix("++") {
-        if var.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Some(format!("{var} += 1;"));
-        }
-    }
-    if let Some(var) = no_semi.strip_suffix("--") {
-        if var.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Some(format!("{var} -= 1;"));
-        }
-    }
-    if let Some(var) = no_semi.strip_prefix("++") {
-        if var.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Some(format!("{var} += 1;"));
-        }
-    }
-    if let Some(var) = no_semi.strip_prefix("--") {
-        if var.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Some(format!("{var} -= 1;"));
-        }
-    }
-    None
+    let is_ident = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+    let (var, op) = [
+        no_semi.strip_suffix("++").map(|v| (v, "+=")),
+        no_semi.strip_suffix("--").map(|v| (v, "-=")),
+        no_semi.strip_prefix("++").map(|v| (v, "+=")),
+        no_semi.strip_prefix("--").map(|v| (v, "-=")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|(v, _)| is_ident(v))?;
+
+    Some(format!("{var} {op} 1;"))
 }
 
 fn try_translate_compound_assign(stmt: &str) -> Option<String> {
@@ -561,39 +561,20 @@ fn translate_expr(expr: &str) -> Option<String> {
         return Some(result);
     }
 
-    // Logical operators
-    for op in &[" && ", " || "] {
-        if let Some(pos) = find_operator(expr, op) {
-            let lhs = translate_expr(&expr[..pos])?;
-            let rhs = translate_expr(&expr[pos + op.len()..])?;
-            return Some(format!("{lhs}{op}{rhs}"));
-        }
-    }
-
-    // Comparison operators
-    for op in &[" == ", " != ", " <= ", " >= ", " < ", " > "] {
-        if let Some(pos) = find_operator(expr, op) {
-            let lhs = translate_expr(&expr[..pos])?;
-            let rhs = translate_expr(&expr[pos + op.len()..])?;
-            return Some(format!("{lhs}{op}{rhs}"));
-        }
-    }
-
-    // Bitwise operators
-    for op in &[" << ", " >> ", " & ", " | ", " ^ "] {
-        if let Some(pos) = find_operator(expr, op) {
-            let lhs = translate_expr(&expr[..pos])?;
-            let rhs = translate_expr(&expr[pos + op.len()..])?;
-            return Some(format!("{lhs}{op}{rhs}"));
-        }
-    }
-
-    // Arithmetic operators
-    for op in &[" + ", " - ", " * ", " / ", " % "] {
-        if let Some(pos) = find_operator(expr, op) {
-            let lhs = translate_expr(&expr[..pos])?;
-            let rhs = translate_expr(&expr[pos + op.len()..])?;
-            return Some(format!("{lhs}{op}{rhs}"));
+    // Binary operators (ordered by precedence: logical → comparison → bitwise → arithmetic)
+    const BINARY_OPS: &[&[&str]] = &[
+        &[" && ", " || "],
+        &[" == ", " != ", " <= ", " >= ", " < ", " > "],
+        &[" << ", " >> ", " & ", " | ", " ^ "],
+        &[" + ", " - ", " * ", " / ", " % "],
+    ];
+    for group in BINARY_OPS {
+        for op in *group {
+            if let Some(pos) = find_operator(expr, op) {
+                let lhs = translate_expr(&expr[..pos])?;
+                let rhs = translate_expr(&expr[pos + op.len()..])?;
+                return Some(format!("{lhs}{op}{rhs}"));
+            }
         }
     }
 
@@ -610,14 +591,14 @@ fn translate_expr(expr: &str) -> Option<String> {
     }
 
     // Cast: (type)expr
-    if expr.starts_with('(') {
-        if let Some(close) = expr.find(')') {
-            let maybe_type = expr[1..close].trim();
-            if c_type_to_rust(maybe_type).is_some() && close + 1 < expr.len() {
-                let inner = translate_expr(&expr[close + 1..])?;
-                let rust_ty = c_type_to_rust(maybe_type)?;
-                return Some(format!("{inner} as {rust_ty}"));
-            }
+    if expr.starts_with('(')
+        && let Some(close) = expr.find(')')
+    {
+        let maybe_type = expr[1..close].trim();
+        if c_type_to_rust(maybe_type).is_some() && close + 1 < expr.len() {
+            let inner = translate_expr(&expr[close + 1..])?;
+            let rust_ty = c_type_to_rust(maybe_type)?;
+            return Some(format!("{inner} as {rust_ty}"));
         }
     }
 
@@ -724,7 +705,7 @@ fn translate_var_decl(stmt: &str) -> Option<String> {
         Some(format!("let {name}: {rust_type} = {expr};"))
     } else {
         let name = rest;
-        let default = default_for_type(&rust_type);
+        let default = default_for_type(rust_type);
         Some(format!("let mut {name}: {rust_type} = {default};"))
     }
 }
@@ -765,25 +746,18 @@ fn translate_printf(stmt: &str) -> Option<String> {
     let fmt_end = inner[fmt_start + 1..].find('"')? + fmt_start + 1;
     let fmt_str = &inner[fmt_start + 1..fmt_end];
 
-    let rust_fmt = fmt_str
-        .replace("%lld", "{}")
-        .replace("%llu", "{}")
-        .replace("%ld", "{}")
-        .replace("%lu", "{}")
-        .replace("%d", "{}")
-        .replace("%i", "{}")
-        .replace("%u", "{}")
-        .replace("%f", "{}")
-        .replace("%lf", "{}")
-        .replace("%s", "{}")
-        .replace("%c", "{}")
-        .replace("%zu", "{}")
-        .replace("%x", "{:x}")
-        .replace("%X", "{:X}")
-        .replace("%o", "{:o}")
-        .replace("%p", "{:p}")
-        .replace("%%", "%")
-        .replace("\\n", "");
+    // Longest specifiers first to avoid partial matches (e.g. %lld before %d)
+    const FMT_MAP: &[(&str, &str)] = &[
+        ("%lld", "{}"), ("%llu", "{}"), ("%ld", "{}"), ("%lu", "{}"),
+        ("%lf", "{}"),  ("%zu", "{}"),  ("%d", "{}"),  ("%i", "{}"),
+        ("%u", "{}"),   ("%f", "{}"),   ("%s", "{}"),  ("%c", "{}"),
+        ("%x", "{:x}"), ("%X", "{:X}"), ("%o", "{:o}"), ("%p", "{:p}"),
+        ("%%", "%"),    ("\\n", ""),
+    ];
+    let mut rust_fmt = fmt_str.to_string();
+    for &(from, to) in FMT_MAP {
+        rust_fmt = rust_fmt.replace(from, to);
+    }
 
     let after_fmt = &inner[fmt_end + 1..];
     let args_str = after_fmt.trim().strip_prefix(',').unwrap_or("").trim();
@@ -1031,11 +1005,11 @@ int* create(int n) {
 
     #[test]
     fn test_c_type_to_rust() {
-        assert_eq!(c_type_to_rust("int"), Some("i32".to_string()));
-        assert_eq!(c_type_to_rust("double"), Some("f64".to_string()));
-        assert_eq!(c_type_to_rust("void"), Some("()".to_string()));
-        assert_eq!(c_type_to_rust("bool"), Some("bool".to_string()));
-        assert_eq!(c_type_to_rust("long long"), Some("i64".to_string()));
+        assert_eq!(c_type_to_rust("int"), Some("i32"));
+        assert_eq!(c_type_to_rust("double"), Some("f64"));
+        assert_eq!(c_type_to_rust("void"), Some("()"));
+        assert_eq!(c_type_to_rust("bool"), Some("bool"));
+        assert_eq!(c_type_to_rust("long long"), Some("i64"));
         assert_eq!(c_type_to_rust("const char *"), None);
     }
 

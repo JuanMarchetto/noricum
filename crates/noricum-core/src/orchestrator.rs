@@ -12,8 +12,10 @@ use noricum_agents::providers::{
     ProviderConfig, ProviderKind, create_anthropic_client, create_anthropic_client_with_key,
     select_model,
 };
+use noricum_ir::pattern_store::PatternStore;
 use noricum_ir::{FunctionUnit, MigrationProject, MigrationState};
 use rig::providers::anthropic;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::CoreError;
@@ -214,6 +216,7 @@ pub async fn migrate_file(
         .unwrap_or_else(|| "unknown".to_string());
 
     info!(function = %name, file = %source_path, "starting async migration");
+    let pipeline_start = Instant::now();
 
     // Try to get an Anthropic client; fall back to sync if unavailable
     let client = match config.create_client() {
@@ -252,6 +255,7 @@ pub async fn migrate_file(
     }
 
     // --- Stage 4: Analysis agent ---
+    let analysis_start = Instant::now();
     let analysis_model_sel = select_model(&provider_config, difficulty, "analysis");
     info!(
         function = %name,
@@ -261,30 +265,50 @@ pub async fn migrate_file(
     );
     let analysis = match analysis_model_sel.provider {
         ProviderKind::Anthropic => {
-            noricum_agents::analysis::analyze_function(
+            match noricum_agents::analysis::analyze_function(
                 &client,
                 &analysis_model_sel.model,
                 &unit.c_source,
                 &name,
             )
-            .await?
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!(function = %name, error = %e, "analysis agent failed, falling back to sync");
+                    return migrate_file_sync(c_file);
+                }
+            }
         }
         ProviderKind::Ollama => {
-            // Ollama not yet supported for analysis; fall back to sync
             warn!(function = %name, "Ollama not yet supported for analysis agent");
             return migrate_file_sync(c_file);
         }
     };
     unit.state = MigrationState::Analyzed;
+    unit.metrics.analysis_ms = analysis_start.elapsed().as_millis() as u64;
+    unit.metrics.llm_calls += 1;
     info!(
         function = %name,
         state = ?unit.state,
         patterns = ?analysis.patterns,
         strategy = %analysis.strategy,
+        analysis_ms = unit.metrics.analysis_ms,
         "state -> Analyzed"
     );
 
-    // --- Stage 5: Translation agent ---
+    // --- Stage 5: Translation agent (with RAG pattern context) ---
+    let pattern_store = PatternStore::load_seed_patterns();
+    let relevant_patterns = pattern_store.find_relevant(&unit.c_source, 3);
+    if !relevant_patterns.is_empty() {
+        info!(
+            function = %name,
+            patterns = relevant_patterns.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+            "injecting RAG patterns into translation prompt"
+        );
+    }
+
+    let translation_start = Instant::now();
     let translation_model_sel = select_model(&provider_config, difficulty, "translation");
     info!(
         function = %name,
@@ -293,14 +317,22 @@ pub async fn migrate_file(
     );
     let rust_code = match translation_model_sel.provider {
         ProviderKind::Anthropic => {
-            noricum_agents::translation::translate_function(
+            match noricum_agents::translation::translate_function_with_patterns(
                 &client,
                 &translation_model_sel.model,
                 &unit.c_source,
                 unit.c2rust_output.as_deref(),
                 &analysis,
+                &relevant_patterns,
             )
-            .await?
+            .await
+            {
+                Ok(code) => code,
+                Err(e) => {
+                    warn!(function = %name, error = %e, "translation agent failed, falling back to sync");
+                    return migrate_file_sync(c_file);
+                }
+            }
         }
         ProviderKind::Ollama => {
             warn!(function = %name, "Ollama not yet supported for translation agent");
@@ -309,7 +341,9 @@ pub async fn migrate_file(
     };
     unit.rust_output = Some(rust_code);
     unit.state = MigrationState::Refined;
-    info!(function = %name, state = ?unit.state, "state -> Refined");
+    unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
+    unit.metrics.llm_calls += 1;
+    info!(function = %name, state = ?unit.state, translation_ms = unit.metrics.translation_ms, "state -> Refined");
 
     // --- Stage 6: Validate ---
     let validation = noricum_validation::validate(&unit)?;
@@ -320,11 +354,13 @@ pub async fn migrate_file(
         compiles = validation.compiles,
         idiomatic_score = validation.idiomatic_score,
         unsafe_count = validation.unsafe_count,
+        diff_test = ?validation.diff_test_passed,
         "validation result"
     );
 
     // --- Stage 7: Repair loop ---
     if !validation.passed {
+        let repair_start = Instant::now();
         let repair_model_sel = select_model(&provider_config, difficulty, "repair");
 
         let mut iteration = 1u32;
@@ -339,11 +375,13 @@ pub async fn migrate_file(
 
             let current_rust = unit.rust_output.as_deref().unwrap_or("");
             let errors = &unit.last_errors;
+            let diff_feedback = &unit.last_diff_feedback;
 
-            if errors.is_empty() && unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
+            if errors.is_empty()
+                && diff_feedback.is_empty()
+                && unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
             {
-                // Compiles fine but score was below threshold on first check; might pass now
-                debug!(function = %name, "no compiler errors remaining, re-validating");
+                debug!(function = %name, "no errors or diff feedback remaining, re-validating");
             }
 
             let repaired = match repair_model_sel.provider {
@@ -353,7 +391,10 @@ pub async fn migrate_file(
                         &repair_model_sel.model,
                         current_rust,
                         errors,
+                        diff_feedback,
                         &unit.c_source,
+                        iteration,
+                        config.max_repair_iterations,
                     )
                     .await?
                 }
@@ -365,6 +406,8 @@ pub async fn migrate_file(
 
             unit.rust_output = Some(repaired);
             unit.state = MigrationState::Repairing(iteration);
+            unit.metrics.llm_calls += 1;
+            unit.metrics.repair_iterations = iteration;
 
             let re_validation = noricum_validation::validate(&unit)?;
             noricum_validation::apply_validation(&mut unit, &re_validation);
@@ -375,6 +418,7 @@ pub async fn migrate_file(
                 compiles = re_validation.compiles,
                 idiomatic_score = re_validation.idiomatic_score,
                 unsafe_count = re_validation.unsafe_count,
+                diff_test = ?re_validation.diff_test_passed,
                 "repair iteration result"
             );
 
@@ -385,6 +429,8 @@ pub async fn migrate_file(
 
             iteration += 1;
         }
+
+        unit.metrics.repair_ms = repair_start.elapsed().as_millis() as u64;
 
         // --- Stage 8: Fallback ---
         if unit.state != MigrationState::Validated {
@@ -403,6 +449,7 @@ pub async fn migrate_file(
 
     // --- Stage 9: Test generation ---
     if unit.state == MigrationState::Validated && config.generate_tests {
+        let test_gen_start = Instant::now();
         let test_model_sel = select_model(&provider_config, difficulty, "test_gen");
         info!(
             function = %name,
@@ -422,13 +469,14 @@ pub async fn migrate_file(
                 .await
                 {
                     Ok(test_code) => {
+                        unit.metrics.test_gen_ms = test_gen_start.elapsed().as_millis() as u64;
+                        unit.metrics.llm_calls += 1;
                         info!(
                             function = %name,
                             test_code_len = test_code.len(),
+                            test_gen_ms = unit.metrics.test_gen_ms,
                             "test generation succeeded"
                         );
-                        // Store generated tests alongside the rust output
-                        // The caller can write these to a file
                         unit.generated_tests = Some(test_code);
                     }
                     Err(e) => {
@@ -446,11 +494,24 @@ pub async fn migrate_file(
         }
     }
 
+    // Finalize metrics
+    unit.metrics.total_ms = pipeline_start.elapsed().as_millis() as u64;
+    unit.metrics.c_lines = unit.c_source.lines().count() as u32;
+    unit.metrics.rust_lines = unit
+        .rust_output
+        .as_ref()
+        .map(|s| s.lines().count() as u32)
+        .unwrap_or(0);
+    unit.metrics.diff_test_passed = validation.diff_test_passed;
+
     info!(
         function = %name,
         state = ?unit.state,
         idiomatic_score = ?unit.idiomatic_score,
         unsafe_count = ?unit.unsafe_count,
+        total_ms = unit.metrics.total_ms,
+        llm_calls = unit.metrics.llm_calls,
+        repair_iters = unit.metrics.repair_iterations,
         "async migration complete"
     );
 

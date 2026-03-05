@@ -28,6 +28,10 @@ pub struct ValidationResult {
     pub clippy_warnings: Vec<String>,
     pub unsafe_count: u32,
     pub idiomatic_score: u32,
+    /// Whether the diff test passed (None if not run, e.g. no main() in source)
+    pub diff_test_passed: Option<bool>,
+    /// Feedback describing the diff test mismatch (for the repair agent)
+    pub diff_test_feedback: Vec<String>,
     pub passed: bool,
 }
 
@@ -62,13 +66,47 @@ pub fn validate(unit: &FunctionUnit) -> Result<ValidationResult, ValidationError
     // Step 4: Idiomatic score
     let idiomatic_score = compute_idiomatic_score(unsafe_count, clippy_warnings.len() as u32);
 
-    let passed = compile_result.success && idiomatic_score >= 60;
+    // Step 5: Differential test (only if code compiles and C source has main())
+    let (diff_test_passed, diff_test_feedback) =
+        if compile_result.success && unit.c_source.contains("int main(") {
+            match noricum_tools::diff_test::run_diff_test(&unit.c_source, rust_source) {
+                Ok(result) => {
+                    if result.passed {
+                        info!(function = %unit.name, "diff test passed");
+                        (Some(true), Vec::new())
+                    } else {
+                        let mut feedback = Vec::new();
+                        if !result.rust_compiled {
+                            feedback.push("Rust binary compilation failed (standalone)".to_string());
+                        } else {
+                            feedback.push(format!(
+                                "Output mismatch:\n  C output:    {:?}\n  Rust output: {:?}",
+                                result.c_output, result.rust_output
+                            ));
+                        }
+                        info!(function = %unit.name, "diff test FAILED");
+                        (Some(false), feedback)
+                    }
+                }
+                Err(e) => {
+                    info!(function = %unit.name, error = %e, "diff test skipped (tool error)");
+                    (None, Vec::new())
+                }
+            }
+        } else {
+            (None, Vec::new())
+        };
+
+    let passed = compile_result.success
+        && idiomatic_score >= 60
+        && diff_test_passed.unwrap_or(true);
 
     info!(
         function = %unit.name,
         compiles = compile_result.success,
         unsafe_count,
         idiomatic_score,
+        diff_test = ?diff_test_passed,
         passed,
         "validation complete"
     );
@@ -79,6 +117,8 @@ pub fn validate(unit: &FunctionUnit) -> Result<ValidationResult, ValidationError
         clippy_warnings,
         unsafe_count,
         idiomatic_score,
+        diff_test_passed,
+        diff_test_feedback,
         passed,
     })
 }
@@ -95,6 +135,7 @@ pub fn apply_validation(unit: &mut FunctionUnit, result: &ValidationResult) {
     unit.idiomatic_score = Some(result.idiomatic_score);
     unit.unsafe_count = Some(result.unsafe_count);
     unit.last_errors = result.compiler_errors.clone();
+    unit.last_diff_feedback = result.diff_test_feedback.clone();
 
     if result.passed {
         unit.state = MigrationState::Validated;
@@ -149,6 +190,8 @@ mod tests {
             clippy_warnings: vec![],
             unsafe_count: 0,
             idiomatic_score: 100,
+            diff_test_passed: None,
+            diff_test_feedback: vec![],
             passed: true,
         };
 
@@ -168,6 +211,8 @@ mod tests {
             clippy_warnings: vec![],
             unsafe_count: 0,
             idiomatic_score: 50,
+            diff_test_passed: None,
+            diff_test_feedback: vec![],
             passed: false,
         };
 
@@ -187,6 +232,8 @@ mod tests {
             clippy_warnings: vec![],
             unsafe_count: 5,
             idiomatic_score: 40,
+            diff_test_passed: None,
+            diff_test_feedback: vec![],
             passed: false,
         };
 

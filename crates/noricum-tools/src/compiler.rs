@@ -106,17 +106,15 @@ pub fn run_executable(exe_path: &Path, args: &[&str]) -> Result<CompileResult, T
 pub fn count_unsafe_blocks(rust_source: &str) -> u32 {
     // Simple heuristic: count occurrences of "unsafe {" and "unsafe fn"
     // A proper implementation would use tree-sitter, but this works for scoring.
-    let mut count = 0u32;
-    for line in rust_source.lines() {
-        let trimmed = line.trim();
-        if trimmed.contains("unsafe {") || trimmed.contains("unsafe{") {
-            count += 1;
-        }
-        if trimmed.starts_with("unsafe fn ") || trimmed.contains(" unsafe fn ") {
-            count += 1;
-        }
-    }
-    count
+    rust_source
+        .lines()
+        .map(str::trim)
+        .map(|line| {
+            let has_block = line.contains("unsafe {") || line.contains("unsafe{");
+            let has_fn = line.starts_with("unsafe fn ") || line.contains(" unsafe fn ");
+            u32::from(has_block) + u32::from(has_fn)
+        })
+        .sum()
 }
 
 #[cfg(test)]

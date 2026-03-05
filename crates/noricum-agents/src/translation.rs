@@ -2,6 +2,9 @@
 ///
 /// Takes the original C source, optional C2Rust mechanical translation output,
 /// and the analysis results to produce high-quality Rust code.
+/// When relevant patterns are available from the PatternStore, they are included
+/// as few-shot examples in the prompt.
+use noricum_ir::pattern_store::MigrationPattern;
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::providers::anthropic;
@@ -15,21 +18,9 @@ const TRANSLATION_PREAMBLE: &str = include_str!("../../../prompts/translation.md
 
 /// Translate a C function to safe, idiomatic Rust.
 ///
-/// Uses Claude API with the original C source, optional C2Rust output, and prior
-/// analysis to produce the best possible Rust translation.
-///
-/// # Arguments
-/// * `client` - Anthropic API client
-/// * `model` - Model identifier (e.g., "claude-sonnet-4-0")
-/// * `c_source` - Original C source code
-/// * `c2rust_output` - Optional C2Rust mechanical translation (unsafe Rust)
-/// * `analysis` - Prior analysis of the C function
-///
-/// # Returns
-/// The translated Rust source code as a `String`.
-///
-/// # Errors
-/// Returns `AgentError::Provider` if the LLM call fails.
+/// Uses Claude API with the original C source, optional C2Rust output, prior
+/// analysis, and relevant migration patterns (RAG) to produce the best possible
+/// Rust translation.
 pub async fn translate_function(
     client: &anthropic::Client,
     model: &str,
@@ -37,7 +28,24 @@ pub async fn translate_function(
     c2rust_output: Option<&str>,
     analysis: &AnalysisResult,
 ) -> Result<String, AgentError> {
-    info!(model, difficulty = %analysis.difficulty, "starting translation");
+    translate_function_with_patterns(client, model, c_source, c2rust_output, analysis, &[]).await
+}
+
+/// Translate with explicit pattern context (for testability and orchestrator integration).
+pub async fn translate_function_with_patterns(
+    client: &anthropic::Client,
+    model: &str,
+    c_source: &str,
+    c2rust_output: Option<&str>,
+    analysis: &AnalysisResult,
+    patterns: &[&MigrationPattern],
+) -> Result<String, AgentError> {
+    info!(
+        model,
+        difficulty = %analysis.difficulty,
+        pattern_count = patterns.len(),
+        "starting translation"
+    );
 
     let agent = client
         .agent(model)
@@ -58,6 +66,16 @@ pub async fn translate_function(
         user_message.push_str(&format!(
             "\n## C2Rust output (unsafe Rust)\n```rust\n{c2rust}\n```\n"
         ));
+    }
+
+    if !patterns.is_empty() {
+        user_message.push_str("\n## Relevant migration patterns (examples from past translations)\n");
+        for pattern in patterns {
+            user_message.push_str(&format!(
+                "\n### Pattern: {}\nC:\n```c\n{}\n```\nRust:\n```rust\n{}\n```\n",
+                pattern.name, pattern.c_pattern, pattern.rust_pattern
+            ));
+        }
     }
 
     user_message

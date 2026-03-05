@@ -1051,6 +1051,7 @@ dependencies = [
  "noricum-ir",
  "noricum-tools",
  "noricum-validation",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1130,6 +1131,8 @@ name = "noricum-workspace-tests"
 version = "0.1.0"
 dependencies = [
  "noricum-tools",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

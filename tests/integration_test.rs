@@ -5,20 +5,18 @@
 
 use std::process::Command;
 
+fn noricum_cmd() -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["run", "-p", "noricum-cli", "--bin", "noricum", "--"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"));
+    cmd
+}
+
 /// Test that the `noricum` CLI binary can be built and run with `--help`.
 #[test]
 fn test_cli_help() {
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "-p",
-            "noricum-cli",
-            "--bin",
-            "noricum",
-            "--",
-            "--help",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    let output = noricum_cmd()
+        .arg("--help")
         .output()
         .expect("failed to run noricum --help");
 
@@ -45,18 +43,8 @@ fn test_cli_help() {
 /// Test that `noricum analyze tests/fixtures/simple/add.c` returns "Easy".
 #[test]
 fn test_analyze_add_c() {
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "-p",
-            "noricum-cli",
-            "--bin",
-            "noricum",
-            "--",
-            "analyze",
-            "tests/fixtures/simple/add.c",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    let output = noricum_cmd()
+        .args(["analyze", "tests/fixtures/simple/add.c"])
         .output()
         .expect("failed to run noricum analyze");
 
@@ -70,6 +58,182 @@ fn test_analyze_add_c() {
         stdout.contains("Easy"),
         "add.c should be classified as Easy, got: {stdout}"
     );
+}
+
+/// Test sync migration (--no-llm) of a simple file.
+#[test]
+fn test_migrate_sync_simple() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = noricum_cmd()
+        .args([
+            "migrate",
+            "tests/fixtures/simple/add.c",
+            "--no-llm",
+            "--output",
+        ])
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run noricum migrate --no-llm");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "migrate --no-llm should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("Validated"), "should reach Validated state");
+    assert!(
+        stdout.contains("fn add"),
+        "output should contain translated function"
+    );
+
+    // Check that the .rs file was written
+    let output_file = tmp.path().join("add.rs");
+    assert!(output_file.exists(), "add.rs should be written to output dir");
+    let content = std::fs::read_to_string(&output_file).unwrap();
+    assert!(content.contains("fn add"));
+}
+
+/// Test sync migration with JSON output.
+#[test]
+fn test_migrate_sync_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = noricum_cmd()
+        .args([
+            "migrate",
+            "tests/fixtures/simple/add.c",
+            "--no-llm",
+            "--json",
+            "--output",
+        ])
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run noricum migrate --json");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "migrate --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // JSON output should be parseable
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
+    assert_eq!(parsed["name"], "add");
+    assert_eq!(parsed["state"], "Validated");
+    assert!(parsed["rust_output"].is_string());
+}
+
+/// Test sync migration of a directory.
+#[test]
+fn test_migrate_sync_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = noricum_cmd()
+        .args([
+            "migrate",
+            "tests/fixtures/simple",
+            "--no-llm",
+            "--output",
+        ])
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run noricum migrate directory");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "migrate directory should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("Migration complete"),
+        "should show migration summary"
+    );
+    assert!(
+        stdout.contains("Total functions"),
+        "should show total function count"
+    );
+}
+
+/// Test sync migration with --diff-test flag.
+#[test]
+fn test_migrate_sync_with_diff_test() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = noricum_cmd()
+        .args([
+            "migrate",
+            "tests/fixtures/simple/add.c",
+            "--no-llm",
+            "--diff-test",
+            "--output",
+        ])
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run noricum migrate --diff-test");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "migrate --diff-test should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("Differential Test"),
+        "should show diff test section"
+    );
+    assert!(
+        stdout.contains("PASSED") || stdout.contains("FAILED"),
+        "should show diff test result"
+    );
+}
+
+/// Test that analyzing a complex file with pointers reports Medium/Hard difficulty.
+#[test]
+fn test_analyze_complex_difficulty() {
+    // Write a temporary complex C file
+    let tmp = tempfile::tempdir().unwrap();
+    let c_file = tmp.path().join("complex.c");
+    std::fs::write(
+        &c_file,
+        r#"
+void* generic_alloc(void *ctx, size_t size) {
+    void *ptr = malloc(size);
+    if (!ptr) return NULL;
+    memset(ptr, 0, size);
+    return ptr;
+}
+"#,
+    )
+    .unwrap();
+
+    let output = noricum_cmd()
+        .args(["analyze"])
+        .arg(&c_file)
+        .output()
+        .expect("failed to run noricum analyze");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("Hard"),
+        "void* function should be classified as Hard, got: {stdout}"
+    );
+}
+
+/// Test doctor command outputs expected checks.
+#[test]
+fn test_doctor_output() {
+    let output = noricum_cmd()
+        .arg("doctor")
+        .output()
+        .expect("failed to run noricum doctor");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("C compiler"));
+    assert!(stdout.contains("Rust compiler"));
+    assert!(stdout.contains("ANTHROPIC_API_KEY"));
 }
 
 /// Test differential testing with add.c and a known-good Rust translation.
@@ -127,4 +291,32 @@ fn main() {
     assert!(result.c_compiled);
     assert!(result.rust_compiled);
     assert!(!result.passed, "mismatched outputs should fail");
+}
+
+/// Test that migrate --no-llm on multiple fixtures produces consistent results.
+#[test]
+fn test_migrate_multiple_fixtures() {
+    let fixtures = ["add.c", "power.c", "gcd.c", "factorial.c", "fibonacci.c"];
+
+    for fixture in &fixtures {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture_path = format!("tests/fixtures/simple/{fixture}");
+        let output = noricum_cmd()
+            .args(["migrate", &fixture_path, "--no-llm", "--output"])
+            .arg(tmp.path())
+            .output()
+            .unwrap_or_else(|_| panic!("failed to migrate {fixture}"));
+
+        assert!(
+            output.status.success(),
+            "{fixture} migration should succeed, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Validated") || stdout.contains("Repairing"),
+            "{fixture} should produce output, got: {stdout}"
+        );
+    }
 }

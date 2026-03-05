@@ -62,12 +62,42 @@ pub struct FunctionUnit {
     pub dependencies: Vec<String>,
     /// Compiler errors from last attempt
     pub last_errors: Vec<String>,
+    /// Diff test feedback from last attempt (behavioral mismatch details)
+    pub last_diff_feedback: Vec<String>,
     /// Idiomatic score (0-100)
     pub idiomatic_score: Option<u32>,
     /// Number of unsafe blocks in current output
     pub unsafe_count: Option<u32>,
     /// Generated equivalence test code (if any)
     pub generated_tests: Option<String>,
+    /// Migration metrics (timing, costs, repair iterations)
+    #[serde(default)]
+    pub metrics: MigrationMetrics,
+}
+
+/// Metrics collected during migration of a single function.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MigrationMetrics {
+    /// Total wall-clock time in milliseconds
+    pub total_ms: u64,
+    /// Time spent on analysis agent (ms)
+    pub analysis_ms: u64,
+    /// Time spent on translation agent (ms)
+    pub translation_ms: u64,
+    /// Time spent on repair iterations total (ms)
+    pub repair_ms: u64,
+    /// Time spent on test generation (ms)
+    pub test_gen_ms: u64,
+    /// Number of repair iterations used
+    pub repair_iterations: u32,
+    /// Number of LLM API calls made
+    pub llm_calls: u32,
+    /// C source lines of code
+    pub c_lines: u32,
+    /// Rust output lines of code
+    pub rust_lines: u32,
+    /// Whether diff test was run and passed
+    pub diff_test_passed: Option<bool>,
 }
 
 impl FunctionUnit {
@@ -82,9 +112,11 @@ impl FunctionUnit {
             difficulty: None,
             dependencies: Vec::new(),
             last_errors: Vec::new(),
+            last_diff_feedback: Vec::new(),
             idiomatic_score: None,
             unsafe_count: None,
             generated_tests: None,
+            metrics: MigrationMetrics::default(),
         }
     }
 }
