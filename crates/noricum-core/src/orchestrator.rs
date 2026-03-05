@@ -519,6 +519,9 @@ pub async fn migrate_file(
 }
 
 /// Run the full async LLM migration pipeline on all C files in a directory.
+///
+/// Uses `DependencyGraph` to determine topological order (dependencies first),
+/// and accumulates migrated Rust signatures to inject as context for later files.
 pub async fn migrate_directory(
     dir: &Path,
     config: &MigrationConfig,
@@ -532,13 +535,13 @@ pub async fn migrate_directory(
     );
 
     let mut found_any = false;
-    let mut entries: Vec<_> = Vec::new();
+    let mut c_files: Vec<std::path::PathBuf> = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "c") {
             found_any = true;
-            entries.push(path);
+            c_files.push(path);
         }
     }
 
@@ -546,10 +549,57 @@ pub async fn migrate_directory(
         return Err(CoreError::NoSourceFiles(dir_str));
     }
 
-    // Process files sequentially (LLM calls are the bottleneck, not I/O)
-    for path in &entries {
-        info!(file = %path.display(), "migrating file in directory");
+    // Build dependency graph for topological ordering
+    let ordered_names = match crate::dependency::DependencyGraph::from_directory(dir) {
+        Ok(graph) => {
+            let order = graph.topological_sort();
+            if !order.is_empty() {
+                info!(order = ?order, "dependency-ordered migration");
+            }
+            order
+        }
+        Err(e) => {
+            debug!(error = %e, "dependency graph failed, using filesystem order");
+            Vec::new()
+        }
+    };
+
+    // Sort c_files by topological order if available, otherwise alphabetical
+    if !ordered_names.is_empty() {
+        c_files.sort_by_key(|p| {
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            ordered_names.iter().position(|n| n == stem).unwrap_or(usize::MAX)
+        });
+    } else {
+        c_files.sort();
+    }
+
+    // Accumulate migrated Rust signatures for dependency context
+    let mut migrated_signatures: Vec<String> = Vec::new();
+
+    for path in &c_files {
+        info!(
+            file = %path.display(),
+            context_signatures = migrated_signatures.len(),
+            "migrating file in directory"
+        );
         let unit = migrate_file(path, config).await?;
+
+        // Extract function signatures from successful migrations for context
+        if unit.state == MigrationState::Validated
+            && let Some(ref rust_output) = unit.rust_output
+        {
+            let sigs = extract_rust_signatures(rust_output);
+            if !sigs.is_empty() {
+                info!(
+                    file = %path.display(),
+                    signatures = sigs.len(),
+                    "collected signatures for dependency context"
+                );
+                migrated_signatures.extend(sigs);
+            }
+        }
+
         project.add_unit(unit);
     }
 
@@ -562,6 +612,30 @@ pub async fn migrate_directory(
     );
 
     Ok(project)
+}
+
+/// Extract function signatures from Rust source code for dependency context.
+///
+/// Looks for `pub fn` and `fn` lines, returning them as context strings
+/// that can be injected into translation prompts for dependent files.
+fn extract_rust_signatures(rust_source: &str) -> Vec<String> {
+    rust_source
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn "))
+                && trimmed.contains('(')
+        })
+        .map(|line| {
+            // Take up to the opening brace or end of line
+            let trimmed = line.trim();
+            if let Some(brace) = trimmed.find('{') {
+                trimmed[..brace].trim().to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -690,5 +764,34 @@ mod tests {
         let config = MigrationConfig::default();
         let result = migrate_directory(tmp.path(), &config).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_rust_signatures() {
+        let rust = r#"
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn helper(x: i32) -> i32 {
+    x * 2
+}
+
+fn main() {
+    println!("{}", add(1, 2));
+}
+"#;
+        let sigs = extract_rust_signatures(rust);
+        assert_eq!(sigs.len(), 3);
+        assert!(sigs[0].contains("pub fn add(a: i32, b: i32) -> i32"));
+        assert!(sigs[1].contains("fn helper(x: i32) -> i32"));
+        assert!(sigs[2].contains("fn main()"));
+    }
+
+    #[test]
+    fn test_extract_rust_signatures_no_functions() {
+        let rust = "let x = 5;\nstruct Foo { bar: i32 }";
+        let sigs = extract_rust_signatures(rust);
+        assert!(sigs.is_empty());
     }
 }

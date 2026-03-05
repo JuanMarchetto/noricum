@@ -293,6 +293,84 @@ fn main() {
     assert!(!result.passed, "mismatched outputs should fail");
 }
 
+/// Test that --report flag generates an HTML file.
+#[test]
+fn test_migrate_sync_with_report() {
+    let tmp = tempfile::tempdir().unwrap();
+    let report_path = tmp.path().join("report.html");
+    let output = noricum_cmd()
+        .args([
+            "migrate",
+            "tests/fixtures/simple/add.c",
+            "--no-llm",
+            "--report",
+        ])
+        .arg(&report_path)
+        .arg("--output")
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run noricum migrate --report");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "migrate --report should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("HTML report"),
+        "should mention HTML report in output"
+    );
+    assert!(report_path.exists(), "HTML report file should exist");
+    let html = std::fs::read_to_string(&report_path).unwrap();
+    assert!(html.contains("<!DOCTYPE html>"));
+    assert!(html.contains("Noricum Migration Report"));
+}
+
+/// Test that hash_table.c is properly classified as complex (needs LLM).
+#[test]
+fn test_analyze_hash_table() {
+    let output = noricum_cmd()
+        .args(["analyze", "tests/fixtures/medium/hash_table.c"])
+        .output()
+        .expect("failed to run noricum analyze");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("Hard"),
+        "hash_table.c should be classified as Hard, got: {stdout}"
+    );
+}
+
+/// Test that miniz_test.c compiles as C (sanity check for diff testing).
+#[test]
+fn test_miniz_test_c_compiles() {
+    let c_source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/miniz/miniz_test.c"),
+    )
+    .expect("failed to read miniz_test.c");
+
+    // Just verify it has main and compiles
+    assert!(c_source.contains("int main("));
+
+    // Compile it
+    let tmp = tempfile::tempdir().unwrap();
+    let c_file = tmp.path().join("miniz_test.c");
+    std::fs::write(&c_file, &c_source).unwrap();
+    let output = std::process::Command::new("cc")
+        .args(["-std=c11", "-o"])
+        .arg(tmp.path().join("miniz_test"))
+        .arg(&c_file)
+        .output()
+        .expect("failed to compile miniz_test.c");
+    assert!(
+        output.status.success(),
+        "miniz_test.c should compile, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Test that migrate --no-llm on multiple fixtures produces consistent results.
 #[test]
 fn test_migrate_multiple_fixtures() {

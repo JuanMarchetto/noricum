@@ -13,6 +13,7 @@ noricum-core = { workspace = true }
 noricum-tools = { workspace = true }
 noricum-validation = { workspace = true }
 tokio = { workspace = true }
+tempfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

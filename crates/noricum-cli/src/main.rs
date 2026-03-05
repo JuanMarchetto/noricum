@@ -1,3 +1,5 @@
+mod report;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -37,6 +39,9 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Generate HTML report at this path
+        #[arg(long)]
+        report: Option<PathBuf>,
     },
     /// Analyze a C file and report difficulty classification
     Analyze {
@@ -83,7 +88,8 @@ async fn main() {
             output,
             diff_test,
             json,
-        } => cmd_migrate(&path, no_llm, &output, diff_test, json).await,
+            report,
+        } => cmd_migrate(&path, no_llm, &output, diff_test, json, report.as_deref()).await,
         Commands::Analyze { path } => cmd_analyze(&path),
         Commands::Doctor => cmd_doctor(),
         Commands::Bench { fixtures, json } => cmd_bench(&fixtures, json).await,
@@ -98,13 +104,13 @@ async fn main() {
     }
 }
 
-async fn cmd_migrate(path: &Path, no_llm: bool, output_dir: &Path, run_diff: bool, json: bool) -> Result<()> {
+async fn cmd_migrate(path: &Path, no_llm: bool, output_dir: &Path, run_diff: bool, json: bool, report_path: Option<&Path>) -> Result<()> {
     let path = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
     if no_llm {
-        return cmd_migrate_sync(&path, output_dir, run_diff, json);
+        return cmd_migrate_sync(&path, output_dir, run_diff, json, report_path);
     }
 
     let config = MigrationConfig::default();
@@ -116,6 +122,10 @@ async fn cmd_migrate(path: &Path, no_llm: bool, output_dir: &Path, run_diff: boo
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
         print_unit_result(&unit, output_dir, run_diff, json)?;
+
+        if let Some(report) = report_path {
+            write_html_report_single(&unit, report)?;
+        }
     } else if path.is_dir() {
         info!(dir = %path.display(), "migrating directory");
         let project = noricum_core::orchestrator::migrate_directory(&path, &config)
@@ -142,6 +152,10 @@ async fn cmd_migrate(path: &Path, no_llm: bool, output_dir: &Path, run_diff: boo
         for unit in &project.units {
             write_unit_output(unit, output_dir)?;
         }
+
+        if let Some(report) = report_path {
+            write_html_report_project(&project.units, &project.name, report)?;
+        }
     } else {
         anyhow::bail!("path is neither a file nor directory: {}", path.display());
     }
@@ -149,13 +163,17 @@ async fn cmd_migrate(path: &Path, no_llm: bool, output_dir: &Path, run_diff: boo
     Ok(())
 }
 
-fn cmd_migrate_sync(path: &Path, output_dir: &Path, run_diff: bool, json: bool) -> Result<()> {
+fn cmd_migrate_sync(path: &Path, output_dir: &Path, run_diff: bool, json: bool, report_path: Option<&Path>) -> Result<()> {
     if path.is_file() {
         info!(file = %path.display(), "migrating single file (sync, no LLM)");
         let unit = noricum_core::orchestrator::migrate_file_sync(path)
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
         print_unit_result(&unit, output_dir, run_diff, json)?;
+
+        if let Some(report) = report_path {
+            write_html_report_single(&unit, report)?;
+        }
     } else if path.is_dir() {
         info!(dir = %path.display(), "migrating directory (sync, no LLM)");
         let project = noricum_core::orchestrator::migrate_directory_sync(path)
@@ -179,6 +197,10 @@ fn cmd_migrate_sync(path: &Path, output_dir: &Path, run_diff: bool, json: bool) 
 
         for unit in &project.units {
             write_unit_output(unit, output_dir)?;
+        }
+
+        if let Some(report) = report_path {
+            write_html_report_project(&project.units, &project.name, report)?;
         }
     } else {
         anyhow::bail!("path is neither a file nor directory: {}", path.display());
@@ -259,6 +281,26 @@ fn print_unit_result(unit: &FunctionUnit, output_dir: &Path, run_diff: bool, jso
         println!("{tests}");
     }
 
+    Ok(())
+}
+
+fn write_html_report_single(unit: &FunctionUnit, report_path: &Path) -> Result<()> {
+    if let Some(parent) = report_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let html = report::generate_html_report(unit);
+    std::fs::write(report_path, &html)?;
+    println!("  HTML report: {}", report_path.display());
+    Ok(())
+}
+
+fn write_html_report_project(units: &[FunctionUnit], project_name: &str, report_path: &Path) -> Result<()> {
+    if let Some(parent) = report_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let html = report::generate_project_html_report(units, project_name);
+    std::fs::write(report_path, &html)?;
+    println!("  HTML report: {}", report_path.display());
     Ok(())
 }
 

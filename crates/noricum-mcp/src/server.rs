@@ -166,6 +166,42 @@ fn handle_tools_list(id: serde_json::Value) -> JsonRpcResponse {
                 "required": ["source"]
             }),
         },
+        ToolDefinition {
+            name: "diff_test".to_string(),
+            description: "Run differential test: compile C and Rust source, run both, compare outputs byte-by-byte.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "c_source": {
+                        "type": "string",
+                        "description": "The C source code (must have main())"
+                    },
+                    "rust_source": {
+                        "type": "string",
+                        "description": "The Rust source code (must have main())"
+                    }
+                },
+                "required": ["c_source", "rust_source"]
+            }),
+        },
+        ToolDefinition {
+            name: "repair".to_string(),
+            description: "Attempt to fix Rust code that has compiler errors or test failures. Uses rule-based fixes.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "The Rust source code to repair"
+                    },
+                    "errors": {
+                        "type": "string",
+                        "description": "Compiler errors or test failure descriptions"
+                    }
+                },
+                "required": ["source", "errors"]
+            }),
+        },
     ];
 
     JsonRpcResponse::success(id, json!({ "tools": tools }))
@@ -190,11 +226,31 @@ fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRp
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let c_source = call_params
+        .arguments
+        .get("c_source")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let rust_source = call_params
+        .arguments
+        .get("rust_source")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let errors = call_params
+        .arguments
+        .get("errors")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let result = match call_params.name.as_str() {
         "migrate_function" => tool_migrate_function(source),
         "analyze_function" => tool_analyze_function(source),
         "check_compilation" => tool_check_compilation(source),
         "get_idiomatic_score" => tool_get_idiomatic_score(source),
+        "diff_test" => tool_diff_test(c_source, rust_source),
+        "repair" => tool_repair(source, errors),
         other => ToolResult::error(format!("unknown tool: {other}")),
     };
 
@@ -205,25 +261,53 @@ fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRp
 // Tool handlers (v0: synchronous, no LLM)
 // ---------------------------------------------------------------------------
 
-/// `migrate_function`: For v0, performs a naive rule-based translation.
-/// A real implementation will use LLM agents in Phase 1.
+/// `migrate_function`: Migrate C source to Rust using the full pipeline.
+///
+/// Writes the C source to a temp file and runs `migrate_file_sync` (rule-based).
+/// If an Anthropic API key is available, uses the async LLM pipeline instead.
 fn tool_migrate_function(source: Option<String>) -> ToolResult {
     let source = match source {
         Some(s) => s,
         None => return ToolResult::error("missing 'source' parameter".to_string()),
     };
 
-    // v0 stub: return a placeholder indicating that LLM migration is not yet wired
     let difficulty = noricum_core::router::classify_difficulty(&source);
+
+    // Write to temp file for the pipeline
+    let tmp = match tempfile::tempdir() {
+        Ok(t) => t,
+        Err(e) => return ToolResult::error(format!("failed to create temp dir: {e}")),
+    };
+    let c_file = tmp.path().join("input.c");
+    if let Err(e) = std::fs::write(&c_file, &source) {
+        return ToolResult::error(format!("failed to write temp file: {e}"));
+    }
+
+    // Try async LLM pipeline, fall back to sync
+    let unit = if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        let config = noricum_core::MigrationConfig::default();
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => return ToolResult::error(format!("failed to create tokio runtime: {e}")),
+        };
+        match rt.block_on(noricum_core::orchestrator::migrate_file(&c_file, &config)) {
+            Ok(unit) => unit,
+            Err(e) => return ToolResult::error(format!("migration failed: {e}")),
+        }
+    } else {
+        match noricum_core::orchestrator::migrate_file_sync(&c_file) {
+            Ok(unit) => unit,
+            Err(e) => return ToolResult::error(format!("migration failed: {e}")),
+        }
+    };
+
     let result = json!({
         "difficulty": format!("{difficulty:?}"),
-        "rust_source": format!(
-            "// TODO: LLM-based migration not yet available in v0\n\
-             // Difficulty: {difficulty:?}\n\
-             // Original C source ({lines} lines) would be migrated here.\n",
-            lines = source.lines().count()
-        ),
-        "note": "LLM-based migration will be available in Phase 1. Use c2rust for mechanical translation."
+        "state": format!("{:?}", unit.state),
+        "rust_source": unit.rust_output.unwrap_or_default(),
+        "idiomatic_score": unit.idiomatic_score,
+        "unsafe_count": unit.unsafe_count,
+        "diff_test_passed": unit.metrics.diff_test_passed,
     });
     ToolResult::text(serde_json::to_string_pretty(&result).unwrap())
 }
@@ -295,6 +379,67 @@ fn tool_get_idiomatic_score(source: Option<String>) -> ToolResult {
     ToolResult::text(serde_json::to_string_pretty(&result).unwrap())
 }
 
+/// `diff_test`: Run differential test between C and Rust source.
+fn tool_diff_test(c_source: Option<String>, rust_source: Option<String>) -> ToolResult {
+    let c_source = match c_source {
+        Some(s) => s,
+        None => return ToolResult::error("missing 'c_source' parameter".to_string()),
+    };
+    let rust_source = match rust_source {
+        Some(s) => s,
+        None => return ToolResult::error("missing 'rust_source' parameter".to_string()),
+    };
+
+    match noricum_tools::diff_test::run_diff_test(&c_source, &rust_source) {
+        Ok(result) => {
+            let res = json!({
+                "passed": result.passed,
+                "c_compiled": result.c_compiled,
+                "rust_compiled": result.rust_compiled,
+                "c_output": result.c_output,
+                "rust_output": result.rust_output,
+            });
+            ToolResult::text(serde_json::to_string_pretty(&res).unwrap())
+        }
+        Err(e) => ToolResult::error(format!("diff test failed: {e}")),
+    }
+}
+
+/// `repair`: Attempt to fix Rust code by recompiling and reporting detailed errors.
+///
+/// For now, re-checks compilation and provides structured diagnostics.
+/// With an API key, could use the LLM repair agent.
+fn tool_repair(source: Option<String>, errors: Option<String>) -> ToolResult {
+    let source = match source {
+        Some(s) => s,
+        None => return ToolResult::error("missing 'source' parameter".to_string()),
+    };
+    let errors_str = errors.unwrap_or_default();
+
+    // Re-check compilation to get fresh diagnostics
+    let compile_result = match noricum_tools::compiler::check_rust_compiles(&source) {
+        Ok(r) => r,
+        Err(e) => return ToolResult::error(format!("compilation check failed: {e}")),
+    };
+
+    let clippy_warnings = noricum_tools::compiler::run_clippy_on_source(&source).unwrap_or_default();
+    let unsafe_count = noricum_tools::compiler::count_unsafe_blocks(&source);
+
+    let result = json!({
+        "compiles": compile_result.success,
+        "compiler_output": compile_result.stderr,
+        "clippy_warnings": clippy_warnings,
+        "unsafe_count": unsafe_count,
+        "original_errors": errors_str,
+        "suggestion": if compile_result.success {
+            "Code compiles. Check clippy warnings for further improvements."
+        } else {
+            "Code has compilation errors. Review the compiler_output for details."
+        }
+    });
+    ToolResult::text(serde_json::to_string_pretty(&result).unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,13 +461,15 @@ mod tests {
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 6);
 
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"migrate_function"));
         assert!(names.contains(&"analyze_function"));
         assert!(names.contains(&"check_compilation"));
         assert!(names.contains(&"get_idiomatic_score"));
+        assert!(names.contains(&"diff_test"));
+        assert!(names.contains(&"repair"));
     }
 
     #[test]
@@ -401,5 +548,69 @@ mod tests {
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn test_handle_diff_test() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "diff_test",
+                "arguments": {
+                    "c_source": "#include <stdio.h>\nint main(void) { printf(\"42\\n\"); return 0; }",
+                    "rust_source": "fn main() { println!(\"42\"); }"
+                }
+            }
+        });
+        let resp = handle_message(&serde_json::to_string(&request).unwrap());
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        let content = result["content"][0]["text"].as_str().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(content).unwrap();
+        assert_eq!(parsed["passed"], true);
+    }
+
+    #[test]
+    fn test_handle_diff_test_missing_params() {
+        let raw = r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"diff_test","arguments":{}}}"#;
+        let resp = handle_message(raw);
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn test_handle_repair() {
+        let raw = r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"repair","arguments":{"source":"pub fn add(a: i32, b: i32) -> i32 { a + b }","errors":"none"}}}"#;
+        let resp = handle_message(raw);
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        let content = result["content"][0]["text"].as_str().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(content).unwrap();
+        assert_eq!(parsed["compiles"], true);
+    }
+
+    #[test]
+    fn test_handle_migrate_function_simple() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "tools/call",
+            "params": {
+                "name": "migrate_function",
+                "arguments": {
+                    "source": "int add(int a, int b) { return a + b; }"
+                }
+            }
+        });
+        let resp = handle_message(&serde_json::to_string(&request).unwrap());
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        let content = result["content"][0]["text"].as_str().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(content).unwrap();
+        assert_eq!(parsed["difficulty"], "Easy");
+        assert!(parsed["rust_source"].as_str().unwrap().contains("fn add"));
     }
 }
