@@ -27,7 +27,10 @@ pub fn try_translate(c_source: &str, function_name: &str) -> Option<String> {
         } else if let Some(rust_fn) = translate_function(func) {
             rust_parts.push(rust_fn);
         } else {
-            debug!(function = func.name, "function too complex for rule-based translation");
+            debug!(
+                function = func.name,
+                "function too complex for rule-based translation"
+            );
             return None;
         }
     }
@@ -118,8 +121,10 @@ fn try_parse_function_start(line: &str) -> Option<FuncSignature> {
     let name = parts.last()?.trim_start_matches('*').to_string();
     let return_type = parts[..parts.len() - 1].join(" ");
 
-    if ["typedef", "struct", "enum", "union", "if", "while", "for", "switch"]
-        .contains(&return_type.as_str())
+    if [
+        "typedef", "struct", "enum", "union", "if", "while", "for", "switch",
+    ]
+    .contains(&return_type.as_str())
     {
         return None;
     }
@@ -232,7 +237,10 @@ fn find_mutated_vars(body: &str) -> Vec<String> {
             if let Some(pos) = trimmed.find(op) {
                 if *op == "=" {
                     let prev_is_compound = pos > 0
-                        && matches!(trimmed.as_bytes()[pos - 1], b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%');
+                        && matches!(
+                            trimmed.as_bytes()[pos - 1],
+                            b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%'
+                        );
                     let next_is_eq = pos + 1 < trimmed.len() && trimmed.as_bytes()[pos + 1] == b'=';
                     if prev_is_compound || next_is_eq {
                         continue;
@@ -249,8 +257,10 @@ fn find_mutated_vars(body: &str) -> Vec<String> {
         // x++, x--, ++x, --x
         let no_semi = trimmed.strip_suffix(';').unwrap_or(trimmed).trim();
         for var in [
-            no_semi.strip_suffix("++"), no_semi.strip_suffix("--"),
-            no_semi.strip_prefix("++"), no_semi.strip_prefix("--"),
+            no_semi.strip_suffix("++"),
+            no_semi.strip_suffix("--"),
+            no_semi.strip_prefix("++"),
+            no_semi.strip_prefix("--"),
         ]
         .into_iter()
         .flatten()
@@ -380,8 +390,8 @@ fn is_boolean_expr(expr: &str) -> bool {
 }
 
 const COMPLEX_MARKERS: &[&str] = &[
-    "malloc", "free(", "->", "void *", "goto ", "switch ",
-    "sizeof", "memcpy", "memset", "strcpy", "strcat",
+    "malloc", "free(", "->", "void *", "goto ", "switch ", "sizeof", "memcpy", "memset", "strcpy",
+    "strcat",
 ];
 
 fn is_complex(stmt: &str) -> bool {
@@ -414,9 +424,20 @@ fn translate_statement(stmt: &str) -> Option<String> {
 
     // Variable declaration
     for type_prefix in &[
-        "int ", "double ", "float ", "long ", "short ", "unsigned ",
-        "char ", "size_t ", "bool ", "_Bool ",
-        "int32_t ", "uint32_t ", "int64_t ", "uint64_t ",
+        "int ",
+        "double ",
+        "float ",
+        "long ",
+        "short ",
+        "unsigned ",
+        "char ",
+        "size_t ",
+        "bool ",
+        "_Bool ",
+        "int32_t ",
+        "uint32_t ",
+        "int64_t ",
+        "uint64_t ",
     ] {
         if stmt.starts_with(type_prefix) {
             return translate_var_decl(stmt);
@@ -434,11 +455,17 @@ fn translate_statement(stmt: &str) -> Option<String> {
     }
 
     // Simple assignment: x = expr;
-    if stmt.contains('=') && stmt.ends_with(';')
-        && !stmt.contains("==") && !stmt.contains("!=")
-        && !stmt.contains("+=") && !stmt.contains("-=")
-        && !stmt.contains("*=") && !stmt.contains("/=")
-        && !stmt.contains("%=") && !stmt.contains("<=") && !stmt.contains(">=")
+    if stmt.contains('=')
+        && stmt.ends_with(';')
+        && !stmt.contains("==")
+        && !stmt.contains("!=")
+        && !stmt.contains("+=")
+        && !stmt.contains("-=")
+        && !stmt.contains("*=")
+        && !stmt.contains("/=")
+        && !stmt.contains("%=")
+        && !stmt.contains("<=")
+        && !stmt.contains(">=")
     {
         let no_semi = stmt.strip_suffix(';')?.trim();
         let parts: Vec<&str> = no_semi.splitn(2, '=').collect();
@@ -467,7 +494,9 @@ fn translate_statement(stmt: &str) -> Option<String> {
                 let mut rust_args = Vec::new();
                 for arg in &args {
                     let t = arg.trim();
-                    if t.is_empty() { continue; }
+                    if t.is_empty() {
+                        continue;
+                    }
                     rust_args.push(translate_expr(t)?);
                 }
                 return Some(format!("{name}({});", rust_args.join(", ")));
@@ -516,8 +545,14 @@ fn split_args(s: &str) -> Vec<String> {
     let mut current = String::new();
     for ch in s.chars() {
         match ch {
-            '(' => { depth += 1; current.push(ch); }
-            ')' => { depth -= 1; current.push(ch); }
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
             ',' if depth == 0 => {
                 args.push(current.trim().to_string());
                 current = String::new();
@@ -534,7 +569,9 @@ fn split_args(s: &str) -> Vec<String> {
 
 fn translate_expr(expr: &str) -> Option<String> {
     let expr = expr.trim();
-    if expr.is_empty() { return None; }
+    if expr.is_empty() {
+        return None;
+    }
 
     // Boolean literals
     if expr == "true" || expr == "false" {
@@ -613,7 +650,9 @@ fn translate_expr(expr: &str) -> Option<String> {
             let mut rust_args = Vec::new();
             for arg in &args {
                 let t = arg.trim();
-                if t.is_empty() { continue; }
+                if t.is_empty() {
+                    continue;
+                }
                 rust_args.push(translate_expr(t)?);
             }
             return Some(format!("{name}({})", rust_args.join(", ")));
@@ -643,7 +682,8 @@ fn is_numeric_literal(s: &str) -> bool {
 }
 
 fn clean_numeric_literal(s: &str) -> String {
-    s.trim_end_matches(['l', 'L', 'u', 'U', 'f', 'F']).to_string()
+    s.trim_end_matches(['l', 'L', 'u', 'U', 'f', 'F'])
+        .to_string()
 }
 
 fn parens_balanced(s: &str) -> bool {
@@ -651,7 +691,12 @@ fn parens_balanced(s: &str) -> bool {
     for ch in s.chars() {
         match ch {
             '(' => depth += 1,
-            ')' => { depth -= 1; if depth < 0 { return false; } }
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
             _ => {}
         }
     }
@@ -688,7 +733,9 @@ fn try_translate_ternary(expr: &str) -> Option<String> {
     let then_expr = translate_expr(rest[..c_pos].trim())?;
     let else_expr = translate_expr(rest[c_pos + 3..].trim())?;
 
-    Some(format!("if {cond} {{ {then_expr} }} else {{ {else_expr} }}"))
+    Some(format!(
+        "if {cond} {{ {then_expr} }} else {{ {else_expr} }}"
+    ))
 }
 
 // --- Variable declarations ---
@@ -737,10 +784,7 @@ fn default_for_type(rust_type: &str) -> &str {
 // --- Printf translation ---
 
 fn translate_printf(stmt: &str) -> Option<String> {
-    let inner = stmt
-        .strip_prefix("printf(")?
-        .strip_suffix(");")?
-        .trim();
+    let inner = stmt.strip_prefix("printf(")?.strip_suffix(");")?.trim();
 
     let fmt_start = inner.find('"')?;
     let fmt_end = inner[fmt_start + 1..].find('"')? + fmt_start + 1;
@@ -748,11 +792,24 @@ fn translate_printf(stmt: &str) -> Option<String> {
 
     // Longest specifiers first to avoid partial matches (e.g. %lld before %d)
     const FMT_MAP: &[(&str, &str)] = &[
-        ("%lld", "{}"), ("%llu", "{}"), ("%ld", "{}"), ("%lu", "{}"),
-        ("%lf", "{}"),  ("%zu", "{}"),  ("%d", "{}"),  ("%i", "{}"),
-        ("%u", "{}"),   ("%f", "{}"),   ("%s", "{}"),  ("%c", "{}"),
-        ("%x", "{:x}"), ("%X", "{:X}"), ("%o", "{:o}"), ("%p", "{:p}"),
-        ("%%", "%"),    ("\\n", ""),
+        ("%lld", "{}"),
+        ("%llu", "{}"),
+        ("%ld", "{}"),
+        ("%lu", "{}"),
+        ("%lf", "{}"),
+        ("%zu", "{}"),
+        ("%d", "{}"),
+        ("%i", "{}"),
+        ("%u", "{}"),
+        ("%f", "{}"),
+        ("%s", "{}"),
+        ("%c", "{}"),
+        ("%x", "{:x}"),
+        ("%X", "{:X}"),
+        ("%o", "{:o}"),
+        ("%p", "{:p}"),
+        ("%%", "%"),
+        ("\\n", ""),
     ];
     let mut rust_fmt = fmt_str.to_string();
     for &(from, to) in FMT_MAP {
@@ -770,7 +827,10 @@ fn translate_printf(stmt: &str) -> Option<String> {
         for arg in &args {
             rust_args.push(translate_expr(arg.trim())?);
         }
-        Some(format!("println!(\"{rust_fmt}\", {});", rust_args.join(", ")))
+        Some(format!(
+            "println!(\"{rust_fmt}\", {});",
+            rust_args.join(", ")
+        ))
     }
 }
 
@@ -811,7 +871,11 @@ fn translate_if_chain(lines: &[&str], start: usize, indent: &str) -> Option<(Str
             let body = translate_body(&body_str, &inner_indent)?;
             result.push_str(&format!(" else if {rust_cond} {{\n{body}\n{indent}}}"));
             let closing = lines[body_end].trim();
-            i = if closing.contains("else") { body_end } else { body_end + 1 };
+            i = if closing.contains("else") {
+                body_end
+            } else {
+                body_end + 1
+            };
         } else if t.contains("else") {
             let (body_str, body_end) = extract_block_body(lines, i)?;
             let body = translate_body(&body_str, &inner_indent)?;

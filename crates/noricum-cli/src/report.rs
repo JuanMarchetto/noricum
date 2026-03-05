@@ -314,7 +314,11 @@ mod tests {
 
     #[test]
     fn test_generate_html_report_basic() {
-        let unit = FunctionUnit::new("test_fn".into(), "test.c".into(), "int add(int a, int b) { return a + b; }".into());
+        let unit = FunctionUnit::new(
+            "test_fn".into(),
+            "test.c".into(),
+            "int add(int a, int b) { return a + b; }".into(),
+        );
         let html = generate_html_report(&unit);
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("test_fn"));
@@ -324,7 +328,11 @@ mod tests {
 
     #[test]
     fn test_generate_html_report_with_rust_output() {
-        let mut unit = FunctionUnit::new("add".into(), "add.c".into(), "int add(int a, int b) { return a + b; }".into());
+        let mut unit = FunctionUnit::new(
+            "add".into(),
+            "add.c".into(),
+            "int add(int a, int b) { return a + b; }".into(),
+        );
         unit.rust_output = Some("pub fn add(a: i32, b: i32) -> i32 { a + b }".into());
         unit.idiomatic_score = Some(95);
         unit.unsafe_count = Some(0);

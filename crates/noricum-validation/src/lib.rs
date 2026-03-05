@@ -72,39 +72,39 @@ pub fn validate(unit: &FunctionUnit) -> Result<ValidationResult, ValidationError
     );
 
     // Step 5: Differential test (only if code compiles and C source has main())
-    let (diff_test_passed, diff_test_feedback) =
-        if compile_result.success && unit.c_source.contains("int main(") {
-            match noricum_tools::diff_test::run_diff_test(&unit.c_source, rust_source) {
-                Ok(result) => {
-                    if result.passed {
-                        info!(function = %unit.name, "diff test passed");
-                        (Some(true), Vec::new())
+    let (diff_test_passed, diff_test_feedback) = if compile_result.success
+        && unit.c_source.contains("int main(")
+    {
+        match noricum_tools::diff_test::run_diff_test(&unit.c_source, rust_source) {
+            Ok(result) => {
+                if result.passed {
+                    info!(function = %unit.name, "diff test passed");
+                    (Some(true), Vec::new())
+                } else {
+                    let mut feedback = Vec::new();
+                    if !result.rust_compiled {
+                        feedback.push("Rust binary compilation failed (standalone)".to_string());
                     } else {
-                        let mut feedback = Vec::new();
-                        if !result.rust_compiled {
-                            feedback.push("Rust binary compilation failed (standalone)".to_string());
-                        } else {
-                            feedback.push(format!(
-                                "Output mismatch:\n  C output:    {:?}\n  Rust output: {:?}",
-                                result.c_output, result.rust_output
-                            ));
-                        }
-                        info!(function = %unit.name, "diff test FAILED");
-                        (Some(false), feedback)
+                        feedback.push(format!(
+                            "Output mismatch:\n  C output:    {:?}\n  Rust output: {:?}",
+                            result.c_output, result.rust_output
+                        ));
                     }
-                }
-                Err(e) => {
-                    info!(function = %unit.name, error = %e, "diff test skipped (tool error)");
-                    (None, Vec::new())
+                    info!(function = %unit.name, "diff test FAILED");
+                    (Some(false), feedback)
                 }
             }
-        } else {
-            (None, Vec::new())
-        };
+            Err(e) => {
+                info!(function = %unit.name, error = %e, "diff test skipped (tool error)");
+                (None, Vec::new())
+            }
+        }
+    } else {
+        (None, Vec::new())
+    };
 
-    let passed = compile_result.success
-        && idiomatic_score >= 60
-        && diff_test_passed.unwrap_or(true);
+    let passed =
+        compile_result.success && idiomatic_score >= 60 && diff_test_passed.unwrap_or(true);
 
     info!(
         function = %unit.name,
@@ -153,9 +153,24 @@ pub fn compute_idiomatic_score_from_source(
 
     // Positive signals: idiomatic Rust patterns
     let positive_patterns: &[&str] = &[
-        "Result<", "Option<", ".iter()", ".into()", "impl ", "From<", "Into<",
-        "enum ", ".collect()", ".map(", ".filter(", ".unwrap_or(", ".unwrap_or_else(",
-        "Vec<", "String", "HashMap<", "&[", "&str",
+        "Result<",
+        "Option<",
+        ".iter()",
+        ".into()",
+        "impl ",
+        "From<",
+        "Into<",
+        "enum ",
+        ".collect()",
+        ".map(",
+        ".filter(",
+        ".unwrap_or(",
+        ".unwrap_or_else(",
+        "Vec<",
+        "String",
+        "HashMap<",
+        "&[",
+        "&str",
     ];
     for pattern in positive_patterns {
         let count = rust_source.matches(pattern).count() as i32;
@@ -315,7 +330,10 @@ mod tests {
         let c = "int f() { return 0; }";
         let score = compute_idiomatic_score_from_source(0, 0, rust, c);
         // Base 100 - 2*3 (unwrap) - 1 (as cast) = 93
-        assert!(score < 100, "unwrap/as casts should reduce score, got {score}");
+        assert!(
+            score < 100,
+            "unwrap/as casts should reduce score, got {score}"
+        );
     }
 
     /// Simulate the full repair loop state machine: Refined -> Repairing(1..5) -> FallbackUnsafe

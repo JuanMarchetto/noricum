@@ -69,7 +69,8 @@ pub async fn translate_function_with_patterns(
     }
 
     if !patterns.is_empty() {
-        user_message.push_str("\n## Relevant migration patterns (examples from past translations)\n");
+        user_message
+            .push_str("\n## Relevant migration patterns (examples from past translations)\n");
         for pattern in patterns {
             user_message.push_str(&format!(
                 "\n### Pattern: {}\nC:\n```c\n{}\n```\nRust:\n```rust\n{}\n```\n",

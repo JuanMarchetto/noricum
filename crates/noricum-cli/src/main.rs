@@ -104,7 +104,14 @@ async fn main() {
     }
 }
 
-async fn cmd_migrate(path: &Path, no_llm: bool, output_dir: &Path, run_diff: bool, json: bool, report_path: Option<&Path>) -> Result<()> {
+async fn cmd_migrate(
+    path: &Path,
+    no_llm: bool,
+    output_dir: &Path,
+    run_diff: bool,
+    json: bool,
+    report_path: Option<&Path>,
+) -> Result<()> {
     let path = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
@@ -163,7 +170,13 @@ async fn cmd_migrate(path: &Path, no_llm: bool, output_dir: &Path, run_diff: boo
     Ok(())
 }
 
-fn cmd_migrate_sync(path: &Path, output_dir: &Path, run_diff: bool, json: bool, report_path: Option<&Path>) -> Result<()> {
+fn cmd_migrate_sync(
+    path: &Path,
+    output_dir: &Path,
+    run_diff: bool,
+    json: bool,
+    report_path: Option<&Path>,
+) -> Result<()> {
     if path.is_file() {
         info!(file = %path.display(), "migrating single file (sync, no LLM)");
         let unit = noricum_core::orchestrator::migrate_file_sync(path)
@@ -218,7 +231,12 @@ fn write_unit_output(unit: &FunctionUnit, output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn print_unit_result(unit: &FunctionUnit, output_dir: &Path, run_diff: bool, json: bool) -> Result<()> {
+fn print_unit_result(
+    unit: &FunctionUnit,
+    output_dir: &Path,
+    run_diff: bool,
+    json: bool,
+) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(unit)?);
         write_unit_output(unit, output_dir)?;
@@ -294,7 +312,11 @@ fn write_html_report_single(unit: &FunctionUnit, report_path: &Path) -> Result<(
     Ok(())
 }
 
-fn write_html_report_project(units: &[FunctionUnit], project_name: &str, report_path: &Path) -> Result<()> {
+fn write_html_report_project(
+    units: &[FunctionUnit],
+    project_name: &str,
+    report_path: &Path,
+) -> Result<()> {
     if let Some(parent) = report_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -343,7 +365,14 @@ async fn cmd_bench(fixtures_dir: &Path, json: bool) -> Result<()> {
         println!("Noricum Benchmark Report");
         println!("========================");
         println!("Fixtures: {}", fixtures_dir.display());
-        println!("Mode: {}", if use_llm { "LLM (async)" } else { "sync (no LLM)" });
+        println!(
+            "Mode: {}",
+            if use_llm {
+                "LLM (async)"
+            } else {
+                "sync (no LLM)"
+            }
+        );
         println!("Files: {}", c_files.len());
         println!();
     }

@@ -422,7 +422,8 @@ fn tool_repair(source: Option<String>, errors: Option<String>) -> ToolResult {
         Err(e) => return ToolResult::error(format!("compilation check failed: {e}")),
     };
 
-    let clippy_warnings = noricum_tools::compiler::run_clippy_on_source(&source).unwrap_or_default();
+    let clippy_warnings =
+        noricum_tools::compiler::run_clippy_on_source(&source).unwrap_or_default();
     let unsafe_count = noricum_tools::compiler::count_unsafe_blocks(&source);
 
     let result = json!({

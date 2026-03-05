@@ -79,9 +79,7 @@ pub async fn repair_function(
             .map(|(i, e)| format!("Error {}: {e}", i + 1))
             .collect::<Vec<_>>()
             .join("\n");
-        user_message.push_str(&format!(
-            "## Compiler errors\n```\n{errors_text}\n```\n\n"
-        ));
+        user_message.push_str(&format!("## Compiler errors\n```\n{errors_text}\n```\n\n"));
 
         // Add hints for common Rust gotchas on later iterations
         if iteration >= 2 {

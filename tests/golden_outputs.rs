@@ -10,7 +10,11 @@ use std::process::Command;
 /// Compile a C fixture and return its stdout.
 fn compile_and_run(fixture_path: &str) -> String {
     let full_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture_path);
-    assert!(full_path.exists(), "fixture not found: {}", full_path.display());
+    assert!(
+        full_path.exists(),
+        "fixture not found: {}",
+        full_path.display()
+    );
 
     let tmp = tempfile::tempdir().unwrap();
     let exe = tmp.path().join("test_exe");

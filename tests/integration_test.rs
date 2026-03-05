@@ -89,7 +89,10 @@ fn test_migrate_sync_simple() {
 
     // Check that the .rs file was written
     let output_file = tmp.path().join("add.rs");
-    assert!(output_file.exists(), "add.rs should be written to output dir");
+    assert!(
+        output_file.exists(),
+        "add.rs should be written to output dir"
+    );
     let content = std::fs::read_to_string(&output_file).unwrap();
     assert!(content.contains("fn add"));
 }
@@ -130,12 +133,7 @@ fn test_migrate_sync_json() {
 fn test_migrate_sync_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let output = noricum_cmd()
-        .args([
-            "migrate",
-            "tests/fixtures/simple",
-            "--no-llm",
-            "--output",
-        ])
+        .args(["migrate", "tests/fixtures/simple", "--no-llm", "--output"])
         .arg(tmp.path())
         .output()
         .expect("failed to run noricum migrate directory");

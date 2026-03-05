@@ -568,7 +568,10 @@ pub async fn migrate_directory(
     if !ordered_names.is_empty() {
         c_files.sort_by_key(|p| {
             let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            ordered_names.iter().position(|n| n == stem).unwrap_or(usize::MAX)
+            ordered_names
+                .iter()
+                .position(|n| n == stem)
+                .unwrap_or(usize::MAX)
         });
     } else {
         c_files.sort();
@@ -623,8 +626,7 @@ fn extract_rust_signatures(rust_source: &str) -> Vec<String> {
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn "))
-                && trimmed.contains('(')
+            (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ")) && trimmed.contains('(')
         })
         .map(|line| {
             // Take up to the opening brace or end of line
