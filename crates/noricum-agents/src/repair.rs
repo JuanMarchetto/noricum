@@ -22,6 +22,7 @@ const REPAIR_PREAMBLE: &str = include_str!("../../../prompts/repair.md");
 /// - **Compilation errors**: The Rust code doesn't compile (type errors, syntax, etc.)
 /// - **Behavioral mismatches**: The code compiles but produces different output than the C original
 ///   (e.g., using `bool` where C uses `int`, changing format specifiers, etc.)
+#[allow(clippy::too_many_arguments)]
 pub async fn repair_function(
     client: &anthropic::Client,
     model: &str,

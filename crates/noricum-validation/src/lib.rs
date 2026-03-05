@@ -318,6 +318,104 @@ mod tests {
         assert!(score < 100, "unwrap/as casts should reduce score, got {score}");
     }
 
+    /// Simulate the full repair loop state machine: Refined -> Repairing(1..5) -> FallbackUnsafe
+    #[test]
+    fn test_repair_loop_state_transitions() {
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        unit.rust_output = Some("fn f() -> i32 { 0 }".into());
+        unit.state = MigrationState::Refined;
+
+        let fail_result = ValidationResult {
+            compiles: false,
+            compiler_errors: vec!["error[E0308]: mismatched types".into()],
+            clippy_warnings: vec![],
+            unsafe_count: 0,
+            idiomatic_score: 50,
+            diff_test_passed: None,
+            diff_test_feedback: vec![],
+            passed: false,
+        };
+
+        // First failure: Refined -> Repairing(1)
+        apply_validation(&mut unit, &fail_result);
+        assert_eq!(unit.state, MigrationState::Repairing(1));
+
+        // Iterations 2..5: each fail increments the counter
+        for i in 2..=5 {
+            apply_validation(&mut unit, &fail_result);
+            assert_eq!(unit.state, MigrationState::Repairing(i), "iteration {i}");
+        }
+
+        // 6th failure while at Repairing(5) triggers >= 5 guard -> FallbackUnsafe
+        apply_validation(&mut unit, &fail_result);
+        assert_eq!(unit.state, MigrationState::FallbackUnsafe);
+    }
+
+    /// Simulate repair loop with recovery at iteration 3.
+    #[test]
+    fn test_repair_loop_recovery() {
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        unit.rust_output = Some("fn f() -> i32 { 0 }".into());
+        unit.state = MigrationState::Refined;
+
+        let fail_result = ValidationResult {
+            compiles: false,
+            compiler_errors: vec!["error".into()],
+            clippy_warnings: vec![],
+            unsafe_count: 0,
+            idiomatic_score: 50,
+            diff_test_passed: None,
+            diff_test_feedback: vec![],
+            passed: false,
+        };
+
+        let pass_result = ValidationResult {
+            compiles: true,
+            compiler_errors: vec![],
+            clippy_warnings: vec![],
+            unsafe_count: 0,
+            idiomatic_score: 95,
+            diff_test_passed: Some(true),
+            diff_test_feedback: vec![],
+            passed: true,
+        };
+
+        // Fail twice
+        apply_validation(&mut unit, &fail_result);
+        assert_eq!(unit.state, MigrationState::Repairing(1));
+        apply_validation(&mut unit, &fail_result);
+        assert_eq!(unit.state, MigrationState::Repairing(2));
+
+        // Succeed on 3rd attempt
+        apply_validation(&mut unit, &pass_result);
+        assert_eq!(unit.state, MigrationState::Validated);
+    }
+
+    /// Simulate diff test feedback driving repair.
+    #[test]
+    fn test_repair_loop_with_diff_feedback() {
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        unit.rust_output = Some("fn f() -> i32 { 0 }".into());
+        unit.state = MigrationState::Refined;
+
+        // Code compiles but diff test fails
+        let diff_fail = ValidationResult {
+            compiles: true,
+            compiler_errors: vec![],
+            clippy_warnings: vec![],
+            unsafe_count: 0,
+            idiomatic_score: 90,
+            diff_test_passed: Some(false),
+            diff_test_feedback: vec!["Output mismatch: C=\"42\" Rust=\"43\"".into()],
+            passed: false,
+        };
+
+        apply_validation(&mut unit, &diff_fail);
+        assert_eq!(unit.state, MigrationState::Repairing(1));
+        assert_eq!(unit.last_diff_feedback.len(), 1);
+        assert!(unit.last_diff_feedback[0].contains("mismatch"));
+    }
+
     #[test]
     fn test_enhanced_score_loc_bonus() {
         let rust = "fn f(x: i32) -> i32 { x + 1 }";

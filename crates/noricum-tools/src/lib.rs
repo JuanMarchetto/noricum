@@ -19,4 +19,7 @@ pub enum ToolError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("execution timed out after {0}s")]
+    Timeout(u64),
 }

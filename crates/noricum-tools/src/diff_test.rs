@@ -3,12 +3,17 @@
 /// This is the core verification mechanism for migration correctness.
 /// Given a C program and its Rust translation (both with `main()`),
 /// we compile both, run them, and compare stdout byte-by-byte.
+use std::io::Read as _;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info};
 
 use crate::ToolError;
+
+/// Default timeout for running compiled executables (seconds).
+const RUN_TIMEOUT_SECS: u64 = 10;
 
 /// Result of a differential test between C and Rust programs.
 #[derive(Debug)]
@@ -128,11 +133,44 @@ fn compile_rust_exe(rs_file: &Path, output_path: &Path) -> Result<bool, ToolErro
     Ok(output.status.success())
 }
 
-/// Run an executable and capture its stdout.
+/// Run an executable and capture its stdout, with a timeout to prevent hangs.
 fn run_exe(exe_path: &Path) -> Result<String, ToolError> {
-    let output = Command::new(exe_path).output().map_err(ToolError::Io)?;
+    let mut child = Command::new(exe_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(ToolError::Io)?;
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    // Read stdout in a separate thread to avoid pipe buffer deadlock
+    let stdout_handle = child.stdout.take();
+    let stdout_thread = std::thread::spawn(move || {
+        let mut output = String::new();
+        if let Some(mut out) = stdout_handle {
+            let _ = out.read_to_string(&mut output);
+        }
+        output
+    });
+
+    // Poll child with timeout
+    let timeout = Duration::from_secs(RUN_TIMEOUT_SECS);
+    let start = Instant::now();
+    loop {
+        match child.try_wait().map_err(ToolError::Io)? {
+            Some(_status) => {
+                let stdout = stdout_thread.join().unwrap_or_default();
+                return Ok(stdout);
+            }
+            None => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    debug!(timeout_secs = RUN_TIMEOUT_SECS, "executable timed out");
+                    return Err(ToolError::Timeout(RUN_TIMEOUT_SECS));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +255,38 @@ int main(void) { printf("ok\n"); return 0; }
         assert!(!result.c_compiled);
         assert!(!result.rust_compiled);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_timeout_kills_hanging_process() {
+        // A C program that would hang forever without timeout
+        let c_source = r#"
+#include <stdio.h>
+int main(void) {
+    printf("start\n");
+    fflush(stdout);
+    while(1) {}
+    return 0;
+}
+"#;
+        let rust_source = r#"fn main() { println!("start"); }"#;
+
+        let result = run_diff_test(c_source, rust_source);
+        // The test should complete (not hang) due to timeout.
+        // C might timeout or produce partial output. Either way, it should not block forever.
+        match result {
+            Ok(r) => {
+                // If C compiled, it either timed out (no output) or was killed
+                assert!(!r.passed || !r.c_compiled);
+            }
+            Err(e) => {
+                // Timeout error is expected
+                assert!(
+                    e.to_string().contains("timed out"),
+                    "expected timeout error, got: {e}"
+                );
+            }
+        }
     }
 
     #[test]
