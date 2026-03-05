@@ -2,6 +2,7 @@ pub mod c2rust;
 pub mod compiler;
 pub mod diff_test;
 pub mod rig_tools;
+pub mod rule_translate;
 
 use thiserror::Error;
 

@@ -115,9 +115,21 @@ pub fn migrate_file_sync(c_file: &Path) -> Result<FunctionUnit, CoreError> {
             info!(function = %unit.name, "c2rust transpilation succeeded");
         }
         Err(e) => {
-            info!(function = %unit.name, error = %e, "c2rust not available, skipping mechanical translation");
-            unit.state = MigrationState::Extracted;
-            return Ok(unit);
+            debug!(function = %unit.name, error = %e, "c2rust not available, trying rule-based translation");
+
+            // Fallback: try rule-based translation for simple functions
+            match noricum_tools::rule_translate::try_translate(&unit.c_source, &unit.name) {
+                Some(rust_code) => {
+                    unit.rust_output = Some(rust_code);
+                    unit.state = MigrationState::Refined;
+                    info!(function = %unit.name, "rule-based translation succeeded");
+                }
+                None => {
+                    info!(function = %unit.name, "function too complex for rule-based translation, needs LLM");
+                    unit.state = MigrationState::Extracted;
+                    return Ok(unit);
+                }
+            }
         }
     }
 
@@ -497,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_migrate_file_sync_without_c2rust() {
-        // Without c2rust installed, migration should still extract the source
+        // Without c2rust, simple functions should be translated via rule_translate
         let tmp = tempfile::tempdir().unwrap();
         let c_file = tmp.path().join("test.c");
         std::fs::write(&c_file, "int add(int a, int b) { return a + b; }").unwrap();
@@ -505,8 +517,26 @@ mod tests {
         let unit = migrate_file_sync(&c_file).unwrap();
         assert_eq!(unit.name, "test");
         assert!(!unit.c_source.is_empty());
-        // Without c2rust, state should be Extracted
+        // Rule-based translation succeeds for simple functions
+        assert!(unit.rust_output.is_some());
+        assert!(unit.rust_output.as_ref().unwrap().contains("fn add"));
+    }
+
+    #[test]
+    fn test_migrate_file_sync_complex_without_c2rust() {
+        // Complex functions that rule_translate can't handle should stay Extracted
+        let tmp = tempfile::tempdir().unwrap();
+        let c_file = tmp.path().join("test.c");
+        std::fs::write(
+            &c_file,
+            "void* alloc(int n) { return malloc(n * sizeof(int)); }",
+        )
+        .unwrap();
+
+        let unit = migrate_file_sync(&c_file).unwrap();
+        assert_eq!(unit.name, "test");
         assert_eq!(unit.state, MigrationState::Extracted);
+        assert!(unit.rust_output.is_none());
     }
 
     #[test]
@@ -568,8 +598,9 @@ mod tests {
         let unit = migrate_file(&c_file, &config).await.unwrap();
         assert_eq!(unit.name, "test");
         assert!(!unit.c_source.is_empty());
-        // Falls back to sync, so state should be Extracted (no c2rust)
-        assert_eq!(unit.state, MigrationState::Extracted);
+        // Falls back to sync; rule_translate handles simple functions
+        assert!(unit.rust_output.is_some());
+        assert!(unit.rust_output.as_ref().unwrap().contains("fn add"));
     }
 
     #[tokio::test]

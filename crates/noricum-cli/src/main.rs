@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use noricum_core::MigrationConfig;
+use noricum_ir::FunctionUnit;
 use tracing::info;
 
 #[derive(Parser)]
@@ -27,6 +28,12 @@ enum Commands {
         /// Force synchronous mode (no LLM agents)
         #[arg(long)]
         no_llm: bool,
+        /// Output directory for generated Rust files (default: ./output)
+        #[arg(short, long, default_value = "output")]
+        output: PathBuf,
+        /// Run differential tests after migration
+        #[arg(long)]
+        diff_test: bool,
     },
     /// Analyze a C file and report difficulty classification
     Analyze {
@@ -57,19 +64,24 @@ async fn main() -> Result<()> {
     setup_tracing(cli.verbose);
 
     match cli.command {
-        Commands::Migrate { path, no_llm } => cmd_migrate(&path, no_llm).await,
+        Commands::Migrate {
+            path,
+            no_llm,
+            output,
+            diff_test,
+        } => cmd_migrate(&path, no_llm, &output, diff_test).await,
         Commands::Analyze { path } => cmd_analyze(&path),
         Commands::Doctor => cmd_doctor(),
     }
 }
 
-async fn cmd_migrate(path: &Path, no_llm: bool) -> Result<()> {
+async fn cmd_migrate(path: &Path, no_llm: bool, output_dir: &Path, run_diff: bool) -> Result<()> {
     let path = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
     if no_llm {
-        return cmd_migrate_sync(&path);
+        return cmd_migrate_sync(&path, output_dir, run_diff);
     }
 
     let config = MigrationConfig::default();
@@ -80,28 +92,7 @@ async fn cmd_migrate(path: &Path, no_llm: bool) -> Result<()> {
             .await
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
-        println!("Migration result for: {}", unit.name);
-        println!("  State: {:?}", unit.state);
-        if let Some(difficulty) = unit.difficulty {
-            println!("  Difficulty: {difficulty:?}");
-        }
-        if let Some(score) = unit.idiomatic_score {
-            println!("  Idiomatic score: {score}/100");
-        }
-        if let Some(unsafe_count) = unit.unsafe_count {
-            println!("  Unsafe blocks: {unsafe_count}");
-        }
-        if let Some(ref rust_output) = unit.rust_output {
-            println!("\n--- Generated Rust ---");
-            println!("{rust_output}");
-        } else {
-            println!("\n  (no Rust output generated)");
-            println!("  Run `noricum doctor` to check tool availability.");
-        }
-        if let Some(ref tests) = unit.generated_tests {
-            println!("\n--- Generated Tests ---");
-            println!("{tests}");
-        }
+        print_unit_result(&unit, output_dir, run_diff)?;
     } else if path.is_dir() {
         info!(dir = %path.display(), "migrating directory");
         let project = noricum_core::orchestrator::migrate_directory(&path, &config)
@@ -117,16 +108,7 @@ async fn cmd_migrate(path: &Path, no_llm: bool) -> Result<()> {
 
         for unit in &project.units {
             println!();
-            println!("  {} -> {:?}", unit.name, unit.state);
-            if let Some(score) = unit.idiomatic_score {
-                println!("    Idiomatic score: {score}/100");
-            }
-            if let Some(unsafe_count) = unit.unsafe_count {
-                println!("    Unsafe blocks: {unsafe_count}");
-            }
-            if unit.generated_tests.is_some() {
-                println!("    Tests: generated");
-            }
+            print_unit_result(unit, output_dir, run_diff)?;
         }
     } else {
         anyhow::bail!("path is neither a file nor directory: {}", path.display());
@@ -135,27 +117,13 @@ async fn cmd_migrate(path: &Path, no_llm: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_migrate_sync(path: &Path) -> Result<()> {
+fn cmd_migrate_sync(path: &Path, output_dir: &Path, run_diff: bool) -> Result<()> {
     if path.is_file() {
         info!(file = %path.display(), "migrating single file (sync, no LLM)");
         let unit = noricum_core::orchestrator::migrate_file_sync(path)
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
-        println!("Migration result for: {}", unit.name);
-        println!("  State: {:?}", unit.state);
-        if let Some(score) = unit.idiomatic_score {
-            println!("  Idiomatic score: {score}/100");
-        }
-        if let Some(unsafe_count) = unit.unsafe_count {
-            println!("  Unsafe blocks: {unsafe_count}");
-        }
-        if let Some(ref rust_output) = unit.rust_output {
-            println!("\n--- Generated Rust ---");
-            println!("{rust_output}");
-        } else {
-            println!("\n  (no Rust output generated - c2rust may not be installed)");
-            println!("  Run `noricum doctor` to check tool availability.");
-        }
+        print_unit_result(&unit, output_dir, run_diff)?;
     } else if path.is_dir() {
         info!(dir = %path.display(), "migrating directory (sync, no LLM)");
         let project = noricum_core::orchestrator::migrate_directory_sync(path)
@@ -167,8 +135,75 @@ fn cmd_migrate_sync(path: &Path) -> Result<()> {
         println!("  Validated: {}", summary.validated);
         println!("  Failed (fallback unsafe): {}", summary.failed);
         println!("  In progress: {}", summary.in_progress);
+
+        for unit in &project.units {
+            println!();
+            print_unit_result(unit, output_dir, run_diff)?;
+        }
     } else {
         anyhow::bail!("path is neither a file nor directory: {}", path.display());
+    }
+
+    Ok(())
+}
+
+fn print_unit_result(unit: &FunctionUnit, output_dir: &Path, run_diff: bool) -> Result<()> {
+    println!("Migration result for: {}", unit.name);
+    println!("  State: {:?}", unit.state);
+    if let Some(difficulty) = unit.difficulty {
+        println!("  Difficulty: {difficulty:?}");
+    }
+    if let Some(score) = unit.idiomatic_score {
+        println!("  Idiomatic score: {score}/100");
+    }
+    if let Some(unsafe_count) = unit.unsafe_count {
+        println!("  Unsafe blocks: {unsafe_count}");
+    }
+
+    if let Some(ref rust_output) = unit.rust_output {
+        // Write to output file
+        std::fs::create_dir_all(output_dir)?;
+        let output_file = output_dir.join(format!("{}.rs", unit.name));
+        std::fs::write(&output_file, rust_output)?;
+        println!("  Output: {}", output_file.display());
+
+        println!("\n--- Generated Rust ---");
+        println!("{rust_output}");
+
+        // Run diff test if requested
+        if run_diff {
+            println!("\n--- Differential Test ---");
+            match noricum_tools::diff_test::run_diff_test(&unit.c_source, rust_output) {
+                Ok(result) => {
+                    if result.passed {
+                        println!("  PASSED: C and Rust outputs match");
+                    } else {
+                        println!("  FAILED:");
+                        if !result.c_compiled {
+                            println!("    C compilation failed");
+                        }
+                        if !result.rust_compiled {
+                            println!("    Rust compilation failed");
+                        }
+                        if !result.c_output.is_empty() {
+                            println!("    C output:    {:?}", result.c_output);
+                        }
+                        if !result.rust_output.is_empty() {
+                            println!("    Rust output: {:?}", result.rust_output);
+                        }
+                    }
+                }
+                Err(e) => println!("  Error running diff test: {e}"),
+            }
+        }
+    } else {
+        println!("\n  (no Rust output generated)");
+        println!("  Run `noricum doctor` to check tool availability.");
+    }
+
+    if let Some(ref tests) = unit.generated_tests {
+        println!("\n--- Generated Tests ---");
+        println!("{tests}");
     }
 
     Ok(())
