@@ -9,10 +9,13 @@ noricum-ir = { workspace = true }
 noricum-agents = { workspace = true }
 noricum-tools = { workspace = true }
 noricum-validation = { workspace = true }
+rig-core = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { version = "1", features = ["full", "test-util"] }

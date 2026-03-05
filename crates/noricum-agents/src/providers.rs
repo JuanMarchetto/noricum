@@ -3,7 +3,11 @@
 /// Manages connections to Anthropic (Claude API) and Ollama (local models).
 /// Model routing selects the appropriate provider/model based on task difficulty.
 use noricum_ir::Difficulty;
+use rig::client::Nothing;
+use rig::providers::{anthropic, ollama};
 use tracing::info;
+
+use crate::AgentError;
 
 /// Configuration for LLM providers.
 #[derive(Debug, Clone)]
@@ -39,14 +43,56 @@ pub enum ProviderKind {
     Ollama,
 }
 
+/// Create an Anthropic client from an API key.
+///
+/// Returns `AgentError::Provider` if the key is missing or the client cannot be built.
+pub fn create_anthropic_client() -> Result<anthropic::Client, AgentError> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| AgentError::Provider("ANTHROPIC_API_KEY environment variable not set".into()))?;
+
+    anthropic::Client::new(api_key)
+        .map_err(|e| AgentError::Provider(format!("failed to create Anthropic client: {e}")))
+}
+
+/// Create an Anthropic client from an explicit API key string.
+pub fn create_anthropic_client_with_key(api_key: &str) -> Result<anthropic::Client, AgentError> {
+    anthropic::Client::new(api_key)
+        .map_err(|e| AgentError::Provider(format!("failed to create Anthropic client: {e}")))
+}
+
+/// Create an Ollama client.
+///
+/// Uses the default Ollama URL (http://localhost:11434). For custom URLs,
+/// use `create_ollama_client_with_url`.
+pub fn create_ollama_client() -> Result<ollama::Client, AgentError> {
+    ollama::Client::new(Nothing)
+        .map_err(|e| AgentError::Provider(format!("failed to create Ollama client: {e}")))
+}
+
+/// Create an Ollama client pointing to a custom URL.
+pub fn create_ollama_client_with_url(url: &str) -> Result<ollama::Client, AgentError> {
+    ollama::Client::builder()
+        .api_key(Nothing)
+        .base_url(url)
+        .build()
+        .map_err(|e| AgentError::Provider(format!("failed to create Ollama client at {url}: {e}")))
+}
+
+/// Model constants for Anthropic.
+pub mod models {
+    pub use rig::providers::anthropic::completion::{
+        CLAUDE_3_5_HAIKU, CLAUDE_3_5_SONNET, CLAUDE_3_7_SONNET, CLAUDE_4_OPUS, CLAUDE_4_SONNET,
+    };
+}
+
 /// Select a model based on task difficulty and available providers.
 pub fn select_model(config: &ProviderConfig, difficulty: Difficulty, task: &str) -> ModelSelection {
     // If Anthropic is available, use it for medium/hard tasks
     if config.anthropic_api_key.is_some() {
         let model = match (difficulty, task) {
-            (Difficulty::Hard, _) => "claude-opus-4-6".to_string(),
-            (Difficulty::Medium, _) | (_, "analysis") => "claude-sonnet-4-6".to_string(),
-            (Difficulty::Easy, _) => "claude-sonnet-4-6".to_string(),
+            (Difficulty::Hard, _) => models::CLAUDE_4_OPUS.to_string(),
+            (Difficulty::Medium, _) | (_, "analysis") => models::CLAUDE_4_SONNET.to_string(),
+            (Difficulty::Easy, _) => models::CLAUDE_4_SONNET.to_string(),
         };
         info!(provider = "anthropic", model = %model, ?difficulty, "selected model");
         return ModelSelection {
@@ -76,11 +122,11 @@ mod tests {
 
         let selection = select_model(&config, Difficulty::Hard, "translation");
         assert_eq!(selection.provider, ProviderKind::Anthropic);
-        assert_eq!(selection.model, "claude-opus-4-6");
+        assert_eq!(selection.model, "claude-opus-4-0");
 
         let selection = select_model(&config, Difficulty::Easy, "translation");
         assert_eq!(selection.provider, ProviderKind::Anthropic);
-        assert_eq!(selection.model, "claude-sonnet-4-6");
+        assert_eq!(selection.model, "claude-sonnet-4-0");
     }
 
     #[test]
@@ -93,5 +139,32 @@ mod tests {
         let selection = select_model(&config, Difficulty::Hard, "translation");
         assert_eq!(selection.provider, ProviderKind::Ollama);
         assert_eq!(selection.model, "llama3.2");
+    }
+
+    #[test]
+    fn test_create_anthropic_client_no_key() {
+        // Temporarily unset the key if it exists
+        let original = std::env::var("ANTHROPIC_API_KEY").ok();
+        // SAFETY: This test is not run in parallel with other tests that depend on
+        // ANTHROPIC_API_KEY, and we restore the original value immediately after.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+
+        let result = create_anthropic_client();
+        assert!(result.is_err());
+
+        // Restore
+        if let Some(key) = original {
+            unsafe {
+                std::env::set_var("ANTHROPIC_API_KEY", key);
+            }
+        }
+    }
+
+    #[test]
+    fn test_create_ollama_client_ok() {
+        let result = create_ollama_client();
+        assert!(result.is_ok());
     }
 }

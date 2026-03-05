@@ -64,6 +64,8 @@ pub struct FunctionUnit {
     pub idiomatic_score: Option<u32>,
     /// Number of unsafe blocks in current output
     pub unsafe_count: Option<u32>,
+    /// Generated equivalence test code (if any)
+    pub generated_tests: Option<String>,
 }
 
 impl FunctionUnit {
@@ -80,6 +82,7 @@ impl FunctionUnit {
             last_errors: Vec::new(),
             idiomatic_score: None,
             unsafe_count: None,
+            generated_tests: None,
         }
     }
 }

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use noricum_core::MigrationConfig;
 use tracing::info;
 
 #[derive(Parser)]
@@ -23,6 +24,9 @@ enum Commands {
     Migrate {
         /// Path to a C file or directory containing C files
         path: PathBuf,
+        /// Force synchronous mode (no LLM agents)
+        #[arg(long)]
+        no_llm: bool,
     },
     /// Analyze a C file and report difficulty classification
     Analyze {
@@ -47,25 +51,94 @@ fn setup_tracing(verbosity: u8) {
         .init();
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     setup_tracing(cli.verbose);
 
     match cli.command {
-        Commands::Migrate { path } => cmd_migrate(&path),
+        Commands::Migrate { path, no_llm } => cmd_migrate(&path, no_llm).await,
         Commands::Analyze { path } => cmd_analyze(&path),
         Commands::Doctor => cmd_doctor(),
     }
 }
 
-fn cmd_migrate(path: &Path) -> Result<()> {
+async fn cmd_migrate(path: &Path, no_llm: bool) -> Result<()> {
     let path = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
+    if no_llm {
+        return cmd_migrate_sync(&path);
+    }
+
+    let config = MigrationConfig::default();
+
     if path.is_file() {
         info!(file = %path.display(), "migrating single file");
-        let unit = noricum_core::orchestrator::migrate_file(&path)
+        let unit = noricum_core::orchestrator::migrate_file(&path, &config)
+            .await
+            .with_context(|| format!("migration failed for {}", path.display()))?;
+
+        println!("Migration result for: {}", unit.name);
+        println!("  State: {:?}", unit.state);
+        if let Some(difficulty) = unit.difficulty {
+            println!("  Difficulty: {difficulty:?}");
+        }
+        if let Some(score) = unit.idiomatic_score {
+            println!("  Idiomatic score: {score}/100");
+        }
+        if let Some(unsafe_count) = unit.unsafe_count {
+            println!("  Unsafe blocks: {unsafe_count}");
+        }
+        if let Some(ref rust_output) = unit.rust_output {
+            println!("\n--- Generated Rust ---");
+            println!("{rust_output}");
+        } else {
+            println!("\n  (no Rust output generated)");
+            println!("  Run `noricum doctor` to check tool availability.");
+        }
+        if let Some(ref tests) = unit.generated_tests {
+            println!("\n--- Generated Tests ---");
+            println!("{tests}");
+        }
+    } else if path.is_dir() {
+        info!(dir = %path.display(), "migrating directory");
+        let project = noricum_core::orchestrator::migrate_directory(&path, &config)
+            .await
+            .with_context(|| format!("migration failed for {}", path.display()))?;
+
+        let summary = project.progress_summary();
+        println!("Migration complete: {}", project.name);
+        println!("  Total functions: {}", summary.total);
+        println!("  Validated: {}", summary.validated);
+        println!("  Failed (fallback unsafe): {}", summary.failed);
+        println!("  In progress: {}", summary.in_progress);
+
+        for unit in &project.units {
+            println!();
+            println!("  {} -> {:?}", unit.name, unit.state);
+            if let Some(score) = unit.idiomatic_score {
+                println!("    Idiomatic score: {score}/100");
+            }
+            if let Some(unsafe_count) = unit.unsafe_count {
+                println!("    Unsafe blocks: {unsafe_count}");
+            }
+            if unit.generated_tests.is_some() {
+                println!("    Tests: generated");
+            }
+        }
+    } else {
+        anyhow::bail!("path is neither a file nor directory: {}", path.display());
+    }
+
+    Ok(())
+}
+
+fn cmd_migrate_sync(path: &Path) -> Result<()> {
+    if path.is_file() {
+        info!(file = %path.display(), "migrating single file (sync, no LLM)");
+        let unit = noricum_core::orchestrator::migrate_file_sync(path)
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
         println!("Migration result for: {}", unit.name);
@@ -84,8 +157,8 @@ fn cmd_migrate(path: &Path) -> Result<()> {
             println!("  Run `noricum doctor` to check tool availability.");
         }
     } else if path.is_dir() {
-        info!(dir = %path.display(), "migrating directory");
-        let project = noricum_core::orchestrator::migrate_directory(&path)
+        info!(dir = %path.display(), "migrating directory (sync, no LLM)");
+        let project = noricum_core::orchestrator::migrate_directory_sync(path)
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
         let summary = project.progress_summary();

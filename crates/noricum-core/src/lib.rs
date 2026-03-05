@@ -1,6 +1,8 @@
 pub mod orchestrator;
 pub mod router;
 
+pub use orchestrator::MigrationConfig;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

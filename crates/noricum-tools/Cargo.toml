@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 noricum-ir = { workspace = true }
+rig-core = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

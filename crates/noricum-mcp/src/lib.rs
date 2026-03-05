@@ -1,12 +1,15 @@
-//! Noricum MCP server (stub for v1).
+//! Noricum MCP server.
 //!
-//! Will expose Noricum tools as MCP server:
-//! - migrate_function
-//! - analyze_function
-//! - check_status
-//! - get_score
+//! Exposes Noricum tools via the Model Context Protocol (MCP) over stdio:
+//! - `migrate_function`: takes C source, returns migrated Rust
+//! - `analyze_function`: takes C source, returns difficulty + analysis
+//! - `check_compilation`: takes Rust source, returns success/errors
+//! - `get_idiomatic_score`: takes Rust source, returns score
 //!
-//! Implementation deferred to Phase 3.
+//! Uses JSON-RPC 2.0 over newline-delimited stdin/stdout (MCP stdio transport).
+
+pub mod protocol;
+pub mod server;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
