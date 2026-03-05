@@ -1,0 +1,41 @@
+# Noricum default configuration
+
+[llm]
+# Primary provider for migration tasks
+primary_provider = "anthropic"
+# Fallback for simple tasks
+fallback_provider = "ollama"
+
+[llm.anthropic]
+# Model selection by task complexity
+analysis_model = "claude-opus-4-6"
+translation_model = "claude-sonnet-4-6"
+repair_model = "claude-sonnet-4-6"
+
+[llm.ollama]
+# Local model on i5 server
+base_url = "http://localhost:11434"
+model = "llama3.2"
+
+[migration]
+# Maximum repair iterations before fallback to unsafe
+max_repair_iterations = 5
+# Minimum idiomatic score to accept (0-100)
+min_idiomatic_score = 60
+# Allow unsafe blocks in final output as fallback
+allow_unsafe_fallback = true
+
+[validation]
+# Run differential tests comparing C and Rust output
+differential_testing = true
+# Run clippy on generated code
+clippy_check = true
+# Compiler flags for C compilation
+c_compiler = "cc"
+c_flags = ["-std=c11", "-Wall"]
+
+[output]
+# Where to write migrated Rust code
+output_dir = "output"
+# Generate a migration report
+generate_report = true

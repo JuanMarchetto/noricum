@@ -1,0 +1,19 @@
+[package]
+name = "noricum-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "noricum"
+path = "src/main.rs"
+
+[dependencies]
+noricum-core = { workspace = true }
+noricum-tools = { workspace = true }
+noricum-validation = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

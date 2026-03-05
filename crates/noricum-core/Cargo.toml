@@ -1,0 +1,18 @@
+[package]
+name = "noricum-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+noricum-ir = { workspace = true }
+noricum-agents = { workspace = true }
+noricum-tools = { workspace = true }
+noricum-validation = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
