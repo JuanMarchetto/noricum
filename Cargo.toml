@@ -48,6 +48,9 @@ toml = "0.8"
 # LLM framework
 rig-core = { version = "0.31", features = ["derive"] }
 
+# Regex
+regex = "1"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"

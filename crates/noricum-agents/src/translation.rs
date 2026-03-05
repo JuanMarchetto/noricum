@@ -7,8 +7,8 @@ use rig::completion::Prompt;
 use rig::providers::anthropic;
 use tracing::{debug, info};
 
-use crate::analysis::AnalysisResult;
 use crate::AgentError;
+use crate::analysis::AnalysisResult;
 
 /// System prompt for the translation agent, loaded from the prompts directory at compile time.
 const TRANSLATION_PREAMBLE: &str = include_str!("../../../prompts/translation.md");
@@ -60,9 +60,8 @@ pub async fn translate_function(
         ));
     }
 
-    user_message.push_str(
-        "\nTranslate the C function to safe, idiomatic Rust. Output ONLY the Rust code.",
-    );
+    user_message
+        .push_str("\nTranslate the C function to safe, idiomatic Rust. Output ONLY the Rust code.");
 
     debug!("sending translation prompt to LLM");
 
@@ -71,7 +70,10 @@ pub async fn translate_function(
         .await
         .map_err(|e| AgentError::Provider(format!("translation LLM call failed: {e}")))?;
 
-    debug!(response_len = response.len(), "received translation response");
+    debug!(
+        response_len = response.len(),
+        "received translation response"
+    );
 
     Ok(extract_rust_code(&response))
 }
@@ -107,7 +109,8 @@ mod tests {
 
     #[test]
     fn test_extract_rust_code_with_fence() {
-        let response = "Here is the code:\n```rust\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n```\n";
+        let response =
+            "Here is the code:\n```rust\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n```\n";
         let code = extract_rust_code(response);
         assert_eq!(code, "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}");
     }

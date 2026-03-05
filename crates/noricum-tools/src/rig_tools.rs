@@ -235,7 +235,8 @@ impl Tool for ClippyCheckTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "clippy_check".to_string(),
-            description: "Run Clippy on Rust source code and return a list of warnings.".to_string(),
+            description: "Run Clippy on Rust source code and return a list of warnings."
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -292,7 +293,9 @@ impl Tool for UnsafeCountTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "unsafe_count".to_string(),
-            description: "Count the number of unsafe blocks and unsafe fn declarations in Rust source code.".to_string(),
+            description:
+                "Count the number of unsafe blocks and unsafe fn declarations in Rust source code."
+                    .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

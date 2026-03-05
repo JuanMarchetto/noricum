@@ -70,7 +70,10 @@ pub async fn generate_tests(
          to the C code. Output ONLY the test code."
     );
 
-    debug!(function = function_name, "sending test generation prompt to LLM");
+    debug!(
+        function = function_name,
+        "sending test generation prompt to LLM"
+    );
 
     let response = agent
         .prompt(&user_message)

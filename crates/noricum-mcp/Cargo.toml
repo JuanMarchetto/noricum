@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "noricum-mcp-server"
+path = "src/main.rs"
+
 [dependencies]
 noricum-core = { workspace = true }
 noricum-tools = { workspace = true }
@@ -13,3 +17,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

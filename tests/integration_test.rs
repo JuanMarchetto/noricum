@@ -9,7 +9,15 @@ use std::process::Command;
 #[test]
 fn test_cli_help() {
     let output = Command::new("cargo")
-        .args(["run", "-p", "noricum-cli", "--bin", "noricum", "--", "--help"])
+        .args([
+            "run",
+            "-p",
+            "noricum-cli",
+            "--bin",
+            "noricum",
+            "--",
+            "--help",
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("failed to run noricum --help");
@@ -40,8 +48,10 @@ fn test_analyze_add_c() {
     let output = Command::new("cargo")
         .args([
             "run",
-            "-p", "noricum-cli",
-            "--bin", "noricum",
+            "-p",
+            "noricum-cli",
+            "--bin",
+            "noricum",
             "--",
             "analyze",
             "tests/fixtures/simple/add.c",
@@ -90,8 +100,7 @@ fn main() {
     assert!(
         result.passed,
         "outputs should match: C={:?}, Rust={:?}",
-        result.c_output,
-        result.rust_output
+        result.c_output, result.rust_output
     );
     assert_eq!(result.c_output, "5\n0\n0\n");
 }

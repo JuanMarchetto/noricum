@@ -1,3 +1,4 @@
+pub mod dependency;
 pub mod orchestrator;
 pub mod router;
 

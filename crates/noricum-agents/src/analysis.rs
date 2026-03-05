@@ -73,7 +73,11 @@ pub async fn analyze_function(
         .await
         .map_err(|e| AgentError::Provider(format!("analysis LLM call failed: {e}")))?;
 
-    debug!(function = function_name, response_len = response.len(), "received analysis response");
+    debug!(
+        function = function_name,
+        response_len = response.len(),
+        "received analysis response"
+    );
 
     parse_analysis_response(&response)
 }
@@ -99,8 +103,11 @@ fn parse_analysis_response(response: &str) -> Result<AnalysisResult, AgentError>
         response.trim()
     };
 
-    serde_json::from_str(json_str)
-        .map_err(|e| AgentError::Parse(format!("failed to parse analysis JSON: {e}\nRaw response:\n{response}")))
+    serde_json::from_str(json_str).map_err(|e| {
+        AgentError::Parse(format!(
+            "failed to parse analysis JSON: {e}\nRaw response:\n{response}"
+        ))
+    })
 }
 
 #[cfg(test)]

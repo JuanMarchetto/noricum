@@ -47,8 +47,9 @@ pub enum ProviderKind {
 ///
 /// Returns `AgentError::Provider` if the key is missing or the client cannot be built.
 pub fn create_anthropic_client() -> Result<anthropic::Client, AgentError> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| AgentError::Provider("ANTHROPIC_API_KEY environment variable not set".into()))?;
+    let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+        AgentError::Provider("ANTHROPIC_API_KEY environment variable not set".into())
+    })?;
 
     anthropic::Client::new(api_key)
         .map_err(|e| AgentError::Provider(format!("failed to create Anthropic client: {e}")))

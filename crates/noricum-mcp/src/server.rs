@@ -12,9 +12,9 @@ use serde_json::json;
 use tracing::{debug, error, info};
 
 use crate::protocol::{
-    InitializeResult, JsonRpcRequest, JsonRpcResponse, ServerCapabilities, ServerInfo,
-    ToolCallParams, ToolCapability, ToolDefinition, ToolResult, INVALID_PARAMS,
-    METHOD_NOT_FOUND, PARSE_ERROR,
+    INVALID_PARAMS, InitializeResult, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND,
+    PARSE_ERROR, ServerCapabilities, ServerInfo, ToolCallParams, ToolCapability, ToolDefinition,
+    ToolResult,
 };
 
 /// Run the MCP server loop: read JSON-RPC from stdin, dispatch, write to stdout.
@@ -280,10 +280,11 @@ fn tool_get_idiomatic_score(source: Option<String>) -> ToolResult {
     };
 
     let unsafe_count = noricum_tools::compiler::count_unsafe_blocks(&source);
-    let clippy_warnings = noricum_tools::compiler::run_clippy_on_source(&source)
-        .unwrap_or_default();
+    let clippy_warnings =
+        noricum_tools::compiler::run_clippy_on_source(&source).unwrap_or_default();
 
-    let score = noricum_validation::compute_idiomatic_score(unsafe_count, clippy_warnings.len() as u32);
+    let score =
+        noricum_validation::compute_idiomatic_score(unsafe_count, clippy_warnings.len() as u32);
 
     let result = json!({
         "score": score,

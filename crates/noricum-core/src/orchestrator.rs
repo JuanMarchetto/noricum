@@ -9,8 +9,8 @@
 use std::path::Path;
 
 use noricum_agents::providers::{
-    create_anthropic_client, create_anthropic_client_with_key, select_model, ProviderConfig,
-    ProviderKind,
+    ProviderConfig, ProviderKind, create_anthropic_client, create_anthropic_client_with_key,
+    select_model,
 };
 use noricum_ir::{FunctionUnit, MigrationProject, MigrationState};
 use rig::providers::anthropic;
@@ -240,8 +240,7 @@ pub async fn migrate_file(
     }
 
     // --- Stage 4: Analysis agent ---
-    let analysis_model_sel =
-        select_model(&provider_config, difficulty, "analysis");
+    let analysis_model_sel = select_model(&provider_config, difficulty, "analysis");
     info!(
         function = %name,
         model = %analysis_model_sel.model,
@@ -274,8 +273,7 @@ pub async fn migrate_file(
     );
 
     // --- Stage 5: Translation agent ---
-    let translation_model_sel =
-        select_model(&provider_config, difficulty, "translation");
+    let translation_model_sel = select_model(&provider_config, difficulty, "translation");
     info!(
         function = %name,
         model = %translation_model_sel.model,
@@ -315,8 +313,7 @@ pub async fn migrate_file(
 
     // --- Stage 7: Repair loop ---
     if !validation.passed {
-        let repair_model_sel =
-            select_model(&provider_config, difficulty, "repair");
+        let repair_model_sel = select_model(&provider_config, difficulty, "repair");
 
         let mut iteration = 1u32;
         while iteration <= config.max_repair_iterations {
@@ -328,10 +325,7 @@ pub async fn migrate_file(
                 "entering repair iteration"
             );
 
-            let current_rust = unit
-                .rust_output
-                .as_deref()
-                .unwrap_or("");
+            let current_rust = unit.rust_output.as_deref().unwrap_or("");
             let errors = &unit.last_errors;
 
             if errors.is_empty() && unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
@@ -397,8 +391,7 @@ pub async fn migrate_file(
 
     // --- Stage 9: Test generation ---
     if unit.state == MigrationState::Validated && config.generate_tests {
-        let test_model_sel =
-            select_model(&provider_config, difficulty, "test_gen");
+        let test_model_sel = select_model(&provider_config, difficulty, "test_gen");
         info!(
             function = %name,
             model = %test_model_sel.model,

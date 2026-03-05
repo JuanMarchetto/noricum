@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "noricum": {
+      "command": "cargo",
+      "args": ["run", "--release", "-p", "noricum-mcp"],
+      "env": {}
+    }
+  }
+}

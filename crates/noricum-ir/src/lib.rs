@@ -3,6 +3,8 @@
 /// This is NOT a compiler IR. C2Rust produces Rust code, LLMs read/write code.
 /// The Semantic Code Map tracks what we know about each function being migrated:
 /// its source, current state, analysis results, and migration history.
+pub mod pattern_store;
+
 use serde::{Deserialize, Serialize};
 
 /// The migration state of a single function.
