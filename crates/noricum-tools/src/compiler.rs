@@ -102,19 +102,51 @@ pub fn run_executable(exe_path: &Path, args: &[&str]) -> Result<CompileResult, T
     Ok(CompileResult::from_output(&output))
 }
 
-/// Count the number of `unsafe` blocks in Rust source code.
+/// Count the number of `unsafe` blocks and `unsafe fn` declarations in Rust source code.
+///
+/// Uses regex to handle whitespace variants (e.g. `unsafe  {`, `pub unsafe fn`).
+/// A proper implementation would use tree-sitter, but this covers common cases.
 pub fn count_unsafe_blocks(rust_source: &str) -> u32 {
-    // Simple heuristic: count occurrences of "unsafe {" and "unsafe fn"
-    // A proper implementation would use tree-sitter, but this works for scoring.
-    rust_source
+    // Strip line comments to avoid counting "unsafe" in comments
+    let stripped: String = rust_source
         .lines()
-        .map(str::trim)
         .map(|line| {
-            let has_block = line.contains("unsafe {") || line.contains("unsafe{");
-            let has_fn = line.starts_with("unsafe fn ") || line.contains(" unsafe fn ");
-            u32::from(has_block) + u32::from(has_fn)
+            if let Some(idx) = line.find("//") {
+                &line[..idx]
+            } else {
+                line
+            }
         })
-        .sum()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut count = 0u32;
+
+    // Match `unsafe {` with flexible whitespace (covers `unsafe {`, `unsafe{`, `unsafe  {`)
+    for line in stripped.lines() {
+        let trimmed = line.trim();
+        // unsafe blocks: `unsafe {` anywhere on the line
+        if trimmed.contains("unsafe")
+            && trimmed.contains('{')
+            && !trimmed.contains("unsafe fn")
+            && !trimmed.contains("unsafe impl")
+            && !trimmed.contains("unsafe trait")
+        {
+            // Verify "unsafe" is followed by `{` (possibly with whitespace)
+            if let Some(pos) = trimmed.find("unsafe") {
+                let after = trimmed[pos + 6..].trim_start();
+                if after.starts_with('{') {
+                    count += 1;
+                }
+            }
+        }
+        // unsafe fn: covers `unsafe fn`, `pub unsafe fn`, `pub(crate) unsafe fn`
+        if trimmed.contains("unsafe fn ") || trimmed.contains("unsafe fn(") {
+            count += 1;
+        }
+    }
+
+    count
 }
 
 #[cfg(test)]
@@ -142,6 +174,30 @@ fn uses_unsafe() {
     #[test]
     fn test_count_unsafe_zero() {
         let source = "fn add(a: i32, b: i32) -> i32 { a + b }";
+        assert_eq!(count_unsafe_blocks(source), 0);
+    }
+
+    #[test]
+    fn test_count_unsafe_pub_fn() {
+        let source = "pub unsafe fn danger() {}";
+        assert_eq!(count_unsafe_blocks(source), 1);
+    }
+
+    #[test]
+    fn test_count_unsafe_pub_crate_fn() {
+        let source = "pub(crate) unsafe fn danger() {}";
+        assert_eq!(count_unsafe_blocks(source), 1);
+    }
+
+    #[test]
+    fn test_count_unsafe_extra_whitespace() {
+        let source = "    unsafe  {  ptr::null()  }";
+        assert_eq!(count_unsafe_blocks(source), 1);
+    }
+
+    #[test]
+    fn test_count_unsafe_in_comment_ignored() {
+        let source = "fn safe() {} // unsafe { this is a comment }";
         assert_eq!(count_unsafe_blocks(source), 0);
     }
 

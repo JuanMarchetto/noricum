@@ -48,3 +48,29 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  bench:
+    name: Benchmark Regression
+    runs-on: ubuntu-latest
+    needs: [check, test]
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build noricum
+        run: cargo build --release -p noricum-cli
+      - name: Run benchmark
+        run: |
+          ./target/release/noricum bench \
+            --fixtures tests/fixtures/simple \
+            --json > bench_current.json
+      - name: Compare with baseline
+        run: |
+          if [ -f benches/baseline.json ]; then
+            ./target/release/noricum bench \
+              --fixtures tests/fixtures/simple \
+              --compare-baseline benches/baseline.json
+          else
+            echo "No baseline found, skipping comparison"
+          fi

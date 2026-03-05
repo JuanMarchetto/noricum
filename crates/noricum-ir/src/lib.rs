@@ -50,6 +50,8 @@ pub struct FunctionUnit {
     pub source_path: String,
     /// Original C source code
     pub c_source: String,
+    /// Preprocessed C source (macro-expanded, if applicable)
+    pub preprocessed_source: Option<String>,
     /// C2Rust output (unsafe Rust)
     pub c2rust_output: Option<String>,
     /// Current best Rust translation
@@ -98,6 +100,10 @@ pub struct MigrationMetrics {
     pub rust_lines: u32,
     /// Whether diff test was run and passed
     pub diff_test_passed: Option<bool>,
+    /// Whether fuzz test was run and passed
+    pub fuzz_test_passed: Option<bool>,
+    /// Number of fuzz divergences found
+    pub fuzz_divergence_count: u32,
 }
 
 impl FunctionUnit {
@@ -106,6 +112,7 @@ impl FunctionUnit {
             name,
             source_path,
             c_source,
+            preprocessed_source: None,
             c2rust_output: None,
             rust_output: None,
             state: MigrationState::Pending,

@@ -117,43 +117,5 @@ pub async fn repair_function(
 
     debug!(response_len = response.len(), "received repair response");
 
-    Ok(extract_rust_code(&response))
-}
-
-/// Extract Rust code from the LLM response, stripping markdown fences if present.
-fn extract_rust_code(response: &str) -> String {
-    if let Some(start) = response.find("```rust") {
-        let after_fence = &response[start + 7..];
-        if let Some(end) = after_fence.find("```") {
-            return after_fence[..end].trim().to_string();
-        }
-    }
-
-    if let Some(start) = response.find("```") {
-        let after_fence = &response[start + 3..];
-        let code_start = after_fence.find('\n').map(|i| i + 1).unwrap_or(0);
-        let after_lang = &after_fence[code_start..];
-        if let Some(end) = after_lang.find("```") {
-            return after_lang[..end].trim().to_string();
-        }
-    }
-
-    response.trim().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_rust_code_with_fence() {
-        let response = "```rust\nfn fixed() -> i32 { 42 }\n```";
-        assert_eq!(extract_rust_code(response), "fn fixed() -> i32 { 42 }");
-    }
-
-    #[test]
-    fn test_extract_rust_code_no_fence() {
-        let response = "fn fixed() -> i32 { 42 }";
-        assert_eq!(extract_rust_code(response), "fn fixed() -> i32 { 42 }");
-    }
+    Ok(crate::extract_rust_code(&response))
 }

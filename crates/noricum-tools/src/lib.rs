@@ -1,6 +1,13 @@
+pub mod ast;
 pub mod c2rust;
 pub mod compiler;
 pub mod diff_test;
+pub mod ffi_bridge;
+pub mod fuzz_test;
+pub mod harness_gen;
+pub mod mixed_build;
+pub mod multi_input_test;
+pub mod preprocessor;
 pub mod rig_tools;
 pub mod rule_translate;
 

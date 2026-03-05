@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "noricum": {
-      "command": "cargo",
-      "args": ["run", "--release", "-p", "noricum-mcp"],
+      "command": "/home/marche/noricum/target/release/noricum-mcp-server",
+      "args": [],
       "env": {}
     }
   }

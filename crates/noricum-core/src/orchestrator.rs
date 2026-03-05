@@ -19,6 +19,7 @@ use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::CoreError;
+use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit};
 
 /// Configuration for the async LLM-based migration pipeline.
 #[derive(Debug, Clone)]
@@ -33,6 +34,16 @@ pub struct MigrationConfig {
     pub min_idiomatic_score: u32,
     /// Whether to generate equivalence tests after successful migration.
     pub generate_tests: bool,
+    /// Path for audit log output (JSON-lines format).
+    pub audit_log: Option<std::path::PathBuf>,
+    /// Audit logging detail level.
+    pub audit_level: crate::audit::AuditLevel,
+    /// Whether to run fuzz testing after diff test passes.
+    pub fuzz_test: bool,
+    /// Number of fuzz test iterations.
+    pub fuzz_iterations: u32,
+    /// Whether to run the C preprocessor before analysis.
+    pub preprocess: bool,
 }
 
 impl Default for MigrationConfig {
@@ -43,6 +54,11 @@ impl Default for MigrationConfig {
             max_repair_iterations: 5,
             min_idiomatic_score: 60,
             generate_tests: true,
+            audit_log: None,
+            audit_level: crate::audit::AuditLevel::Summary,
+            fuzz_test: false,
+            fuzz_iterations: 100,
+            preprocess: false,
         }
     }
 }
@@ -218,6 +234,28 @@ pub async fn migrate_file(
     info!(function = %name, file = %source_path, "starting async migration");
     let pipeline_start = Instant::now();
 
+    // --- Initialize audit trail ---
+    let audit: Option<SharedAuditTrail> = config.audit_log.as_ref().and_then(|path| {
+        match create_shared_audit(path, config.audit_level) {
+            Ok(trail) => Some(trail),
+            Err(e) => {
+                warn!(error = %e, "failed to create audit trail, continuing without");
+                None
+            }
+        }
+    });
+
+    if let Some(ref trail) = audit {
+        audit_log(
+            trail,
+            AuditEvent::PipelineStart {
+                function_name: name.clone(),
+                source_file: source_path.clone(),
+                c_lines: c_source.lines().count() as u32,
+            },
+        );
+    }
+
     // Try to get an Anthropic client; fall back to sync if unavailable
     let client = match config.create_client() {
         Some(c) => c,
@@ -236,10 +274,41 @@ pub async fn migrate_file(
     unit.state = MigrationState::Extracted;
     info!(function = %name, state = ?unit.state, "state -> Extracted");
 
+    // --- Preprocessor step ---
+    if config.preprocess {
+        let pp_config = noricum_tools::preprocessor::PreprocessorConfig::default();
+        match noricum_tools::preprocessor::preprocess_file(c_file, &pp_config) {
+            Ok(pp) if pp.was_preprocessed => {
+                info!(function = %name, "preprocessor expanded source");
+                unit.preprocessed_source = Some(pp.source);
+            }
+            Ok(_) => {
+                debug!(function = %name, "preprocessor not available, using original source");
+            }
+            Err(e) => {
+                debug!(function = %name, error = %e, "preprocessor failed, using original source");
+            }
+        }
+    }
+
     // --- Stage 2: Classify difficulty ---
-    let difficulty = crate::router::classify_difficulty(&unit.c_source);
+    let analysis_source = unit
+        .preprocessed_source
+        .as_deref()
+        .unwrap_or(&unit.c_source);
+    let difficulty = crate::router::classify_difficulty(analysis_source);
     unit.difficulty = Some(difficulty);
     info!(function = %name, ?difficulty, "difficulty classified");
+
+    if let Some(ref trail) = audit {
+        audit_log(
+            trail,
+            AuditEvent::DifficultyClassified {
+                function_name: name.clone(),
+                difficulty: format!("{difficulty:?}"),
+            },
+        );
+    }
 
     // --- Stage 3: Try C2Rust transpilation ---
     match noricum_tools::c2rust::transpile(c_file) {
@@ -296,6 +365,17 @@ pub async fn migrate_file(
         analysis_ms = unit.metrics.analysis_ms,
         "state -> Analyzed"
     );
+
+    if let Some(ref trail) = audit {
+        audit_log(
+            trail,
+            AuditEvent::StateTransition {
+                function_name: name.clone(),
+                from: "Extracted".to_string(),
+                to: "Analyzed".to_string(),
+            },
+        );
+    }
 
     // --- Stage 5: Translation agent (with RAG pattern context) ---
     let pattern_store = PatternStore::load_seed_patterns();
@@ -358,6 +438,20 @@ pub async fn migrate_file(
         "validation result"
     );
 
+    if let Some(ref trail) = audit {
+        audit_log(
+            trail,
+            AuditEvent::ValidationResult {
+                function_name: name.clone(),
+                compiles: validation.compiles,
+                idiomatic_score: validation.idiomatic_score,
+                unsafe_count: validation.unsafe_count,
+                diff_test_passed: validation.diff_test_passed,
+                passed: validation.passed,
+            },
+        );
+    }
+
     // --- Stage 7: Repair loop ---
     if !validation.passed {
         let repair_start = Instant::now();
@@ -382,6 +476,19 @@ pub async fn migrate_file(
                 && unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
             {
                 debug!(function = %name, "no errors or diff feedback remaining, re-validating");
+            }
+
+            if let Some(ref trail) = audit {
+                audit_log(
+                    trail,
+                    AuditEvent::RepairIteration {
+                        function_name: name.clone(),
+                        iteration,
+                        max_iterations: config.max_repair_iterations,
+                        error_count: errors.len(),
+                        diff_feedback_count: diff_feedback.len(),
+                    },
+                );
             }
 
             let repaired = match repair_model_sel.provider {
@@ -494,6 +601,48 @@ pub async fn migrate_file(
         }
     }
 
+    // --- Fuzz testing (after validation passes) ---
+    if config.fuzz_test && unit.state == MigrationState::Validated {
+        if let Some(ref rust_output) = unit.rust_output {
+            let fuzz_config = noricum_tools::fuzz_test::FuzzConfig {
+                iterations: config.fuzz_iterations,
+                seed: Some(42),
+                ..Default::default()
+            };
+            match noricum_tools::fuzz_test::run_fuzz_test(&unit.c_source, rust_output, &fuzz_config)
+            {
+                Ok(result) => {
+                    unit.metrics.fuzz_test_passed = Some(result.all_passed);
+                    unit.metrics.fuzz_divergence_count = result.failures;
+                    if !result.all_passed {
+                        info!(
+                            function = %name,
+                            failures = result.failures,
+                            iterations = result.iterations_run,
+                            "fuzz test found divergences"
+                        );
+                        // Feed divergences back as diff feedback for potential repair
+                        if let Some(ref div) = result.first_divergence {
+                            unit.last_diff_feedback.push(format!(
+                                "Fuzz divergence (input {:?}): C={:?} Rust={:?}",
+                                div.input.label, div.c_output, div.rust_output
+                            ));
+                        }
+                    } else {
+                        info!(
+                            function = %name,
+                            iterations = result.iterations_run,
+                            "fuzz test passed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    debug!(function = %name, error = %e, "fuzz test failed (non-fatal)");
+                }
+            }
+        }
+    }
+
     // Finalize metrics
     unit.metrics.total_ms = pipeline_start.elapsed().as_millis() as u64;
     unit.metrics.c_lines = unit.c_source.lines().count() as u32;
@@ -514,6 +663,24 @@ pub async fn migrate_file(
         repair_iters = unit.metrics.repair_iterations,
         "async migration complete"
     );
+
+    if let Some(ref trail) = audit {
+        audit_log(
+            trail,
+            AuditEvent::PipelineComplete {
+                function_name: name.clone(),
+                final_state: format!("{:?}", unit.state),
+                total_ms: unit.metrics.total_ms,
+                llm_calls: unit.metrics.llm_calls,
+            },
+        );
+        // Finalize the audit trail
+        if let Ok(t) = std::sync::Arc::try_unwrap(trail.clone()) {
+            if let Ok(inner) = t.into_inner() {
+                let _ = inner.finalize();
+            }
+        }
+    }
 
     Ok(unit)
 }
@@ -711,6 +878,7 @@ mod tests {
             max_repair_iterations: 3,
             min_idiomatic_score: 70,
             generate_tests: false,
+            ..Default::default()
         };
         let pc = config.to_provider_config();
         assert_eq!(pc.anthropic_api_key, Some("test-key".to_string()));
@@ -730,6 +898,7 @@ mod tests {
             max_repair_iterations: 5,
             min_idiomatic_score: 60,
             generate_tests: false,
+            ..Default::default()
         };
 
         let unit = migrate_file(&c_file, &config).await.unwrap();
@@ -752,6 +921,7 @@ mod tests {
             max_repair_iterations: 5,
             min_idiomatic_score: 60,
             generate_tests: false,
+            ..Default::default()
         };
 
         let project = migrate_directory(tmp.path(), &config).await.unwrap();

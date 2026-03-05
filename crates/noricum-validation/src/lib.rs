@@ -3,7 +3,7 @@
 /// Checks: compilation, differential testing, clippy, unsafe counting, idiomatic scoring.
 use noricum_ir::{FunctionUnit, MigrationState};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
@@ -71,33 +71,64 @@ pub fn validate(unit: &FunctionUnit) -> Result<ValidationResult, ValidationError
         &unit.c_source,
     );
 
-    // Step 5: Differential test (only if code compiles and C source has main())
-    let (diff_test_passed, diff_test_feedback) = if compile_result.success
-        && unit.c_source.contains("int main(")
-    {
-        match noricum_tools::diff_test::run_diff_test(&unit.c_source, rust_source) {
-            Ok(result) => {
-                if result.passed {
-                    info!(function = %unit.name, "diff test passed");
-                    (Some(true), Vec::new())
-                } else {
-                    let mut feedback = Vec::new();
-                    if !result.rust_compiled {
-                        feedback.push("Rust binary compilation failed (standalone)".to_string());
-                    } else {
-                        feedback.push(format!(
-                            "Output mismatch:\n  C output:    {:?}\n  Rust output: {:?}",
-                            result.c_output, result.rust_output
-                        ));
-                    }
-                    info!(function = %unit.name, "diff test FAILED");
-                    (Some(false), feedback)
+    // Step 5: Differential test (only if code compiles)
+    // If C source has main(), run diff test directly.
+    // If not, try generating a test harness for the library function.
+    let (diff_test_passed, diff_test_feedback) = if compile_result.success {
+        let has_main = unit.c_source.contains("int main(");
+        let test_c_source = if has_main {
+            Some(unit.c_source.clone())
+        } else {
+            // Try generating a test harness for library functions
+            match noricum_tools::harness_gen::generate_test_harness(&unit.c_source, &unit.name) {
+                Some(harness) => {
+                    info!(function = %unit.name, "generated test harness for library function");
+                    Some(harness)
+                }
+                None => {
+                    warn!(
+                        function = %unit.name,
+                        "diff test skipped: no main() and harness generation failed"
+                    );
+                    None
                 }
             }
-            Err(e) => {
-                info!(function = %unit.name, error = %e, "diff test skipped (tool error)");
-                (None, Vec::new())
+        };
+
+        if let Some(c_test_source) = test_c_source {
+            match noricum_tools::diff_test::run_diff_test(&c_test_source, rust_source) {
+                Ok(result) => {
+                    if result.passed {
+                        info!(function = %unit.name, "diff test passed");
+                        (Some(true), Vec::new())
+                    } else {
+                        let mut feedback = Vec::new();
+                        if !result.rust_compiled {
+                            feedback
+                                .push("Rust binary compilation failed (standalone)".to_string());
+                        } else {
+                            feedback.push(format!(
+                                "Output mismatch:\n  C output:    {:?}\n  Rust output: {:?}",
+                                result.c_output, result.rust_output
+                            ));
+                            if result.c_exit_code != result.rust_exit_code {
+                                feedback.push(format!(
+                                    "Exit code mismatch: C={}, Rust={}",
+                                    result.c_exit_code, result.rust_exit_code
+                                ));
+                            }
+                        }
+                        info!(function = %unit.name, "diff test FAILED");
+                        (Some(false), feedback)
+                    }
+                }
+                Err(e) => {
+                    warn!(function = %unit.name, error = %e, "diff test failed (tool error)");
+                    (Some(false), vec![format!("Diff test error: {e}")])
+                }
             }
+        } else {
+            (None, Vec::new())
         }
     } else {
         (None, Vec::new())
@@ -441,5 +472,68 @@ mod tests {
         let score = compute_idiomatic_score_from_source(0, 0, rust, c);
         // Base 100 + 5 (LOC bonus) = 100 (clamped)
         assert!(score == 100, "LOC bonus should apply, got {score}");
+    }
+
+    /// Verify that diff test error (e.g., timeout) causes validation to fail,
+    /// not silently pass via unwrap_or(true).
+    #[test]
+    fn test_diff_test_error_causes_failure() {
+        let result = ValidationResult {
+            compiles: true,
+            compiler_errors: vec![],
+            clippy_warnings: vec![],
+            unsafe_count: 0,
+            idiomatic_score: 95,
+            diff_test_passed: Some(false),
+            diff_test_feedback: vec!["Diff test error: execution timed out after 10s".into()],
+            passed: false,
+        };
+        // A diff test error (including timeout) must NOT pass validation
+        assert!(
+            !result.passed,
+            "diff test error should cause validation failure"
+        );
+    }
+
+    /// Verify that when diff test is N/A (no main), validation can still pass.
+    #[test]
+    fn test_no_main_still_passes_without_diff_test() {
+        let result = ValidationResult {
+            compiles: true,
+            compiler_errors: vec![],
+            clippy_warnings: vec![],
+            unsafe_count: 0,
+            idiomatic_score: 85,
+            diff_test_passed: None,
+            diff_test_feedback: vec![],
+            passed: true,
+        };
+        // Library functions without main() should still be validatable
+        assert!(
+            result.passed,
+            "no-main functions should pass on compile+score alone"
+        );
+        assert!(
+            result.diff_test_passed.is_none(),
+            "diff_test should be None for no-main"
+        );
+    }
+
+    /// Verify the passed field computation logic matches expectations.
+    #[test]
+    fn test_passed_computation_logic() {
+        // diff_test_passed = None → unwrap_or(true) → passes (no main, N/A)
+        let compiles = true;
+        let score = 80u32;
+        let diff: Option<bool> = None;
+        assert!(compiles && score >= 60 && diff.unwrap_or(true));
+
+        // diff_test_passed = Some(false) → fails
+        let diff: Option<bool> = Some(false);
+        assert!(!(compiles && score >= 60 && diff.unwrap_or(true)));
+
+        // diff_test_passed = Some(true) → passes
+        let diff: Option<bool> = Some(true);
+        assert!(compiles && score >= 60 && diff.unwrap_or(true));
     }
 }

@@ -1,10 +1,15 @@
+mod api;
+mod crust_bench;
+mod interactive;
 mod report;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use noricum_core::MigrationConfig;
+use noricum_core::audit::AuditLevel;
 use noricum_ir::FunctionUnit;
 use tracing::info;
 
@@ -42,6 +47,30 @@ enum Commands {
         /// Generate HTML report at this path
         #[arg(long)]
         report: Option<PathBuf>,
+        /// Run fuzz testing for behavioral comparison
+        #[arg(long)]
+        fuzz: bool,
+        /// Number of fuzz test iterations (default: 100)
+        #[arg(long, default_value_t = 100)]
+        fuzz_iterations: u32,
+        /// Write audit trail to this file (JSON-lines format)
+        #[arg(long)]
+        audit_log: Option<PathBuf>,
+        /// Audit detail level: summary, detailed, or full
+        #[arg(long, default_value = "summary")]
+        audit_level: String,
+        /// Incremental migration mode (track per-function state)
+        #[arg(long)]
+        incremental: bool,
+        /// Migrate only these functions (comma-separated names)
+        #[arg(long, value_delimiter = ',')]
+        functions: Option<Vec<String>>,
+        /// Directory for incremental state files
+        #[arg(long, default_value = ".noricum-state")]
+        state_dir: PathBuf,
+        /// Interactive review mode
+        #[arg(long)]
+        interactive: bool,
     },
     /// Analyze a C file and report difficulty classification
     Analyze {
@@ -50,6 +79,15 @@ enum Commands {
     },
     /// Check if required tools are available
     Doctor,
+    /// Start REST API server
+    Serve {
+        /// Host address to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
+    },
     /// Run benchmark on all fixtures and produce a report
     Bench {
         /// Fixtures directory (default: tests/fixtures/simple)
@@ -58,6 +96,30 @@ enum Commands {
         /// Output report as JSON
         #[arg(long)]
         json: bool,
+        /// Save results as baseline
+        #[arg(long)]
+        save_baseline: Option<PathBuf>,
+        /// Compare against a baseline and report regressions
+        #[arg(long)]
+        compare_baseline: Option<PathBuf>,
+    },
+    /// Run CRUST-Bench evaluation
+    CrustBench {
+        /// Path to the CRUST-Bench dataset directory
+        #[arg(long)]
+        dataset: PathBuf,
+        /// Filter projects by name prefix
+        #[arg(long)]
+        filter: Option<String>,
+        /// Limit number of projects to evaluate
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Write report to this path
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -89,10 +151,54 @@ async fn main() {
             diff_test,
             json,
             report,
-        } => cmd_migrate(&path, no_llm, &output, diff_test, json, report.as_deref()).await,
+            fuzz,
+            fuzz_iterations,
+            audit_log,
+            audit_level,
+            incremental: _,
+            functions: _,
+            state_dir: _,
+            interactive: _,
+        } => {
+            let level: AuditLevel = audit_level.parse().unwrap_or(AuditLevel::Summary);
+            cmd_migrate(
+                &path,
+                no_llm,
+                &output,
+                diff_test,
+                json,
+                report.as_deref(),
+                fuzz,
+                fuzz_iterations,
+                audit_log.as_deref(),
+                level,
+            )
+            .await
+        }
         Commands::Analyze { path } => cmd_analyze(&path),
         Commands::Doctor => cmd_doctor(),
-        Commands::Bench { fixtures, json } => cmd_bench(&fixtures, json).await,
+        Commands::Serve { host, port } => cmd_serve(&host, port).await,
+        Commands::Bench {
+            fixtures,
+            json,
+            save_baseline,
+            compare_baseline,
+        } => {
+            cmd_bench(
+                &fixtures,
+                json,
+                save_baseline.as_deref(),
+                compare_baseline.as_deref(),
+            )
+            .await
+        }
+        Commands::CrustBench {
+            dataset,
+            filter,
+            limit,
+            json,
+            output,
+        } => cmd_crust_bench(&dataset, filter.as_deref(), limit, json, output.as_deref()).await,
     };
 
     if let Err(e) = result {
@@ -104,6 +210,7 @@ async fn main() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_migrate(
     path: &Path,
     no_llm: bool,
@@ -111,16 +218,32 @@ async fn cmd_migrate(
     run_diff: bool,
     json: bool,
     report_path: Option<&Path>,
+    fuzz: bool,
+    fuzz_iterations: u32,
+    audit_log: Option<&Path>,
+    audit_level: AuditLevel,
 ) -> Result<()> {
     let path = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
     if no_llm {
-        return cmd_migrate_sync(&path, output_dir, run_diff, json, report_path);
+        return cmd_migrate_sync(
+            &path,
+            output_dir,
+            run_diff,
+            json,
+            report_path,
+            fuzz,
+            fuzz_iterations,
+        );
     }
 
-    let config = MigrationConfig::default();
+    let mut config = MigrationConfig::default();
+    config.fuzz_test = fuzz;
+    config.fuzz_iterations = fuzz_iterations;
+    config.audit_log = audit_log.map(|p| p.to_path_buf());
+    config.audit_level = audit_level;
 
     if path.is_file() {
         info!(file = %path.display(), "migrating single file");
@@ -128,7 +251,7 @@ async fn cmd_migrate(
             .await
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
-        print_unit_result(&unit, output_dir, run_diff, json)?;
+        print_unit_result(&unit, output_dir, run_diff, json, fuzz, fuzz_iterations)?;
 
         if let Some(report) = report_path {
             write_html_report_single(&unit, report)?;
@@ -151,7 +274,7 @@ async fn cmd_migrate(
 
             for unit in &project.units {
                 println!();
-                print_unit_result(unit, output_dir, run_diff, json)?;
+                print_unit_result(unit, output_dir, run_diff, json, fuzz, fuzz_iterations)?;
             }
         }
 
@@ -176,13 +299,15 @@ fn cmd_migrate_sync(
     run_diff: bool,
     json: bool,
     report_path: Option<&Path>,
+    fuzz: bool,
+    fuzz_iterations: u32,
 ) -> Result<()> {
     if path.is_file() {
         info!(file = %path.display(), "migrating single file (sync, no LLM)");
         let unit = noricum_core::orchestrator::migrate_file_sync(path)
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
-        print_unit_result(&unit, output_dir, run_diff, json)?;
+        print_unit_result(&unit, output_dir, run_diff, json, fuzz, fuzz_iterations)?;
 
         if let Some(report) = report_path {
             write_html_report_single(&unit, report)?;
@@ -204,7 +329,7 @@ fn cmd_migrate_sync(
 
             for unit in &project.units {
                 println!();
-                print_unit_result(unit, output_dir, run_diff, json)?;
+                print_unit_result(unit, output_dir, run_diff, json, fuzz, fuzz_iterations)?;
             }
         }
 
@@ -236,6 +361,8 @@ fn print_unit_result(
     output_dir: &Path,
     run_diff: bool,
     json: bool,
+    fuzz: bool,
+    fuzz_iterations: u32,
 ) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(unit)?);
@@ -289,6 +416,38 @@ fn print_unit_result(
                 Err(e) => println!("  Error running diff test: {e}"),
             }
         }
+
+        if fuzz && fuzz_iterations > 0 {
+            println!("\n--- Fuzz Test ---");
+            let fuzz_config = noricum_tools::fuzz_test::FuzzConfig {
+                iterations: fuzz_iterations,
+                seed: Some(42),
+                ..Default::default()
+            };
+            match noricum_tools::fuzz_test::run_fuzz_test(&unit.c_source, rust_output, &fuzz_config)
+            {
+                Ok(result) => {
+                    if result.all_passed {
+                        println!(
+                            "  PASSED: {}/{} iterations match",
+                            result.iterations_run, fuzz_iterations
+                        );
+                    } else {
+                        println!(
+                            "  FAILED: {} divergences in {} iterations",
+                            result.failures, result.iterations_run
+                        );
+                        if let Some(ref div) = result.first_divergence {
+                            println!("  First divergence:");
+                            println!("    Input: {:?}", div.input.label);
+                            println!("    C output:    {:?}", div.c_output);
+                            println!("    Rust output: {:?}", div.rust_output);
+                        }
+                    }
+                }
+                Err(e) => println!("  Error running fuzz test: {e}"),
+            }
+        }
     } else {
         println!("\n  (no Rust output generated)");
         println!("  Run `noricum doctor` to check tool availability.");
@@ -340,7 +499,12 @@ fn cmd_analyze(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_bench(fixtures_dir: &Path, json: bool) -> Result<()> {
+async fn cmd_bench(
+    fixtures_dir: &Path,
+    json: bool,
+    save_baseline: Option<&Path>,
+    compare_baseline: Option<&Path>,
+) -> Result<()> {
     let fixtures_dir = fixtures_dir
         .canonicalize()
         .with_context(|| format!("fixtures dir not found: {}", fixtures_dir.display()))?;
@@ -477,6 +641,139 @@ async fn cmd_bench(fixtures_dir: &Path, json: bool) -> Result<()> {
         println!("  Total time:   {:.1}s", total_time.as_secs_f64());
     }
 
+    // Save baseline if requested
+    let report_value = serde_json::json!({
+        "summary": {
+            "total_files": total_files,
+            "validated": total_validated,
+            "failed": total_failed,
+            "success_rate_pct": success_rate,
+            "total_llm_calls": total_llm_calls,
+            "total_repair_iterations": total_repair_iters,
+            "total_time_ms": total_time.as_millis() as u64,
+        },
+        "results": results,
+    });
+
+    if let Some(baseline_path) = save_baseline {
+        std::fs::write(baseline_path, serde_json::to_string_pretty(&report_value)?)?;
+        println!("Baseline saved to {}", baseline_path.display());
+    }
+
+    // Compare against baseline if requested
+    if let Some(baseline_path) = compare_baseline {
+        let baseline_str = std::fs::read_to_string(baseline_path)
+            .with_context(|| format!("cannot read baseline: {}", baseline_path.display()))?;
+        let baseline: serde_json::Value = serde_json::from_str(&baseline_str)?;
+
+        let base_rate = baseline["summary"]["success_rate_pct"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let current_rate = success_rate;
+
+        println!("\nBaseline Comparison");
+        println!("-------------------");
+        println!("  Baseline success rate: {base_rate:.1}%");
+        println!("  Current success rate:  {current_rate:.1}%");
+
+        if current_rate < base_rate {
+            println!(
+                "  REGRESSION: success rate dropped by {:.1}%",
+                base_rate - current_rate
+            );
+        } else if current_rate > base_rate {
+            println!(
+                "  IMPROVEMENT: success rate increased by {:.1}%",
+                current_rate - base_rate
+            );
+        } else {
+            println!("  No change in success rate.");
+        }
+
+        // Check individual regressions
+        if let Some(base_results) = baseline["results"].as_array() {
+            let mut regressions = Vec::new();
+            for base_r in base_results {
+                let name = base_r["name"].as_str().unwrap_or("");
+                let base_state = base_r["state"].as_str().unwrap_or("");
+                if base_state == "Validated" {
+                    // Check if still validated
+                    if let Some(current) = results.iter().find(|r| r["name"].as_str() == Some(name))
+                    {
+                        let cur_state = current["state"].as_str().unwrap_or("");
+                        if cur_state != "Validated" {
+                            regressions.push(format!("{name}: {base_state} -> {cur_state}"));
+                        }
+                    }
+                }
+            }
+            if !regressions.is_empty() {
+                println!("  Individual regressions:");
+                for r in &regressions {
+                    println!("    {r}");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_serve(host: &str, port: u16) -> Result<()> {
+    let config = MigrationConfig::default();
+    let state = Arc::new(api::AppState { config });
+    let app = api::build_router(state);
+    let addr = format!("{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    info!("Noricum API listening on http://{addr}");
+    println!("Noricum API listening on http://{addr}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn cmd_crust_bench(
+    dataset: &Path,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    json: bool,
+    output: Option<&Path>,
+) -> Result<()> {
+    let config = crust_bench::CrustBenchConfig {
+        dataset_path: dataset.to_path_buf(),
+        filter: filter.map(|s| s.to_string()),
+        limit,
+        migration_config: MigrationConfig::default(),
+    };
+    let report = crust_bench::run_crust_bench(&config).await?;
+
+    if json {
+        let json_str = serde_json::to_string_pretty(&report)?;
+        if let Some(out) = output {
+            std::fs::write(out, &json_str)?;
+            println!("Report written to {}", out.display());
+        } else {
+            println!("{json_str}");
+        }
+    } else {
+        println!("CRUST-Bench Report");
+        println!("==================");
+        println!("  Total projects:    {}", report.total_projects);
+        println!(
+            "  Compilation rate:  {:.1}%",
+            report.compilation_rate * 100.0
+        );
+        println!("  Test pass rate:    {:.1}%", report.test_pass_rate * 100.0);
+        println!("  Avg idiomatic:     {:.1}", report.avg_idiomatic_score);
+        println!();
+        for p in &report.projects {
+            let status = if p.compilation_success { "OK" } else { "FAIL" };
+            println!(
+                "  {:<30} {} score={:.0} tests={}/{}",
+                p.name, status, p.idiomatic_score_avg, p.tests_passed, p.tests_total,
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -524,6 +821,14 @@ fn cmd_doctor() -> Result<()> {
             println!("OK ({})", String::from_utf8_lossy(&output.stdout).trim());
         }
         _ => println!("NOT FOUND (install with: rustup component add clippy)"),
+    }
+
+    // Check C preprocessor
+    print!("  C preprocessor: ");
+    if noricum_tools::preprocessor::preprocessor_available() {
+        println!("OK");
+    } else {
+        println!("NOT FOUND");
     }
 
     println!();

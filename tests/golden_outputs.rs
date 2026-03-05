@@ -47,6 +47,47 @@ fn compile_and_run(fixture_path: &str) -> String {
     String::from_utf8_lossy(&run.stdout).to_string()
 }
 
+/// Compile multiple C source files with an include directory and return stdout.
+fn compile_and_run_multi(sources: &[&str], include_dir: &str) -> String {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let include_path = base.join(include_dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("test_exe");
+
+    let mut cmd = Command::new("cc");
+    cmd.args(["-std=c11", "-lm", "-I"])
+        .arg(&include_path)
+        .arg("-o")
+        .arg(&exe);
+    for source in sources {
+        let full_path = base.join(source);
+        assert!(
+            full_path.exists(),
+            "fixture not found: {}",
+            full_path.display()
+        );
+        cmd.arg(&full_path);
+    }
+
+    let compile = cmd.output().expect("failed to run cc");
+    assert!(
+        compile.status.success(),
+        "multi-file C compilation failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(&exe)
+        .output()
+        .expect("failed to run compiled executable");
+    assert!(
+        run.status.success(),
+        "executable failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    String::from_utf8_lossy(&run.stdout).to_string()
+}
+
 #[test]
 fn golden_add() {
     assert_eq!(compile_and_run("tests/fixtures/simple/add.c"), "5\n0\n0\n");
@@ -138,5 +179,20 @@ fn golden_miniz_test() {
     assert_eq!(
         output,
         "adler32_hello=530449514\nadler32_empty=1\nadler32_null=1\ncrc32_hello=3964322768\ncrc32_empty=0\ncrc32_null=0\nadler32_incremental=530449514\ncrc32_incremental=3964322768\ndone\n"
+    );
+}
+
+#[test]
+fn golden_cjson_test() {
+    let output = compile_and_run_multi(
+        &[
+            "tests/fixtures/cjson/cjson_test.c",
+            "tests/fixtures/cjson/cJSON.c",
+        ],
+        "tests/fixtures/cjson",
+    );
+    assert_eq!(
+        output,
+        "create: {\"name\":\"noricum\",\"version\":1,\"valid\":true}\nkey=value\nnum=42\narray_size=5\nitem_2=3\ndone\n"
     );
 }

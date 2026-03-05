@@ -1,36 +1,15 @@
 /// Model router: selects the appropriate LLM model based on function characteristics.
 ///
-/// Difficulty classification is based on heuristics about the C source code.
-/// This will be refined with tree-sitter analysis in Phase 1.
+/// Uses tree-sitter AST analysis for accurate difficulty classification,
+/// with regex heuristics as fallback.
 use noricum_ir::Difficulty;
 
-/// Classify the difficulty of a C function based on source code heuristics.
+/// Classify the difficulty of a C function based on AST analysis.
+///
+/// Delegates to tree-sitter based classification from `noricum_tools::ast`,
+/// which internally falls back to regex if tree-sitter parsing fails.
 pub fn classify_difficulty(c_source: &str) -> Difficulty {
-    let has_pointers = c_source.contains('*') && !c_source.contains("/*");
-    let has_malloc = c_source.contains("malloc") || c_source.contains("calloc");
-    let has_void_ptr = c_source.contains("void *") || c_source.contains("void*");
-    let has_cast = c_source.contains(")(");
-    let has_goto = c_source.contains("goto ");
-    let has_union = c_source.contains("union ");
-    let has_callback = c_source.contains("(*") && c_source.contains(")(");
-    let line_count = c_source.lines().count();
-
-    let hard_signals = [has_void_ptr, has_goto, has_union, has_callback]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-    let medium_signals = [has_pointers, has_malloc, has_cast]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-
-    if hard_signals >= 1 || (medium_signals >= 2 && line_count > 50) {
-        Difficulty::Hard
-    } else if medium_signals >= 1 || line_count > 30 {
-        Difficulty::Medium
-    } else {
-        Difficulty::Easy
-    }
+    noricum_tools::ast::classify_difficulty_ast(c_source)
 }
 
 #[cfg(test)]

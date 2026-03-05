@@ -94,57 +94,5 @@ pub async fn translate_function_with_patterns(
         "received translation response"
     );
 
-    Ok(extract_rust_code(&response))
-}
-
-/// Extract Rust code from the LLM response, stripping markdown fences if present.
-fn extract_rust_code(response: &str) -> String {
-    // Try to extract code from ```rust ... ``` fences
-    if let Some(start) = response.find("```rust") {
-        let after_fence = &response[start + 7..];
-        if let Some(end) = after_fence.find("```") {
-            return after_fence[..end].trim().to_string();
-        }
-    }
-
-    // Try generic code fences
-    if let Some(start) = response.find("```") {
-        let after_fence = &response[start + 3..];
-        // Skip the language tag line if any
-        let code_start = after_fence.find('\n').map(|i| i + 1).unwrap_or(0);
-        let after_lang = &after_fence[code_start..];
-        if let Some(end) = after_lang.find("```") {
-            return after_lang[..end].trim().to_string();
-        }
-    }
-
-    // No fences found, return as-is
-    response.trim().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_rust_code_with_fence() {
-        let response =
-            "Here is the code:\n```rust\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n```\n";
-        let code = extract_rust_code(response);
-        assert_eq!(code, "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}");
-    }
-
-    #[test]
-    fn test_extract_rust_code_no_fence() {
-        let response = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}";
-        let code = extract_rust_code(response);
-        assert_eq!(code, "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}");
-    }
-
-    #[test]
-    fn test_extract_rust_code_generic_fence() {
-        let response = "```\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n```";
-        let code = extract_rust_code(response);
-        assert_eq!(code, "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}");
-    }
+    Ok(crate::extract_rust_code(&response))
 }

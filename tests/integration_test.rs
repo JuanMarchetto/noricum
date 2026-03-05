@@ -369,6 +369,45 @@ fn test_miniz_test_c_compiles() {
     );
 }
 
+/// Test that cjson fixture compiles as multi-file C.
+#[test]
+fn test_cjson_c_compiles() {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("cjson_test");
+
+    let output = std::process::Command::new("cc")
+        .args(["-std=c11", "-lm", "-I"])
+        .arg(base.join("tests/fixtures/cjson"))
+        .arg("-o")
+        .arg(&exe)
+        .arg(base.join("tests/fixtures/cjson/cjson_test.c"))
+        .arg(base.join("tests/fixtures/cjson/cJSON.c"))
+        .output()
+        .expect("failed to compile cjson fixture");
+
+    assert!(
+        output.status.success(),
+        "cjson fixture should compile, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(exe.exists(), "compiled executable should exist");
+}
+
+/// Test that `noricum serve --help` shows host/port options.
+#[test]
+fn test_cli_serve_help() {
+    let output = noricum_cmd()
+        .args(["serve", "--help"])
+        .output()
+        .expect("failed to run noricum serve --help");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("host"), "should show --host option");
+    assert!(stdout.contains("port"), "should show --port option");
+}
+
 /// Test that migrate --no-llm on multiple fixtures produces consistent results.
 #[test]
 fn test_migrate_multiple_fixtures() {

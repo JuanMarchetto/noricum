@@ -18,6 +18,8 @@ publish = false
 
 [dev-dependencies]
 noricum-tools = { path = "crates/noricum-tools" }
+noricum-validation = { path = "crates/noricum-validation" }
+noricum-ir = { path = "crates/noricum-ir" }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 
@@ -65,6 +67,24 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tree-sitter = "0.25"
 tree-sitter-c = "0.23"
 tree-sitter-rust = "0.23"
+
+# Web framework
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Random (fuzz testing)
+rand = { version = "0.9", features = ["small_rng"] }
+
+# Crypto (audit trail)
+sha2 = "0.10"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Terminal UI (interactive review)
+crossterm = "0.28"
+similar = "2"
 
 # Testing
 tempfile = "3"

@@ -6,8 +6,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
-use regex::Regex;
-
 /// A directed graph of function call dependencies.
 pub struct DependencyGraph {
     /// Map from function name to list of functions it calls.
@@ -72,79 +70,20 @@ impl DependencyGraph {
 
     /// Extract function names defined in a C source file.
     ///
-    /// Looks for patterns like `type name(` at the beginning of a line,
-    /// excluding common keywords and preprocessor directives.
+    /// Delegates to tree-sitter AST extraction, with regex fallback.
     pub fn extract_functions(c_source: &str) -> Vec<String> {
-        // Match function definitions: return_type function_name(
-        // This handles: int foo(, void bar(, static int baz(, unsigned long qux(
-        // But NOT: if(, while(, for(, switch(, return(, #define FOO(
-        let re = Regex::new(
-            r"(?m)^\s*(?:static\s+)?(?:inline\s+)?(?:const\s+)?(?:unsigned\s+)?(?:signed\s+)?(?:long\s+)?(?:short\s+)?(?:struct\s+\w+\s*\*?\s*|enum\s+\w+\s+)?(?:void|int|char|float|double|size_t|ssize_t|uint\d+_t|int\d+_t|bool|_Bool|\w+_t)\s*\*?\s*\*?\s*(\w+)\s*\("
-        ).expect("invalid regex");
-
-        let keywords: HashSet<&str> = [
-            "if",
-            "while",
-            "for",
-            "switch",
-            "return",
-            "sizeof",
-            "typeof",
-            "defined",
-            "main",
-            "__attribute__",
-        ]
-        .into_iter()
-        .collect();
-
-        let mut functions = Vec::new();
-        for cap in re.captures_iter(c_source) {
-            let name = cap[1].to_string();
-            if !keywords.contains(name.as_str()) && !name.starts_with('_') {
-                functions.push(name);
-            }
-        }
-
-        functions.sort();
-        functions.dedup();
-        functions
+        let funcs = noricum_tools::ast::extract_c_functions(c_source);
+        let mut names: Vec<String> = funcs.into_iter().map(|f| f.name).collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Extract function calls from a C source body.
     ///
-    /// Looks for `name(` patterns where `name` is in the set of known project functions.
-    /// Filters out definitions, keywords, and preprocessor directives.
+    /// Delegates to tree-sitter AST call extraction, with regex fallback.
     pub fn extract_calls(c_source: &str, known_functions: &[String]) -> Vec<String> {
-        let known_set: HashSet<&str> = known_functions.iter().map(|s| s.as_str()).collect();
-
-        // Match identifier followed by ( that isn't a definition
-        let call_re = Regex::new(r"\b(\w+)\s*\(").expect("invalid regex");
-
-        let keywords: HashSet<&str> = [
-            "if",
-            "while",
-            "for",
-            "switch",
-            "return",
-            "sizeof",
-            "typeof",
-            "defined",
-            "__attribute__",
-        ]
-        .into_iter()
-        .collect();
-
-        let mut calls = Vec::new();
-        for cap in call_re.captures_iter(c_source) {
-            let name = &cap[1];
-            if known_set.contains(name) && !keywords.contains(name) {
-                calls.push(name.to_string());
-            }
-        }
-
-        calls.sort();
-        calls.dedup();
-        calls
+        noricum_tools::ast::extract_c_calls(c_source, known_functions)
     }
 
     /// Return functions in topological order (dependencies first).

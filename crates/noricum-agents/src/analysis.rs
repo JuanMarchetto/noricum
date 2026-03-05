@@ -83,7 +83,7 @@ pub async fn analyze_function(
 }
 
 /// Extract JSON from the LLM response, handling markdown code fences.
-fn parse_analysis_response(response: &str) -> Result<AnalysisResult, AgentError> {
+pub(crate) fn parse_analysis_response(response: &str) -> Result<AnalysisResult, AgentError> {
     // Try to extract JSON from markdown code fences first
     let json_str = if let Some(start) = response.find("```json") {
         let after_fence = &response[start + 7..];
@@ -151,5 +151,38 @@ mod tests {
     fn test_parse_analysis_response_invalid_json() {
         let result = parse_analysis_response("not json at all");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_analysis_complex() {
+        let result = parse_analysis_response(crate::mock_responses::MOCK_ANALYSIS_COMPLEX).unwrap();
+        assert_eq!(result.difficulty, "hard");
+        assert!(result.patterns.contains(&"malloc_free".to_string()));
+        assert!(result.patterns.contains(&"ptr_arithmetic".to_string()));
+        assert!(!result.risks.is_empty());
+        assert!(!result.strategy.is_empty());
+        assert!(result.dependencies.contains(&"helper_alloc".to_string()));
+    }
+
+    #[test]
+    fn test_parse_analysis_malformed() {
+        let result = parse_analysis_response(crate::mock_responses::MOCK_ANALYSIS_MALFORMED);
+        assert!(
+            result.is_err(),
+            "malformed (non-JSON) response should return error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::AgentError::Parse(_)),
+            "should be a Parse error"
+        );
+    }
+
+    #[test]
+    fn test_parse_analysis_simple_mock() {
+        let result = parse_analysis_response(crate::mock_responses::MOCK_ANALYSIS_SIMPLE).unwrap();
+        assert_eq!(result.difficulty, "easy");
+        assert_eq!(result.patterns, vec!["pure_function"]);
+        assert!(result.risks.is_empty());
     }
 }

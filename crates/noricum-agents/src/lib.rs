@@ -1,4 +1,6 @@
 pub mod analysis;
+#[cfg(test)]
+mod mock_responses;
 pub mod providers;
 pub mod repair;
 pub mod test_gen;
@@ -19,4 +21,76 @@ pub enum AgentError {
 
     #[error("max retries exceeded")]
     MaxRetries,
+}
+
+/// Extract Rust code from an LLM response, stripping markdown fences if present.
+///
+/// Shared by translation and repair agents to avoid duplication.
+pub(crate) fn extract_rust_code(response: &str) -> String {
+    // Try to extract code from ```rust ... ``` fences
+    if let Some(start) = response.find("```rust") {
+        let after_fence = &response[start + 7..];
+        if let Some(end) = after_fence.find("```") {
+            return after_fence[..end].trim().to_string();
+        }
+    }
+
+    // Try generic code fences
+    if let Some(start) = response.find("```") {
+        let after_fence = &response[start + 3..];
+        // Skip the language tag line if any
+        let code_start = after_fence.find('\n').map(|i| i + 1).unwrap_or(0);
+        let after_lang = &after_fence[code_start..];
+        if let Some(end) = after_lang.find("```") {
+            return after_lang[..end].trim().to_string();
+        }
+    }
+
+    // No fences found, return as-is
+    response.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_rust_code_with_fence() {
+        let response =
+            "Here is the code:\n```rust\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n```\n";
+        let code = extract_rust_code(response);
+        assert_eq!(code, "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}");
+    }
+
+    #[test]
+    fn test_extract_rust_code_no_fence() {
+        let response = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}";
+        let code = extract_rust_code(response);
+        assert_eq!(code, "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}");
+    }
+
+    #[test]
+    fn test_extract_rust_code_generic_fence() {
+        let response = "```\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n```";
+        let code = extract_rust_code(response);
+        assert_eq!(code, "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}");
+    }
+
+    #[test]
+    fn test_extract_with_prose_and_code() {
+        let response = "Here's the Rust translation:\n\n```rust\nfn add(a: i32, b: i32) -> i32 { a + b }\n```\n\nThis is a simple function.";
+        let code = extract_rust_code(response);
+        assert_eq!(code, "fn add(a: i32, b: i32) -> i32 { a + b }");
+    }
+
+    #[test]
+    fn test_extract_nested_fences() {
+        let response =
+            "```rust\nfn fixed() -> i32 {\n    // uses ```backticks``` in comment\n    42\n}\n```";
+        let code = extract_rust_code(response);
+        assert!(
+            code.contains("fn fixed()"),
+            "should extract code despite nested backticks"
+        );
+    }
 }

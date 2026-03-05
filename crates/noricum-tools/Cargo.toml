@@ -13,3 +13,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tempfile = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-c = { workspace = true }
+tree-sitter-rust = { workspace = true }
+regex = { workspace = true }
+rand = { version = "0.9", features = ["small_rng"] }
