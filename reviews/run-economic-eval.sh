@@ -173,7 +173,18 @@ fi
 if $FIX_MODE && [ -s "$REPORT_FILE" ]; then
     echo ""
     echo "=== Running Economic Auto-Fix Pass ==="
-    FIX_PROMPT="Read the economic evaluation at $REPORT_FILE. For every high-priority economic recommendation, implement what can be done in code (documentation improvements, API readiness, benchmark additions, etc.). Run cargo check and cargo test after changes."
+    FIX_PROMPT="You are a Rust software engineer working on the Noricum project (a C-to-Rust migration tool).
+
+Read the economic evaluation report at $REPORT_FILE.
+
+Extract all high-priority recommendations from each economic perspective (E1-E6). For each recommendation that can be addressed in code:
+1. Implement the fix (documentation improvements, README updates, benchmark additions, API readiness, test coverage, etc.)
+2. After each change, run: cargo check --workspace && cargo test --workspace
+3. If a fix breaks compilation or tests, revert it and move to the next item
+
+Skip recommendations that require external actions (marketing, community outreach, funding applications). Focus only on code and documentation improvements.
+
+Output a summary of what you implemented and what you skipped, with file paths."
 
     env -u CLAUDECODE claude -p "$FIX_PROMPT" \
         --dangerously-skip-permissions \

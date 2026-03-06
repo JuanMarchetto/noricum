@@ -228,7 +228,19 @@ fi
 if $FIX_MODE && [ -s "$REPORT_FILE" ]; then
     echo ""
     echo "=== Running Auto-Fix Pass ==="
-    FIX_PROMPT="Read the stakeholder review at $REPORT_FILE. For every Blocking and High-priority issue listed, implement the fix directly. Run cargo check, cargo test, and cargo clippy after each change to verify. Do NOT fix Nice-to-have items unless trivial."
+    FIX_PROMPT="You are a Rust software engineer working on the Noricum project (a C-to-Rust migration tool).
+
+Read the stakeholder review report at $REPORT_FILE.
+
+Extract all Blocking and High-priority issues from each stakeholder perspective (P1-P8). For each issue:
+1. Identify the file and line referenced
+2. Implement the code fix (edit Rust source files, Cargo.toml, CI configs, docs, etc.)
+3. After each change, run: cargo check --workspace && cargo test --workspace && cargo clippy --workspace -- -D warnings
+4. If a fix breaks compilation or tests, revert it and move to the next issue
+
+Skip Nice-to-have items. Focus only on code-level fixes (no external actions like publishing crates or setting up services).
+
+Output a summary of what you fixed and what you skipped, with file paths."
 
     env -u CLAUDECODE claude -p "$FIX_PROMPT" \
         --dangerously-skip-permissions \
