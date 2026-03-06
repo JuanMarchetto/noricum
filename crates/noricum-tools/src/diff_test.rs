@@ -159,9 +159,10 @@ pub fn run_diff_test_with_options(
 /// Returns `true` if compilation succeeded.
 pub(crate) fn compile_c_exe(c_file: &Path, output_path: &Path) -> Result<bool, ToolError> {
     let output = Command::new("cc")
-        .args(["-std=c11", "-o"])
+        .args(["-std=gnu11", "-o"])
         .arg(output_path)
         .arg(c_file)
+        .arg("-lm")
         .output()
         .map_err(|_| ToolError::CommandNotFound("cc".to_string()))?;
 

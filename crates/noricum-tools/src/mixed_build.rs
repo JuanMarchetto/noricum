@@ -36,7 +36,7 @@ pub fn build_mixed_project(
 
     // Step 1: Compile C to object file
     let c_result = Command::new("cc")
-        .args(["-std=c11", "-c", "-o"])
+        .args(["-std=gnu11", "-c", "-o"])
         .arg(&c_obj)
         .arg(&c_file)
         .output()
@@ -92,7 +92,7 @@ pub fn compile_c_static_lib(
 
     // Compile to object
     let result = Command::new("cc")
-        .args(["-std=c11", "-c", "-o"])
+        .args(["-std=gnu11", "-c", "-o"])
         .arg(&obj_file)
         .arg(&c_file)
         .output()

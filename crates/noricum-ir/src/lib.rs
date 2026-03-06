@@ -108,6 +108,21 @@ pub struct MigrationMetrics {
     pub input_tokens: u64,
     /// Estimated total output tokens across all LLM calls
     pub output_tokens: u64,
+    /// Estimated cost in USD based on token usage and model pricing
+    pub estimated_cost_usd: f64,
+}
+
+impl MigrationMetrics {
+    /// Estimate cost in USD from token counts.
+    ///
+    /// Uses Claude Sonnet 4 pricing as default: $3/MTok input, $15/MTok output.
+    /// For Hard difficulty (Opus), costs are higher but this provides a baseline.
+    pub fn compute_cost(&mut self) {
+        const INPUT_COST_PER_MTOK: f64 = 3.0;
+        const OUTPUT_COST_PER_MTOK: f64 = 15.0;
+        self.estimated_cost_usd = (self.input_tokens as f64 / 1_000_000.0) * INPUT_COST_PER_MTOK
+            + (self.output_tokens as f64 / 1_000_000.0) * OUTPUT_COST_PER_MTOK;
+    }
 }
 
 impl FunctionUnit {
