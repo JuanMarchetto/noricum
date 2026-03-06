@@ -22,3 +22,16 @@ pub(crate) const MOCK_TRANSLATION_WITH_PROSE: &str = "Here's the Rust translatio
 #[cfg(test)]
 pub(crate) const MOCK_REPAIR_NESTED_FENCES: &str =
     "```rust\nfn fixed() -> i32 {\n    // uses ```backticks``` in comment\n    42\n}\n```";
+
+#[cfg(test)]
+pub(crate) const MOCK_ANALYSIS_EMPTY_FIELDS: &str = r#"{"difficulty":"easy","patterns":[],"rust_equivalents":{},"dependencies":[],"risks":[],"strategy":""}"#;
+
+#[cfg(test)]
+pub(crate) const MOCK_ANALYSIS_MISSING_FIELD: &str = r#"{"difficulty":"easy","patterns":[]}"#;
+
+#[cfg(test)]
+pub(crate) const MOCK_TRANSLATION_EMPTY: &str = "";
+
+#[cfg(test)]
+pub(crate) const MOCK_TRANSLATION_ONLY_PROSE: &str =
+    "I cannot translate this code because it is too complex.";

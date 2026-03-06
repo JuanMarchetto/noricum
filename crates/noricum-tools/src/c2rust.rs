@@ -103,7 +103,10 @@ pub fn transpile(c_file: &Path) -> Result<C2RustOutput, ToolError> {
     }
 
     // C2Rust outputs a .rs file with the same stem as the input
-    let stem = c_file.file_stem().unwrap().to_string_lossy();
+    let stem = c_file
+        .file_stem()
+        .ok_or_else(|| ToolError::C2RustFailed("source file has no stem".to_string()))?
+        .to_string_lossy();
     let rust_file = find_rust_output(tmp_dir.path(), &stem)?;
     let rust_source = std::fs::read_to_string(&rust_file)?;
 

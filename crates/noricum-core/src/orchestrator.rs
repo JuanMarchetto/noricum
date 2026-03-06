@@ -46,6 +46,14 @@ pub struct MigrationConfig {
     pub preprocess: bool,
     /// Whether to generate doc comments on migrated Rust functions.
     pub generate_docs: bool,
+    /// Temperature for analysis agent (default: 0.2).
+    pub analysis_temperature: Option<f64>,
+    /// Temperature for translation agent (default: 0.3).
+    pub translation_temperature: Option<f64>,
+    /// Base temperature for repair agent (default: 0.4).
+    pub repair_base_temperature: Option<f64>,
+    /// Temperature for test generation agent (default: 0.3).
+    pub test_gen_temperature: Option<f64>,
 }
 
 impl Default for MigrationConfig {
@@ -62,6 +70,10 @@ impl Default for MigrationConfig {
             fuzz_iterations: 100,
             preprocess: false,
             generate_docs: false,
+            analysis_temperature: None,
+            translation_temperature: None,
+            repair_base_temperature: None,
+            test_gen_temperature: None,
         }
     }
 }
@@ -360,6 +372,10 @@ pub async fn migrate_file(
     unit.state = MigrationState::Analyzed;
     unit.metrics.analysis_ms = analysis_start.elapsed().as_millis() as u64;
     unit.metrics.llm_calls += 1;
+    // Estimate token usage for analysis call
+    unit.metrics.input_tokens += noricum_agents::estimate_tokens(&unit.c_source);
+    unit.metrics.output_tokens +=
+        noricum_agents::estimate_tokens(&format!("{:?}", analysis.patterns));
     info!(
         function = %name,
         state = ?unit.state,
@@ -426,6 +442,11 @@ pub async fn migrate_file(
     unit.state = MigrationState::Refined;
     unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
     unit.metrics.llm_calls += 1;
+    // Estimate token usage for translation call
+    unit.metrics.input_tokens += noricum_agents::estimate_tokens(&unit.c_source);
+    if let Some(ref rust) = unit.rust_output {
+        unit.metrics.output_tokens += noricum_agents::estimate_tokens(rust);
+    }
     info!(function = %name, state = ?unit.state, translation_ms = unit.metrics.translation_ms, "state -> Refined");
 
     // --- Stage 6: Validate ---
@@ -515,9 +536,14 @@ pub async fn migrate_file(
                 }
             };
 
+            // Estimate token usage for repair call
+            let input_token_est = noricum_agents::estimate_tokens(current_rust);
+            let output_token_est = noricum_agents::estimate_tokens(&repaired);
             unit.rust_output = Some(repaired);
             unit.state = MigrationState::Repairing(iteration);
             unit.metrics.llm_calls += 1;
+            unit.metrics.input_tokens += input_token_est;
+            unit.metrics.output_tokens += output_token_est;
             unit.metrics.repair_iterations = iteration;
 
             let re_validation =
@@ -583,6 +609,9 @@ pub async fn migrate_file(
                     Ok(test_code) => {
                         unit.metrics.test_gen_ms = test_gen_start.elapsed().as_millis() as u64;
                         unit.metrics.llm_calls += 1;
+                        unit.metrics.input_tokens +=
+                            noricum_agents::estimate_tokens(&unit.c_source);
+                        unit.metrics.output_tokens += noricum_agents::estimate_tokens(&test_code);
                         info!(
                             function = %name,
                             test_code_len = test_code.len(),

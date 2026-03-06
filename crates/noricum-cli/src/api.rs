@@ -35,8 +35,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             CorsLayer::new().allow_origin(AllowOrigin::list(allowed))
         }
         Err(_) => CorsLayer::new().allow_origin(AllowOrigin::list([
-            "http://localhost:3000".parse().unwrap(),
-            "http://127.0.0.1:3000".parse().unwrap(),
+            "http://localhost:3000"
+                .parse()
+                .expect("valid localhost URL literal"),
+            "http://127.0.0.1:3000"
+                .parse()
+                .expect("valid localhost URL literal"),
         ])),
     };
 

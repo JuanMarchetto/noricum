@@ -24,6 +24,14 @@ pub enum AgentError {
     MaxRetries,
 }
 
+/// Estimate token count from text length (chars / 4 heuristic).
+///
+/// rig-rs 0.31 does not expose usage metadata directly, so we estimate
+/// based on the ~4 characters per token average for English/code.
+pub fn estimate_tokens(text: &str) -> u64 {
+    (text.len() as u64).div_ceil(4)
+}
+
 /// Extract Rust code from an LLM response, stripping markdown fences if present.
 ///
 /// Shared by translation and repair agents to avoid duplication.
@@ -93,5 +101,21 @@ mod tests {
             code.contains("fn fixed()"),
             "should extract code despite nested backticks"
         );
+    }
+
+    #[test]
+    fn test_extract_rust_code_empty() {
+        let code = extract_rust_code(crate::mock_responses::MOCK_TRANSLATION_EMPTY);
+        assert!(code.is_empty(), "empty input should produce empty output");
+    }
+
+    #[test]
+    fn test_extract_rust_code_only_prose() {
+        let code = extract_rust_code(crate::mock_responses::MOCK_TRANSLATION_ONLY_PROSE);
+        assert!(
+            !code.is_empty(),
+            "prose-only input returns the text as-is (no fences found)"
+        );
+        assert!(code.contains("too complex"));
     }
 }

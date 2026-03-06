@@ -134,10 +134,11 @@ impl DependencyGraph {
             if let Some(calls) = self.edges.get(node) {
                 let mut next: Vec<&str> = Vec::new();
                 for call in calls {
-                    let deg = in_degree.get_mut(call.as_str()).unwrap();
-                    *deg -= 1;
-                    if *deg == 0 {
-                        next.push(call.as_str());
+                    if let Some(deg) = in_degree.get_mut(call.as_str()) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            next.push(call.as_str());
+                        }
                     }
                 }
                 // Sort for deterministic order

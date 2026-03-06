@@ -141,7 +141,9 @@ fn parse_params(params_str: &str) -> Vec<CParam> {
             (tokens[0].to_string(), format!("arg{i}"))
         } else {
             // Last token is the name (possibly with * prefix)
-            let last = tokens.last().unwrap();
+            let Some(last) = tokens.last() else {
+                continue;
+            };
             let name = last.trim_start_matches('*');
             let type_parts: Vec<&str> = tokens[..tokens.len() - 1].to_vec();
             let mut t = type_parts.join(" ");

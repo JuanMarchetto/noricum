@@ -147,7 +147,7 @@ fn parse_params(params_str: &str) -> Vec<(String, String)> {
             let p = p.trim();
             let parts: Vec<&str> = p.split_whitespace().collect();
             if parts.len() >= 2 {
-                let name = parts.last().unwrap().trim_start_matches('*').to_string();
+                let name = parts.last()?.trim_start_matches('*').to_string();
                 let ty = parts[..parts.len() - 1].join(" ");
                 Some((ty, name))
             } else {
