@@ -125,7 +125,7 @@ fn extract_block_comment(lines: &[&str], end_idx: usize) -> Vec<String> {
 
 /// Generate a brief description from the Rust function signature.
 fn generate_brief_from_signature(signature: &str, function_name: &str) -> String {
-    let re = Regex::new(r"fn\s+\w+\(([^)]*)\)(?:\s*->\s*(\S+))?").unwrap();
+    let re = Regex::new(r"fn\s+\w+\(([^)]*)\)(?:\s*->\s*(\S+))?").expect("hardcoded regex pattern");
 
     if let Some(caps) = re.captures(signature) {
         let params = caps.get(1).map(|m| m.as_str()).unwrap_or("");

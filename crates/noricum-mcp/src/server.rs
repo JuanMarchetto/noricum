@@ -115,7 +115,10 @@ fn handle_initialize(id: serde_json::Value) -> JsonRpcResponse {
         },
     };
 
-    JsonRpcResponse::success(id, serde_json::to_value(result).unwrap())
+    JsonRpcResponse::success(
+        id,
+        serde_json::to_value(result).expect("InitializeResult serialization"),
+    )
 }
 
 /// Handle `tools/list` request.
@@ -265,7 +268,10 @@ fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRp
         other => ToolResult::error(format!("unknown tool: {other}")),
     };
 
-    JsonRpcResponse::success(id, serde_json::to_value(result).unwrap())
+    JsonRpcResponse::success(
+        id,
+        serde_json::to_value(result).expect("ToolsListResult serialization"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +336,7 @@ fn tool_migrate_function(source: Option<String>) -> ToolResult {
         "unsafe_count": unit.unsafe_count,
         "diff_test_passed": unit.metrics.diff_test_passed,
     });
-    ToolResult::text(serde_json::to_string_pretty(&result).unwrap())
+    ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
 }
 
 /// `analyze_function`: Classify difficulty and report characteristics.
@@ -361,7 +367,7 @@ fn tool_analyze_function(source: Option<String>) -> ToolResult {
             "has_goto": has_goto,
         }
     });
-    ToolResult::text(serde_json::to_string_pretty(&result).unwrap())
+    ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
 }
 
 /// `check_compilation`: Compile Rust source and report results.
@@ -377,7 +383,7 @@ fn tool_check_compilation(source: Option<String>) -> ToolResult {
                 "success": compile_result.success,
                 "errors": compile_result.stderr,
             });
-            ToolResult::text(serde_json::to_string_pretty(&result).unwrap())
+            ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
         }
         Err(e) => ToolResult::error(format!("compilation check failed: {e}")),
     }
@@ -403,7 +409,7 @@ fn tool_get_idiomatic_score(source: Option<String>) -> ToolResult {
         "clippy_warning_count": clippy_warnings.len(),
         "clippy_warnings": clippy_warnings,
     });
-    ToolResult::text(serde_json::to_string_pretty(&result).unwrap())
+    ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
 }
 
 /// `diff_test`: Run differential test between C and Rust source.
@@ -426,7 +432,7 @@ fn tool_diff_test(c_source: Option<String>, rust_source: Option<String>) -> Tool
                 "c_output": result.c_output,
                 "rust_output": result.rust_output,
             });
-            ToolResult::text(serde_json::to_string_pretty(&res).unwrap())
+            ToolResult::text(serde_json::to_string_pretty(&res).expect("JSON serialization"))
         }
         Err(e) => ToolResult::error(format!("diff test failed: {e}")),
     }
@@ -465,7 +471,7 @@ fn tool_repair(source: Option<String>, errors: Option<String>) -> ToolResult {
             "Code has compilation errors. Review the compiler_output for details."
         }
     });
-    ToolResult::text(serde_json::to_string_pretty(&result).unwrap())
+    ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
 }
 
 #[cfg(test)]
