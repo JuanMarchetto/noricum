@@ -86,46 +86,5 @@ pub async fn generate_tests(
         "received test generation response"
     );
 
-    Ok(extract_rust_code(&response))
-}
-
-/// Extract Rust code from the LLM response, stripping markdown fences if present.
-fn extract_rust_code(response: &str) -> String {
-    if let Some(start) = response.find("```rust") {
-        let after_fence = &response[start + 7..];
-        if let Some(end) = after_fence.find("```") {
-            return after_fence[..end].trim().to_string();
-        }
-    }
-
-    if let Some(start) = response.find("```") {
-        let after_fence = &response[start + 3..];
-        let code_start = after_fence.find('\n').map(|i| i + 1).unwrap_or(0);
-        let after_lang = &after_fence[code_start..];
-        if let Some(end) = after_lang.find("```") {
-            return after_lang[..end].trim().to_string();
-        }
-    }
-
-    response.trim().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_rust_code_with_fence() {
-        let response = "```rust\n#[test]\nfn test_add() {\n    assert_eq!(add(1, 2), 3);\n}\n```";
-        let code = extract_rust_code(response);
-        assert!(code.contains("#[test]"));
-        assert!(code.contains("assert_eq!"));
-    }
-
-    #[test]
-    fn test_extract_rust_code_no_fence() {
-        let response = "#[test]\nfn test_add() {\n    assert_eq!(add(1, 2), 3);\n}";
-        let code = extract_rust_code(response);
-        assert!(code.contains("#[test]"));
-    }
+    Ok(crate::extract_rust_code(&response))
 }

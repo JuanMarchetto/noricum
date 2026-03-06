@@ -7,9 +7,20 @@
 //! - `get_idiomatic_score`: takes Rust source, returns score
 
 use std::io::{self, BufRead, Write};
+use std::sync::LazyLock;
 
 use serde_json::json;
 use tracing::{debug, error, info};
+
+/// Maximum input source size for MCP tool calls: 10 MB.
+const MAX_MCP_SOURCE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Migration call timeout: 5 minutes.
+const MIGRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Static Tokio runtime shared across MCP tool calls.
+static MCP_RUNTIME: LazyLock<tokio::runtime::Runtime> =
+    LazyLock::new(|| tokio::runtime::Runtime::new().expect("failed to create MCP tokio runtime"));
 
 use crate::protocol::{
     INVALID_PARAMS, InitializeResult, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND,
@@ -271,6 +282,13 @@ fn tool_migrate_function(source: Option<String>) -> ToolResult {
         None => return ToolResult::error("missing 'source' parameter".to_string()),
     };
 
+    if source.len() > MAX_MCP_SOURCE_SIZE {
+        return ToolResult::error(format!(
+            "source exceeds maximum size of {} bytes",
+            MAX_MCP_SOURCE_SIZE
+        ));
+    }
+
     let difficulty = noricum_core::router::classify_difficulty(&source);
 
     // Write to temp file for the pipeline
@@ -283,16 +301,19 @@ fn tool_migrate_function(source: Option<String>) -> ToolResult {
         return ToolResult::error(format!("failed to write temp file: {e}"));
     }
 
-    // Try async LLM pipeline, fall back to sync
+    // Try async LLM pipeline with timeout, fall back to sync
     let unit = if std::env::var("ANTHROPIC_API_KEY").is_ok() {
         let config = noricum_core::MigrationConfig::default();
-        let rt = match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt,
-            Err(e) => return ToolResult::error(format!("failed to create tokio runtime: {e}")),
-        };
-        match rt.block_on(noricum_core::orchestrator::migrate_file(&c_file, &config)) {
-            Ok(unit) => unit,
-            Err(e) => return ToolResult::error(format!("migration failed: {e}")),
+        match MCP_RUNTIME.block_on(async {
+            tokio::time::timeout(
+                MIGRATION_TIMEOUT,
+                noricum_core::orchestrator::migrate_file(&c_file, &config),
+            )
+            .await
+        }) {
+            Ok(Ok(unit)) => unit,
+            Ok(Err(e)) => return ToolResult::error(format!("migration failed: {e}")),
+            Err(_) => return ToolResult::error("migration timed out (5 minute limit)".to_string()),
         }
     } else {
         match noricum_core::orchestrator::migrate_file_sync(&c_file) {
@@ -318,6 +339,12 @@ fn tool_analyze_function(source: Option<String>) -> ToolResult {
         Some(s) => s,
         None => return ToolResult::error("missing 'source' parameter".to_string()),
     };
+    if source.len() > MAX_MCP_SOURCE_SIZE {
+        return ToolResult::error(format!(
+            "source exceeds maximum size of {} bytes",
+            MAX_MCP_SOURCE_SIZE
+        ));
+    }
 
     let difficulty = noricum_core::router::classify_difficulty(&source);
     let line_count = source.lines().count();

@@ -35,8 +35,16 @@ pub struct ValidationResult {
     pub passed: bool,
 }
 
-/// Run the full validation pipeline on a function unit.
+/// Run the full validation pipeline on a function unit with the default threshold (60).
 pub fn validate(unit: &FunctionUnit) -> Result<ValidationResult, ValidationError> {
+    validate_with_threshold(unit, 60)
+}
+
+/// Run the full validation pipeline on a function unit with a configurable score threshold.
+pub fn validate_with_threshold(
+    unit: &FunctionUnit,
+    min_score: u32,
+) -> Result<ValidationResult, ValidationError> {
     let rust_source = unit
         .rust_output
         .as_ref()
@@ -134,8 +142,14 @@ pub fn validate(unit: &FunctionUnit) -> Result<ValidationResult, ValidationError
         (None, Vec::new())
     };
 
-    let passed =
-        compile_result.success && idiomatic_score >= 60 && diff_test_passed.unwrap_or(true);
+    // When diff test is None (no main, harness failed), require a higher score
+    // to pass validation since we can't verify behavioral equivalence.
+    let passed = if diff_test_passed.is_none() {
+        let elevated_threshold = min_score.max(80);
+        compile_result.success && idiomatic_score >= elevated_threshold
+    } else {
+        compile_result.success && idiomatic_score >= min_score && diff_test_passed.unwrap_or(false)
+    };
 
     info!(
         function = %unit.name,
@@ -495,45 +509,68 @@ mod tests {
         );
     }
 
-    /// Verify that when diff test is N/A (no main), validation can still pass.
+    /// Verify that when diff test is N/A (no main), validation can still pass
+    /// but requires a higher score (>= 80).
     #[test]
     fn test_no_main_still_passes_without_diff_test() {
-        let result = ValidationResult {
-            compiles: true,
-            compiler_errors: vec![],
-            clippy_warnings: vec![],
-            unsafe_count: 0,
-            idiomatic_score: 85,
-            diff_test_passed: None,
-            diff_test_feedback: vec![],
-            passed: true,
-        };
-        // Library functions without main() should still be validatable
-        assert!(
-            result.passed,
-            "no-main functions should pass on compile+score alone"
+        // Use a struct-related C source where harness gen cannot produce a test
+        let mut unit = FunctionUnit::new(
+            "process".into(),
+            "process.c".into(),
+            "typedef struct { int x; } Foo;\nvoid process(Foo* f) { f->x = 1; }".into(),
         );
-        assert!(
-            result.diff_test_passed.is_none(),
-            "diff_test should be None for no-main"
-        );
+        unit.rust_output =
+            Some("pub struct Foo { pub x: i32 }\npub fn process(f: &mut Foo) { f.x = 1; }".into());
+        unit.state = MigrationState::Refined;
+        let result = validate_with_threshold(&unit, 60).unwrap();
+        if result.diff_test_passed.is_none() {
+            // When diff test cannot run, score >= 80 required
+            assert!(
+                result.idiomatic_score >= 80,
+                "simple function should score >= 80, got {}",
+                result.idiomatic_score
+            );
+            assert!(result.passed);
+        } else {
+            // If harness gen succeeded, diff test result determines pass/fail
+            assert!(result.passed == result.diff_test_passed.unwrap_or(false));
+        }
     }
 
-    /// Verify the passed field computation logic matches expectations.
+    /// Verify the passed field computation logic matches new expectations.
     #[test]
     fn test_passed_computation_logic() {
-        // diff_test_passed = None → unwrap_or(true) → passes (no main, N/A)
+        // diff_test_passed = None → requires score >= 80 (elevated threshold)
         let compiles = true;
-        let score = 80u32;
+        let score = 85u32;
         let diff: Option<bool> = None;
-        assert!(compiles && score >= 60 && diff.unwrap_or(true));
+        let min_score = 60u32;
+        let elevated = min_score.max(80);
+        let passed_none = if diff.is_none() {
+            compiles && score >= elevated
+        } else {
+            compiles && score >= min_score && diff.unwrap_or(false)
+        };
+        assert!(passed_none, "score 85 >= elevated 80 should pass");
+
+        // diff_test_passed = None but low score → fails
+        let score = 70u32;
+        let passed_low = if diff.is_none() {
+            compiles && score >= elevated
+        } else {
+            compiles && score >= min_score && diff.unwrap_or(false)
+        };
+        assert!(!passed_low, "score 70 < elevated 80 should fail");
 
         // diff_test_passed = Some(false) → fails
         let diff: Option<bool> = Some(false);
-        assert!(!(compiles && score >= 60 && diff.unwrap_or(true)));
+        let score = 90u32;
+        let passed_diff_fail = compiles && score >= min_score && diff.unwrap_or(false);
+        assert!(!passed_diff_fail, "diff_test false should fail");
 
         // diff_test_passed = Some(true) → passes
         let diff: Option<bool> = Some(true);
-        assert!(compiles && score >= 60 && diff.unwrap_or(true));
+        let passed_diff_pass = compiles && score >= min_score && diff.unwrap_or(false);
+        assert!(passed_diff_pass, "diff_test true should pass");
     }
 }

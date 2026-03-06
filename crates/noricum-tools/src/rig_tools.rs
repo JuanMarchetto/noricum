@@ -3,6 +3,8 @@
 //! Each tool wraps an underlying function from `crate::compiler` or std I/O,
 //! exposing it as a [`rig::tool::Tool`] so agents can invoke it via tool-calling.
 
+use std::path::Path;
+
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,42 @@ pub enum RigToolError {
 
     #[error("tool error: {0}")]
     Tool(#[from] crate::ToolError),
+
+    #[error("path security violation: {0}")]
+    PathViolation(String),
+}
+
+/// Validate that a file path is safe for LLM agent access.
+///
+/// Rejects paths containing `..`, and absolute paths outside of `/tmp` or the
+/// current working directory. This prevents LLM agents from reading or writing
+/// arbitrary files on the host.
+fn validate_file_path(path: &str) -> Result<(), RigToolError> {
+    let p = Path::new(path);
+
+    // Reject path traversal
+    for component in p.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(RigToolError::PathViolation(
+                "path contains '..' traversal".to_string(),
+            ));
+        }
+    }
+
+    // If absolute, restrict to /tmp or current working directory
+    if p.is_absolute() {
+        let is_tmp = path.starts_with("/tmp") || path.starts_with("/var/tmp");
+        let is_cwd = std::env::current_dir()
+            .ok()
+            .is_some_and(|cwd| path.starts_with(cwd.to_string_lossy().as_ref()));
+        if !is_tmp && !is_cwd {
+            return Err(RigToolError::PathViolation(format!(
+                "absolute path outside allowed directories: {path}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +170,7 @@ impl Tool for ReadSourceTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        validate_file_path(&args.file_path)?;
         let content = std::fs::read_to_string(&args.file_path)?;
         Ok(ReadSourceOutput { content })
     }
@@ -192,6 +231,7 @@ impl Tool for WriteSourceTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        validate_file_path(&args.file_path)?;
         let bytes = args.content.len();
         std::fs::write(&args.file_path, &args.content)?;
         Ok(WriteSourceOutput {
@@ -435,5 +475,50 @@ fn safe_fn() {
             .await
             .unwrap();
         assert_eq!(result.unsafe_count, 0);
+    }
+
+    #[test]
+    fn test_validate_path_rejects_traversal() {
+        assert!(validate_file_path("../../../etc/passwd").is_err());
+        assert!(validate_file_path("foo/../bar/../../etc/shadow").is_err());
+    }
+
+    #[test]
+    fn test_validate_path_rejects_absolute_outside_allowed() {
+        assert!(validate_file_path("/etc/passwd").is_err());
+        assert!(validate_file_path("/root/.ssh/id_rsa").is_err());
+    }
+
+    #[test]
+    fn test_validate_path_allows_tmp() {
+        assert!(validate_file_path("/tmp/noricum_test.rs").is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_allows_relative() {
+        assert!(validate_file_path("output/test.rs").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_read_source_rejects_path_traversal() {
+        let tool = ReadSourceTool;
+        let result = tool
+            .call(ReadSourceArgs {
+                file_path: "../../../etc/passwd".to_string(),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_write_source_rejects_path_traversal() {
+        let tool = WriteSourceTool;
+        let result = tool
+            .call(WriteSourceArgs {
+                file_path: "../../../tmp/evil.rs".to_string(),
+                content: "malicious".to_string(),
+            })
+            .await;
+        assert!(result.is_err());
     }
 }

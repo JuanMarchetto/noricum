@@ -21,6 +21,16 @@ agents and differential verification to migrate C/C++ code to safe, idiomatic Ru
 - **HTML migration reports** with side-by-side code, metrics, and score gauges
 - **MCP server** for IDE integration (Claude Code, VS Code)
 - **Dependency-aware multi-file migration** with topological ordering
+- **`--docs` flag** — automatically generate Rust doc comments from C source comments
+- **Security hardened** — path validation for LLM tools, API auth, CORS restrictions, input size limits
+
+### Experimental Features
+
+The following features are parsed by the CLI but not yet implemented:
+
+- `--incremental` — Incremental per-function migration state tracking
+- `--functions` — Selective function-level migration
+- `--interactive` — Terminal-based human-in-the-loop review mode
 
 ## Benchmark Results
 
@@ -99,6 +109,9 @@ noricum migrate path/to/file.c --json
 
 # Specify output directory for generated .rs files
 noricum migrate path/to/file.c --output output/
+
+# Generate doc comments on migrated Rust functions
+noricum migrate path/to/file.c --docs
 ```
 
 ### End-to-End Example
@@ -161,6 +174,8 @@ clippy_check = true
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes (for LLM mode) | Anthropic API key for Claude models |
+| `NORICUM_API_KEY` | No | API key for REST server authentication |
+| `NORICUM_CORS_ORIGINS` | No | Comma-separated CORS origins (default: localhost only) |
 
 Run `noricum doctor` to verify that all required tools and credentials are configured.
 

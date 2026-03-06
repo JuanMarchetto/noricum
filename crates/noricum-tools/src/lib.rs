@@ -2,6 +2,7 @@ pub mod ast;
 pub mod c2rust;
 pub mod compiler;
 pub mod diff_test;
+pub mod doc_gen;
 pub mod ffi_bridge;
 pub mod fuzz_test;
 pub mod harness_gen;

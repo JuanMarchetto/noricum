@@ -44,6 +44,8 @@ pub struct MigrationConfig {
     pub fuzz_iterations: u32,
     /// Whether to run the C preprocessor before analysis.
     pub preprocess: bool,
+    /// Whether to generate doc comments on migrated Rust functions.
+    pub generate_docs: bool,
 }
 
 impl Default for MigrationConfig {
@@ -59,6 +61,7 @@ impl Default for MigrationConfig {
             fuzz_test: false,
             fuzz_iterations: 100,
             preprocess: false,
+            generate_docs: false,
         }
     }
 }
@@ -426,7 +429,8 @@ pub async fn migrate_file(
     info!(function = %name, state = ?unit.state, translation_ms = unit.metrics.translation_ms, "state -> Refined");
 
     // --- Stage 6: Validate ---
-    let validation = noricum_validation::validate(&unit)?;
+    let validation =
+        noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
     noricum_validation::apply_validation(&mut unit, &validation);
     info!(
         function = %name,
@@ -516,7 +520,8 @@ pub async fn migrate_file(
             unit.metrics.llm_calls += 1;
             unit.metrics.repair_iterations = iteration;
 
-            let re_validation = noricum_validation::validate(&unit)?;
+            let re_validation =
+                noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
             noricum_validation::apply_validation(&mut unit, &re_validation);
             info!(
                 function = %name,

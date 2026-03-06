@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use noricum_core::MigrationConfig;
 use noricum_core::audit::AuditLevel;
 use noricum_ir::FunctionUnit;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(name = "noricum")]
@@ -71,6 +71,9 @@ enum Commands {
         /// Interactive review mode
         #[arg(long)]
         interactive: bool,
+        /// Generate doc comments on migrated Rust functions
+        #[arg(long)]
+        docs: bool,
     },
     /// Analyze a C file and report difficulty classification
     Analyze {
@@ -155,11 +158,21 @@ async fn main() {
             fuzz_iterations,
             audit_log,
             audit_level,
-            incremental: _,
-            functions: _,
+            incremental,
+            functions,
             state_dir: _,
-            interactive: _,
+            interactive,
+            docs,
         } => {
+            if incremental {
+                warn!("--incremental is not yet implemented, ignoring");
+            }
+            if functions.is_some() {
+                warn!("--functions is not yet implemented, ignoring");
+            }
+            if interactive {
+                warn!("--interactive is not yet implemented, ignoring");
+            }
             let level: AuditLevel = audit_level.parse().unwrap_or(AuditLevel::Summary);
             cmd_migrate(
                 &path,
@@ -172,6 +185,7 @@ async fn main() {
                 fuzz_iterations,
                 audit_log.as_deref(),
                 level,
+                docs,
             )
             .await
         }
@@ -222,6 +236,7 @@ async fn cmd_migrate(
     fuzz_iterations: u32,
     audit_log: Option<&Path>,
     audit_level: AuditLevel,
+    generate_docs: bool,
 ) -> Result<()> {
     let path = path
         .canonicalize()
@@ -239,17 +254,26 @@ async fn cmd_migrate(
         );
     }
 
-    let mut config = MigrationConfig::default();
-    config.fuzz_test = fuzz;
-    config.fuzz_iterations = fuzz_iterations;
-    config.audit_log = audit_log.map(|p| p.to_path_buf());
-    config.audit_level = audit_level;
+    let config = MigrationConfig {
+        fuzz_test: fuzz,
+        fuzz_iterations,
+        audit_log: audit_log.map(|p| p.to_path_buf()),
+        audit_level,
+        generate_docs,
+        ..MigrationConfig::default()
+    };
 
     if path.is_file() {
         info!(file = %path.display(), "migrating single file");
-        let unit = noricum_core::orchestrator::migrate_file(&path, &config)
+        let mut unit = noricum_core::orchestrator::migrate_file(&path, &config)
             .await
             .with_context(|| format!("migration failed for {}", path.display()))?;
+
+        if generate_docs && let Some(ref rust) = unit.rust_output {
+            let documented =
+                noricum_tools::doc_gen::add_docs_to_rust(rust, &unit.c_source, &unit.name);
+            unit.rust_output = Some(documented);
+        }
 
         print_unit_result(&unit, output_dir, run_diff, json, fuzz, fuzz_iterations)?;
 
@@ -258,9 +282,19 @@ async fn cmd_migrate(
         }
     } else if path.is_dir() {
         info!(dir = %path.display(), "migrating directory");
-        let project = noricum_core::orchestrator::migrate_directory(&path, &config)
+        let mut project = noricum_core::orchestrator::migrate_directory(&path, &config)
             .await
             .with_context(|| format!("migration failed for {}", path.display()))?;
+
+        if generate_docs {
+            for unit in &mut project.units {
+                if let Some(ref rust) = unit.rust_output {
+                    let documented =
+                        noricum_tools::doc_gen::add_docs_to_rust(rust, &unit.c_source, &unit.name);
+                    unit.rust_output = Some(documented);
+                }
+            }
+        }
 
         if json {
             println!("{}", serde_json::to_string_pretty(&project)?);
@@ -549,7 +583,11 @@ async fn cmd_bench(
     let mut total_repair_iters = 0u32;
 
     for c_file in &c_files {
-        let name = c_file.file_stem().unwrap().to_string_lossy().to_string();
+        let name = c_file
+            .file_stem()
+            .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
+            .to_string_lossy()
+            .to_string();
 
         let unit = if use_llm {
             noricum_core::orchestrator::migrate_file(c_file, &config).await?
@@ -721,7 +759,8 @@ async fn cmd_bench(
 
 async fn cmd_serve(host: &str, port: u16) -> Result<()> {
     let config = MigrationConfig::default();
-    let state = Arc::new(api::AppState { config });
+    let api_key = std::env::var("NORICUM_API_KEY").ok();
+    let state = Arc::new(api::AppState { config, api_key });
     let app = api::build_router(state);
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;

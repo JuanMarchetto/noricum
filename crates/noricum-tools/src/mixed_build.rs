@@ -24,8 +24,6 @@ pub struct MixedBuildResult {
 pub fn build_mixed_project(
     c_source: &str,
     rust_source: &str,
-    _migrated_names: &[String],
-    _unmigrated_names: &[String],
 ) -> Result<MixedBuildResult, ToolError> {
     let tmp = tempfile::tempdir()?;
     let c_file = tmp.path().join("unmigrated.c");

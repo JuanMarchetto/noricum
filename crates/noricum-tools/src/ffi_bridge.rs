@@ -17,7 +17,7 @@ pub fn generate_rust_extern_block(c_functions: &[CFunction]) -> String {
 
     let mut block = String::from("extern \"C\" {\n");
     for func in c_functions {
-        let rust_sig = c_sig_to_rust_extern(&func.name, &func.return_type, &func.body);
+        let rust_sig = c_sig_to_rust_extern(&func.name, &func.return_type);
         block.push_str(&format!("    {rust_sig}\n"));
     }
     block.push_str("}\n");
@@ -66,7 +66,7 @@ pub fn generate_mixed_rust_module(
 /// Convert a C function signature to a Rust extern "C" declaration.
 ///
 /// This is a best-effort conversion; complex types may need manual adjustment.
-fn c_sig_to_rust_extern(name: &str, return_type: &str, _body: &str) -> String {
+fn c_sig_to_rust_extern(name: &str, return_type: &str) -> String {
     let rust_return = c_type_to_rust(return_type);
     if rust_return.is_empty() || rust_return == "()" {
         format!("fn {name}();")

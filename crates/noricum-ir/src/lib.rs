@@ -107,6 +107,7 @@ pub struct MigrationMetrics {
 }
 
 impl FunctionUnit {
+    /// Create a new function unit in `Pending` state with default metrics.
     pub fn new(name: String, source_path: String, c_source: String) -> Self {
         Self {
             name,
@@ -140,6 +141,7 @@ pub struct MigrationProject {
 }
 
 impl MigrationProject {
+    /// Create a new empty migration project.
     pub fn new(name: String, source_dir: String) -> Self {
         Self {
             name,
@@ -148,6 +150,7 @@ impl MigrationProject {
         }
     }
 
+    /// Add a function unit to the project.
     pub fn add_unit(&mut self, unit: FunctionUnit) {
         self.units.push(unit);
     }
@@ -184,11 +187,16 @@ impl MigrationProject {
     }
 }
 
+/// Summary of migration progress across all function units in a project.
 #[derive(Debug, Clone)]
 pub struct ProgressSummary {
+    /// Total number of function units.
     pub total: usize,
+    /// Number of units that passed validation.
     pub validated: usize,
+    /// Number of units that fell back to unsafe.
     pub failed: usize,
+    /// Number of units still being processed.
     pub in_progress: usize,
 }
 

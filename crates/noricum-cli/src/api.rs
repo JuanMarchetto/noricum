@@ -5,21 +5,41 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use noricum_core::MigrationConfig;
 use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+
+/// Maximum request body size: 10 MB.
+const MAX_SOURCE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Shared application state.
 pub struct AppState {
     pub config: MigrationConfig,
+    /// Optional API key for request authentication.
+    pub api_key: Option<String>,
 }
 
 /// Build the API router with all endpoints.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    // Build CORS layer: use env-based allowlist or restrict to localhost
+    let cors = match std::env::var("NORICUM_CORS_ORIGINS") {
+        Ok(origins) => {
+            let allowed: Vec<_> = origins
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            CorsLayer::new().allow_origin(AllowOrigin::list(allowed))
+        }
+        Err(_) => CorsLayer::new().allow_origin(AllowOrigin::list([
+            "http://localhost:3000".parse().unwrap(),
+            "http://127.0.0.1:3000".parse().unwrap(),
+        ])),
+    };
+
     Router::new()
         .route("/api/health", get(health))
         .route("/api/migrate", post(migrate))
@@ -27,8 +47,44 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/check", post(check))
         .route("/api/score", post(score))
         .route("/api/diff-test", post(diff_test))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state)
+}
+
+/// Validate API key if configured. Returns an error response if auth fails.
+fn check_api_key(state: &AppState, headers: &HeaderMap) -> Result<(), impl IntoResponse> {
+    if let Some(ref expected) = state.api_key {
+        let provided = headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| {
+                headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+            });
+        match provided {
+            Some(key) if key == expected => Ok(()),
+            _ => Err(error_response(
+                StatusCode::UNAUTHORIZED,
+                "invalid or missing API key",
+            )),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Reject source code that exceeds the maximum size limit.
+fn check_source_size(source: &str) -> Result<(), impl IntoResponse> {
+    if source.len() > MAX_SOURCE_SIZE {
+        Err(error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("source exceeds maximum size of {} bytes", MAX_SOURCE_SIZE),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 // --- Request / Response types ---
@@ -125,16 +181,37 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-async fn analyze(Json(req): Json<AnalyzeRequest>) -> impl IntoResponse {
+async fn analyze(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<AnalyzeRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_api_key(&state, &headers) {
+        return resp.into_response();
+    }
+    if let Err(resp) = check_source_size(&req.source) {
+        return resp.into_response();
+    }
     let difficulty = noricum_core::router::classify_difficulty(&req.source);
     let lines = req.source.lines().count();
     Json(AnalyzeResponse {
         difficulty: format!("{difficulty:?}"),
         lines,
     })
+    .into_response()
 }
 
-async fn check(Json(req): Json<CheckRequest>) -> impl IntoResponse {
+async fn check(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<CheckRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_api_key(&state, &headers) {
+        return resp.into_response();
+    }
+    if let Err(resp) = check_source_size(&req.source) {
+        return resp.into_response();
+    }
     match noricum_tools::compiler::check_rust_compiles(&req.source) {
         Ok(result) => {
             let errors: Vec<String> = if !result.success {
@@ -160,7 +237,17 @@ async fn check(Json(req): Json<CheckRequest>) -> impl IntoResponse {
     }
 }
 
-async fn score(Json(req): Json<ScoreRequest>) -> impl IntoResponse {
+async fn score(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ScoreRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_api_key(&state, &headers) {
+        return resp.into_response();
+    }
+    if let Err(resp) = check_source_size(&req.source) {
+        return resp.into_response();
+    }
     let unsafe_count = noricum_tools::compiler::count_unsafe_blocks(&req.source);
     let clippy = noricum_tools::compiler::run_clippy_on_source(&req.source).unwrap_or_default();
     let c_source = req.c_source.as_deref().unwrap_or("");
@@ -174,9 +261,23 @@ async fn score(Json(req): Json<ScoreRequest>) -> impl IntoResponse {
         score,
         unsafe_count,
     })
+    .into_response()
 }
 
-async fn diff_test(Json(req): Json<DiffTestRequest>) -> impl IntoResponse {
+async fn diff_test(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<DiffTestRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_api_key(&state, &headers) {
+        return resp.into_response();
+    }
+    if let Err(resp) = check_source_size(&req.c_source) {
+        return resp.into_response();
+    }
+    if let Err(resp) = check_source_size(&req.rust_source) {
+        return resp.into_response();
+    }
     match noricum_tools::diff_test::run_diff_test(&req.c_source, &req.rust_source) {
         Ok(result) => (
             StatusCode::OK,
@@ -197,8 +298,15 @@ async fn diff_test(Json(req): Json<DiffTestRequest>) -> impl IntoResponse {
 
 async fn migrate(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<MigrateRequest>,
 ) -> impl IntoResponse {
+    if let Err(resp) = check_api_key(&state, &headers) {
+        return resp.into_response();
+    }
+    if let Err(resp) = check_source_size(&req.source) {
+        return resp.into_response();
+    }
     let name = req.name.unwrap_or_else(|| "input".to_string());
 
     // Write source to temp file and run the sync pipeline
@@ -257,6 +365,7 @@ mod tests {
     fn test_state() -> Arc<AppState> {
         Arc::new(AppState {
             config: MigrationConfig::default(),
+            api_key: None,
         })
     }
 
