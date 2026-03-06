@@ -1,0 +1,6 @@
+{
+  "_comment": "Benchmark baseline placeholder. Generate a real baseline with: noricum bench --fixtures tests/fixtures/simple --json > benches/baseline.json",
+  "version": "0.1.0",
+  "generated": null,
+  "fixtures": []
+}

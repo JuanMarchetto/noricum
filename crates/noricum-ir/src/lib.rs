@@ -77,6 +77,15 @@ pub struct FunctionUnit {
     pub metrics: MigrationMetrics,
 }
 
+/// Estimated token usage from an LLM call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    /// Estimated input tokens (prompt)
+    pub input_tokens: u64,
+    /// Estimated output tokens (response)
+    pub output_tokens: u64,
+}
+
 /// Metrics collected during migration of a single function.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MigrationMetrics {
@@ -104,6 +113,10 @@ pub struct MigrationMetrics {
     pub fuzz_test_passed: Option<bool>,
     /// Number of fuzz divergences found
     pub fuzz_divergence_count: u32,
+    /// Estimated total input tokens across all LLM calls
+    pub input_tokens: u64,
+    /// Estimated total output tokens across all LLM calls
+    pub output_tokens: u64,
 }
 
 impl FunctionUnit {

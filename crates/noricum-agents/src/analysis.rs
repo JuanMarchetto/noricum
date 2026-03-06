@@ -185,4 +185,22 @@ mod tests {
         assert_eq!(result.patterns, vec!["pure_function"]);
         assert!(result.risks.is_empty());
     }
+
+    #[test]
+    fn test_parse_analysis_empty_fields() {
+        let result =
+            parse_analysis_response(crate::mock_responses::MOCK_ANALYSIS_EMPTY_FIELDS).unwrap();
+        assert_eq!(result.difficulty, "easy");
+        assert!(result.patterns.is_empty());
+        assert!(result.strategy.is_empty());
+    }
+
+    #[test]
+    fn test_parse_analysis_missing_field() {
+        let result = parse_analysis_response(crate::mock_responses::MOCK_ANALYSIS_MISSING_FIELD);
+        assert!(
+            result.is_err(),
+            "missing required fields should fail parsing"
+        );
+    }
 }

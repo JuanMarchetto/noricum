@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![crates.io](https://img.shields.io/crates/v/noricum.svg)](https://crates.io/crates/noricum)
+![crates.io: coming soon](https://img.shields.io/badge/crates.io-coming%20soon-yellow)
 
 Noricum combines a deterministic pipeline (C2Rust as step zero) with LLM-powered
 agents and differential verification to migrate C/C++ code to safe, idiomatic Rust.
@@ -69,15 +69,12 @@ Real migration results on test fixtures (LLM-powered pipeline):
 
 ## Quick Start
 
-```bash
-cargo install noricum
-```
-
-Or build from source:
+Build from source:
 
 ```bash
 git clone https://github.com/JuanMarchetto/noricum
 cd noricum && cargo build --release
+# Binary available at target/release/noricum
 ```
 
 ## Usage
