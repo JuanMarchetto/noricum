@@ -30,7 +30,4 @@ pub enum CoreError {
 
     #[error("token budget exceeded: used {used} of {budget} allowed tokens")]
     BudgetExceeded { used: u64, budget: u64 },
-
-    #[error("provider not yet implemented: {0}")]
-    UnsupportedProvider(String),
 }

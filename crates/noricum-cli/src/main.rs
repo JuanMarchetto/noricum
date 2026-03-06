@@ -122,6 +122,9 @@ struct MigrateOpts {
     /// Maximum number of LLM API calls per run (default: 20, use 0 for unlimited)
     #[arg(long)]
     max_llm_calls: Option<u32>,
+    /// Ollama model name (default: llama3.2)
+    #[arg(long)]
+    ollama_model: Option<String>,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -211,6 +214,7 @@ async fn cmd_migrate(opts: MigrateOpts) -> Result<()> {
         audit_log: opts.audit_log.map(|p| p.to_path_buf()),
         audit_level: level,
         generate_docs: opts.docs,
+        ollama_model: opts.ollama_model,
         max_tokens_budget: match opts.max_tokens {
             Some(0) => None,
             Some(n) => Some(n),

@@ -458,6 +458,18 @@ fn tool_diff_test(c_source: Option<String>, rust_source: Option<String>) -> Tool
         Some(s) => s,
         None => return ToolResult::error("missing 'rust_source' parameter".to_string()),
     };
+    if c_source.len() > MAX_MCP_SOURCE_SIZE {
+        return ToolResult::error(format!(
+            "c_source exceeds maximum size of {} bytes",
+            MAX_MCP_SOURCE_SIZE
+        ));
+    }
+    if rust_source.len() > MAX_MCP_SOURCE_SIZE {
+        return ToolResult::error(format!(
+            "rust_source exceeds maximum size of {} bytes",
+            MAX_MCP_SOURCE_SIZE
+        ));
+    }
 
     match noricum_tools::diff_test::run_diff_test(&c_source, &rust_source) {
         Ok(result) => {

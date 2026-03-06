@@ -8,13 +8,10 @@
 /// - `migrate_file`: async, full LLM agent pipeline (analysis, translation, repair, test gen)
 use std::path::Path;
 
-use noricum_agents::providers::{
-    ProviderConfig, ProviderKind, create_anthropic_client, create_anthropic_client_with_key,
-    select_model,
-};
+use noricum_agents::LlmClient;
+use noricum_agents::providers::{ProviderConfig, create_llm_client, select_model};
 use noricum_ir::pattern_store::PatternStore;
 use noricum_ir::{FunctionUnit, MigrationProject, MigrationState};
-use rig::providers::anthropic;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -32,6 +29,8 @@ pub struct MigrationConfig {
     pub anthropic_api_key: Option<String>,
     /// Ollama URL override. If `None`, uses the default `http://localhost:11434`.
     pub ollama_url: Option<String>,
+    /// Ollama model name override. Defaults to "llama3.2".
+    pub ollama_model: Option<String>,
     /// Maximum number of repair iterations before falling back to unsafe.
     pub max_repair_iterations: u32,
     /// Minimum idiomatic score (0-100) required to pass validation.
@@ -71,6 +70,7 @@ impl Default for MigrationConfig {
         Self {
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             ollama_url: None,
+            ollama_model: None,
             max_repair_iterations: 5,
             min_idiomatic_score: 60,
             generate_tests: true,
@@ -98,29 +98,23 @@ impl From<&MigrationConfig> for ProviderConfig {
                 .ollama_url
                 .clone()
                 .unwrap_or_else(|| "http://localhost:11434".to_string()),
-            ..Self::default()
+            ollama_model: config
+                .ollama_model
+                .clone()
+                .unwrap_or_else(|| "llama3.2".to_string()),
         }
     }
 }
 
 impl MigrationConfig {
-    /// Try to create an Anthropic client from the configured API key.
-    fn create_client(&self) -> Option<anthropic::Client> {
-        if let Some(ref key) = self.anthropic_api_key {
-            match create_anthropic_client_with_key(key) {
-                Ok(client) => Some(client),
-                Err(e) => {
-                    warn!(error = %e, "failed to create Anthropic client from configured key");
-                    None
-                }
-            }
-        } else {
-            match create_anthropic_client() {
-                Ok(client) => Some(client),
-                Err(e) => {
-                    debug!(error = %e, "no Anthropic client available");
-                    None
-                }
+    /// Try to create an LLM client (Anthropic preferred, Ollama fallback).
+    fn create_client(&self) -> Option<LlmClient> {
+        let provider_config = ProviderConfig::from(self);
+        match create_llm_client(&provider_config) {
+            Ok(client) => Some(client),
+            Err(e) => {
+                warn!(error = %e, "no LLM client available");
+                None
             }
         }
     }
@@ -395,33 +389,26 @@ pub async fn migrate_file(
 
     // --- Stage 4: Analysis agent ---
     let analysis_start = Instant::now();
-    let analysis_model_sel = select_model(&provider_config, difficulty, "analysis");
+    let analysis_model_sel = select_model(&provider_config, difficulty, "analysis")?;
     info!(
         function = %name,
         model = %analysis_model_sel.model,
         provider = ?analysis_model_sel.provider,
         "calling analysis agent"
     );
-    let analysis = match analysis_model_sel.provider {
-        ProviderKind::Anthropic => {
-            match noricum_agents::analysis::analyze_function_with_temperature(
-                &client,
-                &analysis_model_sel.model,
-                &unit.c_source,
-                &name,
-                config.analysis_temperature,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    warn!(function = %name, error = %e, "analysis agent failed, falling back to sync");
-                    return migrate_file_sync(c_file);
-                }
-            }
-        }
-        ProviderKind::Ollama => {
-            return Err(CoreError::UnsupportedProvider("Ollama".into()));
+    let analysis = match noricum_agents::analysis::analyze_function_with_temperature(
+        &client,
+        &analysis_model_sel.model,
+        &unit.c_source,
+        &name,
+        config.analysis_temperature,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(function = %name, error = %e, "analysis agent failed, falling back to sync");
+            return migrate_file_sync(c_file);
         }
     };
     unit.state = MigrationState::Analyzed;
@@ -463,36 +450,30 @@ pub async fn migrate_file(
     }
 
     let translation_start = Instant::now();
-    let translation_model_sel = select_model(&provider_config, difficulty, "translation");
+    let translation_model_sel = select_model(&provider_config, difficulty, "translation")?;
     info!(
         function = %name,
         model = %translation_model_sel.model,
         "calling translation agent"
     );
-    let rust_code = match translation_model_sel.provider {
-        ProviderKind::Anthropic => {
-            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
-                &client,
-                &translation_model_sel.model,
-                &unit.c_source,
-                unit.c2rust_output.as_deref(),
-                &analysis,
-                &relevant_patterns,
-                config.translation_temperature,
-            )
-            .await
-            {
-                Ok(code) => code,
-                Err(e) => {
-                    warn!(function = %name, error = %e, "translation agent failed, falling back to sync");
-                    return migrate_file_sync(c_file);
-                }
+    let rust_code =
+        match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+            &client,
+            &translation_model_sel.model,
+            &unit.c_source,
+            unit.c2rust_output.as_deref(),
+            &analysis,
+            &relevant_patterns,
+            config.translation_temperature,
+        )
+        .await
+        {
+            Ok(code) => code,
+            Err(e) => {
+                warn!(function = %name, error = %e, "translation agent failed, falling back to sync");
+                return migrate_file_sync(c_file);
             }
-        }
-        ProviderKind::Ollama => {
-            return Err(CoreError::UnsupportedProvider("Ollama".into()));
-        }
-    };
+        };
     unit.rust_output = Some(rust_code);
     unit.state = MigrationState::Refined;
     unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
@@ -540,7 +521,7 @@ pub async fn migrate_file(
     // --- Stage 7: Repair loop ---
     if !validation.passed {
         let repair_start = Instant::now();
-        let repair_model_sel = select_model(&provider_config, difficulty, "repair");
+        let repair_model_sel = select_model(&provider_config, difficulty, "repair")?;
 
         let mut iteration = 1u32;
         while iteration <= config.max_repair_iterations {
@@ -576,25 +557,18 @@ pub async fn migrate_file(
                 );
             }
 
-            let repaired = match repair_model_sel.provider {
-                ProviderKind::Anthropic => {
-                    noricum_agents::repair::repair_function_with_temperature(
-                        &client,
-                        &repair_model_sel.model,
-                        current_rust,
-                        errors,
-                        diff_feedback,
-                        &unit.c_source,
-                        iteration,
-                        config.max_repair_iterations,
-                        config.repair_base_temperature,
-                    )
-                    .await?
-                }
-                ProviderKind::Ollama => {
-                    return Err(CoreError::UnsupportedProvider("Ollama".into()));
-                }
-            };
+            let repaired = noricum_agents::repair::repair_function_with_temperature(
+                &client,
+                &repair_model_sel.model,
+                current_rust,
+                errors,
+                diff_feedback,
+                &unit.c_source,
+                iteration,
+                config.max_repair_iterations,
+                config.repair_base_temperature,
+            )
+            .await?;
 
             // Estimate token usage for repair call
             let input_token_est = noricum_agents::estimate_tokens(current_rust);
@@ -653,50 +627,42 @@ pub async fn migrate_file(
     // --- Stage 9: Test generation ---
     if unit.state == MigrationState::Validated && config.generate_tests {
         let test_gen_start = Instant::now();
-        let test_model_sel = select_model(&provider_config, difficulty, "test_gen");
+        let test_model_sel = select_model(&provider_config, difficulty, "test_gen")?;
         info!(
             function = %name,
             model = %test_model_sel.model,
             "calling test generation agent"
         );
 
-        match test_model_sel.provider {
-            ProviderKind::Anthropic => {
-                match noricum_agents::test_gen::generate_tests_with_temperature(
-                    &client,
-                    &test_model_sel.model,
-                    &unit.c_source,
-                    unit.rust_output.as_deref().unwrap_or(""),
-                    &name,
-                    config.test_gen_temperature,
-                )
-                .await
-                {
-                    Ok(test_code) => {
-                        unit.metrics.test_gen_ms = test_gen_start.elapsed().as_millis() as u64;
-                        unit.metrics.llm_calls += 1;
-                        unit.metrics.input_tokens +=
-                            noricum_agents::estimate_tokens(&unit.c_source);
-                        unit.metrics.output_tokens += noricum_agents::estimate_tokens(&test_code);
-                        info!(
-                            function = %name,
-                            test_code_len = test_code.len(),
-                            test_gen_ms = unit.metrics.test_gen_ms,
-                            "test generation succeeded"
-                        );
-                        unit.generated_tests = Some(test_code);
-                    }
-                    Err(e) => {
-                        warn!(
-                            function = %name,
-                            error = %e,
-                            "test generation failed (non-fatal)"
-                        );
-                    }
-                }
+        match noricum_agents::test_gen::generate_tests_with_temperature(
+            &client,
+            &test_model_sel.model,
+            &unit.c_source,
+            unit.rust_output.as_deref().unwrap_or(""),
+            &name,
+            config.test_gen_temperature,
+        )
+        .await
+        {
+            Ok(test_code) => {
+                unit.metrics.test_gen_ms = test_gen_start.elapsed().as_millis() as u64;
+                unit.metrics.llm_calls += 1;
+                unit.metrics.input_tokens += noricum_agents::estimate_tokens(&unit.c_source);
+                unit.metrics.output_tokens += noricum_agents::estimate_tokens(&test_code);
+                info!(
+                    function = %name,
+                    test_code_len = test_code.len(),
+                    test_gen_ms = unit.metrics.test_gen_ms,
+                    "test generation succeeded"
+                );
+                unit.generated_tests = Some(test_code);
             }
-            ProviderKind::Ollama => {
-                warn!(function = %name, "Ollama provider not yet implemented for test gen, skipping");
+            Err(e) => {
+                warn!(
+                    function = %name,
+                    error = %e,
+                    "test generation failed (non-fatal)"
+                );
             }
         }
     }

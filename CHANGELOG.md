@@ -4,6 +4,23 @@ All notable changes to Noricum will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- cJSON library migration — 520 LOC, score 100/100, 0 unsafe, diff test PASS (basic + 12 extended edge-case tests)
+- Combined single-file C fixtures for standalone diff testing
+- Extended behavioral test harness with 12 edge cases (nested objects, arrays, escaping, unicode, nulls)
+- RAG seed pattern `cjson_to_serde` updated to hand-rolled idioms (no external crate dependency)
+
+### Fixed
+- RAG pattern `cjson_to_serde.md` headers (`Rust Pattern`/`Rust Example` → `Rust Equivalent`) — was never loading into PatternStore
+- Remove dead `interactive.rs` module from noricum-cli
+- Ollama provider stubs now return proper `Result` error instead of silent no-op
+- MCP `diff_test` tool: add input size validation (was missing unlike other tools)
+
+### Changed
+- Improved token estimation heuristic in orchestrator
+
 ## [0.1.0] - 2026-03-06
 
 ### Added

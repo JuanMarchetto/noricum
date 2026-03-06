@@ -3,12 +3,10 @@
 /// Takes the current Rust source, compiler error messages, and the original C source
 /// for reference. Returns corrected Rust source code. Max iterations are handled
 /// by the caller.
-use rig::client::CompletionClient;
-use rig::completion::Prompt;
-use rig::providers::anthropic;
 use tracing::{debug, info, warn};
 
 use crate::AgentError;
+use crate::providers::LlmClient;
 
 /// System prompt for the repair agent, loaded from the prompts directory at compile time.
 const REPAIR_PREAMBLE: &str = include_str!("../../../prompts/repair.md");
@@ -24,7 +22,7 @@ const REPAIR_PREAMBLE: &str = include_str!("../../../prompts/repair.md");
 ///   (e.g., using `bool` where C uses `int`, changing format specifiers, etc.)
 #[allow(clippy::too_many_arguments)]
 pub async fn repair_function(
-    client: &anthropic::Client,
+    client: &LlmClient,
     model: &str,
     rust_source: &str,
     compiler_errors: &[String],
@@ -50,7 +48,7 @@ pub async fn repair_function(
 /// Repair with an optional base temperature override.
 #[allow(clippy::too_many_arguments)]
 pub async fn repair_function_with_temperature(
-    client: &anthropic::Client,
+    client: &LlmClient,
     model: &str,
     rust_source: &str,
     compiler_errors: &[String],
@@ -77,13 +75,6 @@ pub async fn repair_function_with_temperature(
         3 => (base + 0.4).min(1.0),
         _ => (base + 0.6).min(1.0),
     };
-
-    let agent = client
-        .agent(model)
-        .preamble(REPAIR_PREAMBLE)
-        .temperature(temperature)
-        .max_tokens(8192)
-        .build();
 
     let mut user_message = String::new();
 
@@ -138,10 +129,9 @@ pub async fn repair_function_with_temperature(
 
     debug!(error_count, diff_count, "sending repair prompt to LLM");
 
-    let response = agent
-        .prompt(&user_message)
-        .await
-        .map_err(|e| AgentError::Provider(format!("repair LLM call failed: {e}")))?;
+    let response = client
+        .run_prompt(model, REPAIR_PREAMBLE, temperature, 8192, &user_message)
+        .await?;
 
     debug!(response_len = response.len(), "received repair response");
 
