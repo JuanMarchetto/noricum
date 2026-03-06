@@ -250,7 +250,19 @@ pub fn compute_idiomatic_score_from_source(
 }
 
 /// Update a function unit's state based on validation results.
+///
+/// Uses the default maximum of 5 repair iterations.
 pub fn apply_validation(unit: &mut FunctionUnit, result: &ValidationResult) {
+    apply_validation_with_max(unit, result, 5);
+}
+
+/// Update a function unit's state based on validation results with a configurable
+/// maximum number of repair iterations before falling back to unsafe.
+pub fn apply_validation_with_max(
+    unit: &mut FunctionUnit,
+    result: &ValidationResult,
+    max_repair_iterations: u32,
+) {
     unit.idiomatic_score = Some(result.idiomatic_score);
     unit.unsafe_count = Some(result.unsafe_count);
     unit.last_errors = result.compiler_errors.clone();
@@ -260,7 +272,7 @@ pub fn apply_validation(unit: &mut FunctionUnit, result: &ValidationResult) {
         unit.state = MigrationState::Validated;
     } else {
         match &unit.state {
-            MigrationState::Repairing(n) if *n >= 5 => {
+            MigrationState::Repairing(n) if *n >= max_repair_iterations => {
                 unit.state = MigrationState::FallbackUnsafe;
             }
             MigrationState::Repairing(n) => {
@@ -572,5 +584,67 @@ mod tests {
         let diff: Option<bool> = Some(true);
         let passed_diff_pass = compiles && score >= min_score && diff.unwrap_or(false);
         assert!(passed_diff_pass, "diff_test true should pass");
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Score is always in [0, 100] regardless of inputs.
+        #[test]
+        fn score_always_in_range(
+            unsafe_count in 0u32..50,
+            clippy_warnings in 0u32..50,
+            rust_source in ".*",
+            c_source in ".*",
+        ) {
+            let score = compute_idiomatic_score_from_source(
+                unsafe_count, clippy_warnings, &rust_source, &c_source,
+            );
+            prop_assert!(score <= 100, "score {score} exceeded 100");
+        }
+
+        /// Zero unsafe + zero clippy + no negative patterns => score >= 80.
+        #[test]
+        fn clean_code_scores_well(
+            positive in proptest::collection::vec(
+                prop_oneof!["Result<", "Option<", ".iter()", "Vec<", "String"],
+                0..5,
+            ),
+        ) {
+            let rust_source = positive.join("\n");
+            let c_source = "int f() { return 0; }";
+            let score = compute_idiomatic_score_from_source(0, 0, &rust_source, c_source);
+            prop_assert!(score >= 80, "clean code scored only {score}");
+        }
+
+        /// More unsafe blocks never increases the score.
+        #[test]
+        fn more_unsafe_never_increases_score(
+            base_unsafe in 0u32..10,
+            extra in 1u32..10,
+        ) {
+            let rust = "fn f() -> i32 { 42 }";
+            let c = "int f() { return 42; }";
+            let low = compute_idiomatic_score_from_source(base_unsafe + extra, 0, rust, c);
+            let high = compute_idiomatic_score_from_source(base_unsafe, 0, rust, c);
+            prop_assert!(low <= high, "more unsafe ({}) scored {low} > {high}", base_unsafe + extra);
+        }
+
+        /// More clippy warnings never increases the score.
+        #[test]
+        fn more_clippy_never_increases_score(
+            base_warnings in 0u32..10,
+            extra in 1u32..10,
+        ) {
+            let rust = "fn f() -> i32 { 42 }";
+            let c = "int f() { return 42; }";
+            let low = compute_idiomatic_score_from_source(0, base_warnings + extra, rust, c);
+            let high = compute_idiomatic_score_from_source(0, base_warnings, rust, c);
+            prop_assert!(low <= high, "more warnings ({}) scored {low} > {high}", base_warnings + extra);
+        }
     }
 }

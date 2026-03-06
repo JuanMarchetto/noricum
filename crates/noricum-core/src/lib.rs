@@ -27,4 +27,10 @@ pub enum CoreError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("token budget exceeded: used {used} of {budget} allowed tokens")]
+    BudgetExceeded { used: u64, budget: u64 },
+
+    #[error("provider not yet implemented: {0}")]
+    UnsupportedProvider(String),
 }

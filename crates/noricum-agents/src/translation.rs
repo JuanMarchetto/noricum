@@ -40,17 +40,41 @@ pub async fn translate_function_with_patterns(
     analysis: &AnalysisResult,
     patterns: &[&MigrationPattern],
 ) -> Result<String, AgentError> {
+    translate_function_with_patterns_and_temperature(
+        client,
+        model,
+        c_source,
+        c2rust_output,
+        analysis,
+        patterns,
+        None,
+    )
+    .await
+}
+
+/// Translate with pattern context and optional temperature override.
+pub async fn translate_function_with_patterns_and_temperature(
+    client: &anthropic::Client,
+    model: &str,
+    c_source: &str,
+    c2rust_output: Option<&str>,
+    analysis: &AnalysisResult,
+    patterns: &[&MigrationPattern],
+    temperature: Option<f64>,
+) -> Result<String, AgentError> {
+    let temp = temperature.unwrap_or(0.3);
     info!(
         model,
         difficulty = %analysis.difficulty,
         pattern_count = patterns.len(),
+        temperature = temp,
         "starting translation"
     );
 
     let agent = client
         .agent(model)
         .preamble(TRANSLATION_PREAMBLE)
-        .temperature(0.3)
+        .temperature(temp)
         .max_tokens(8192)
         .build();
 
@@ -58,7 +82,7 @@ pub async fn translate_function_with_patterns(
         .map_err(|e| AgentError::Provider(format!("failed to serialize analysis: {e}")))?;
 
     let mut user_message = format!(
-        "## Original C source\n```c\n{c_source}\n```\n\n\
+        "## Original C source\n<c_source>\n{c_source}\n</c_source>\n\n\
          ## Analysis\n```json\n{analysis_json}\n```\n"
     );
 

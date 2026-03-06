@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.94-bookworm AS builder
 
 WORKDIR /usr/src/noricum
 COPY . .
@@ -19,5 +19,8 @@ COPY --from=builder /usr/src/noricum/target/release/noricum-mcp-server /usr/loca
 RUN groupadd -r noricum && useradd -r -g noricum -d /home/noricum -m noricum
 USER noricum
 WORKDIR /home/noricum
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["noricum", "doctor"] || exit 1
 
 ENTRYPOINT ["noricum"]

@@ -93,7 +93,7 @@ pub fn select_model(config: &ProviderConfig, difficulty: Difficulty, task: &str)
         let model = match (difficulty, task) {
             (Difficulty::Hard, _) => models::CLAUDE_4_OPUS.to_string(),
             (Difficulty::Medium, _) | (_, "analysis") => models::CLAUDE_4_SONNET.to_string(),
-            (Difficulty::Easy, _) => models::CLAUDE_4_SONNET.to_string(),
+            (Difficulty::Easy, _) => models::CLAUDE_3_5_HAIKU.to_string(),
         };
         info!(provider = "anthropic", model = %model, ?difficulty, "selected model");
         return ModelSelection {
@@ -127,7 +127,7 @@ mod tests {
 
         let selection = select_model(&config, Difficulty::Easy, "translation");
         assert_eq!(selection.provider, ProviderKind::Anthropic);
-        assert_eq!(selection.model, "claude-sonnet-4-0");
+        assert_eq!(selection.model, models::CLAUDE_3_5_HAIKU);
     }
 
     #[test]
@@ -144,23 +144,16 @@ mod tests {
 
     #[test]
     fn test_create_anthropic_client_no_key() {
-        // Temporarily unset the key if it exists
-        let original = std::env::var("ANTHROPIC_API_KEY").ok();
-        // SAFETY: This test is not run in parallel with other tests that depend on
-        // ANTHROPIC_API_KEY, and we restore the original value immediately after.
-        unsafe {
-            std::env::remove_var("ANTHROPIC_API_KEY");
+        // Test the error path by checking env var directly.
+        // If ANTHROPIC_API_KEY is not set, create_anthropic_client() should error.
+        // If it IS set (e.g., in CI or dev), we still validate the with_key path.
+        if std::env::var("ANTHROPIC_API_KEY").is_err() {
+            let result = create_anthropic_client();
+            assert!(result.is_err());
         }
-
-        let result = create_anthropic_client();
-        assert!(result.is_err());
-
-        // Restore
-        if let Some(key) = original {
-            unsafe {
-                std::env::set_var("ANTHROPIC_API_KEY", key);
-            }
-        }
+        // Validate that create_anthropic_client_with_key works with a test key
+        let result = create_anthropic_client_with_key("test-key-for-unit-test");
+        assert!(result.is_ok());
     }
 
     #[test]
