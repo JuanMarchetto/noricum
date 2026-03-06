@@ -146,7 +146,10 @@ fn test_full_mock_llm_pipeline_e2e() {
 
     // 2. Extract Rust code from translation response (as returned by the translation agent)
     let rust_code = extract_rust_code(mock_responses::MOCK_TRANSLATION_FENCED);
-    assert!(!rust_code.is_empty(), "should extract code from fenced response");
+    assert!(
+        !rust_code.is_empty(),
+        "should extract code from fenced response"
+    );
 
     // 3. Verify extracted code compiles
     let compile_result = noricum_tools::compiler::check_rust_compiles(&rust_code).unwrap();
@@ -154,10 +157,16 @@ fn test_full_mock_llm_pipeline_e2e() {
 
     // 4. Score the code for idiomatic quality
     let unsafe_count = noricum_tools::compiler::count_unsafe_blocks(&rust_code);
-    assert_eq!(unsafe_count, 0, "simple function should have 0 unsafe blocks");
+    assert_eq!(
+        unsafe_count, 0,
+        "simple function should have 0 unsafe blocks"
+    );
 
     let score = noricum_validation::compute_idiomatic_score(unsafe_count, 0);
-    assert!(score >= 60, "simple idiomatic code should score >= 60, got {score}");
+    assert!(
+        score >= 60,
+        "simple idiomatic code should score >= 60, got {score}"
+    );
 
     // 5. Validate via FunctionUnit (full validation pipeline)
     let mut unit = noricum_ir::FunctionUnit::new(
@@ -170,7 +179,10 @@ fn test_full_mock_llm_pipeline_e2e() {
 
     let validation = noricum_validation::validate(&unit).unwrap();
     assert!(validation.compiles, "validation should confirm compilation");
-    assert!(validation.idiomatic_score >= 60, "should pass score threshold");
+    assert!(
+        validation.idiomatic_score >= 60,
+        "should pass score threshold"
+    );
 
     // 6. Parse a repair response (simulating repair agent output)
     let repaired = extract_rust_code(mock_responses::MOCK_REPAIR_COMPILABLE);

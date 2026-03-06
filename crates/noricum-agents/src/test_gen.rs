@@ -71,7 +71,12 @@ pub async fn generate_tests_with_temperature(
     temperature: Option<f64>,
 ) -> Result<String, AgentError> {
     let temp = temperature.unwrap_or(0.4);
-    info!(function = function_name, model, temperature = temp, "starting test generation");
+    info!(
+        function = function_name,
+        model,
+        temperature = temp,
+        "starting test generation"
+    );
 
     let agent = client
         .agent(model)

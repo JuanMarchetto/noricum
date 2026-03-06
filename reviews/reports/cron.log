@@ -1,0 +1,143 @@
+=== Noricum Multi-Stakeholder Review ===
+Date: 2026-03-06
+Collecting project metrics...
+Metrics collected to /tmp/noricum-metrics-mwr0uK.txt
+
+Running review with Claude Code...
+(This may take several minutes)
+
+ERROR: 'claude' CLI not found in PATH.
+Install Claude Code or run the review manually:
+  cat /tmp/noricum-metrics-mwr0uK.txt
+  # Then paste metrics + reviews/STAKEHOLDER_REVIEW.md into Claude
+=== Noricum Multi-Stakeholder Review ===
+Date: 2026-03-06-02
+Collecting project metrics...
+Metrics collected to /tmp/noricum-metrics-2c0qo5.txt
+
+Running review with Claude Code...
+(This may take several minutes)
+
+=== Review Complete ===
+Report: /home/marche/noricum/reviews/reports/2026-03-06-02.md
+Lines: 431
+
+### Grade: B
+
+To view: cat /home/marche/noricum/reviews/reports/2026-03-06-02.md
+=== Noricum Multi-Stakeholder Review ===
+Date: 2026-03-06-04
+Collecting project metrics...
+Metrics collected to /tmp/noricum-metrics-Yhm7yA.txt
+
+Running review with Claude Code...
+(This may take several minutes)
+
+=== Review Complete ===
+Report: /home/marche/noricum/reviews/reports/2026-03-06-04.md
+Lines: 399
+
+### Grade: C+
+
+To view: cat /home/marche/noricum/reviews/reports/2026-03-06-04.md
+=== Noricum Multi-Stakeholder Review ===
+Date: 2026-03-06-06
+Collecting project metrics...
+Metrics collected to /tmp/noricum-metrics-EZtGm4.txt
+
+Running review with Claude Code...
+(This may take several minutes)
+
+=== Review Complete ===
+Report: /home/marche/noricum/reviews/reports/2026-03-06-06.md
+Lines: 423
+
+### Grade: C+
+
+To view: cat /home/marche/noricum/reviews/reports/2026-03-06-06.md
+=== Noricum Multi-Stakeholder Review ===
+Date: 2026-03-06-08
+Collecting project metrics...
+Metrics collected to /tmp/noricum-metrics-GZWMPb.txt
+
+Running review with Claude Code...
+(This may take several minutes)
+
+=== Review Complete ===
+Report: /home/marche/noricum/reviews/reports/2026-03-06-08.md
+Lines: 439
+
+### Grade: C+ (borderline B)
+
+To view: cat /home/marche/noricum/reviews/reports/2026-03-06-08.md
+=== Noricum Multi-Stakeholder Review ===
+Date: 2026-03-06-08
+Collecting project metrics...
+Metrics collected to /tmp/noricum-metrics-MWyjcI.txt
+
+Running review with Claude Code...
+(This may take several minutes)
+
+=== Review Complete ===
+Report: /home/marche/noricum/reviews/reports/2026-03-06-08.md
+Lines: 532
+
+### Grade: C
+
+To view: cat /home/marche/noricum/reviews/reports/2026-03-06-08.md
+
+=== Running Auto-Fix Pass ===
+=== Noricum Multi-Stakeholder Review ===
+Date: 2026-03-06-08
+Collecting project metrics...
+Metrics collected to /tmp/noricum-metrics-2yo6Rb.txt
+
+Running review with Claude Code...
+(This may take several minutes)
+
+=== Review Complete ===
+Report: /home/marche/noricum/reviews/reports/2026-03-06-08.md
+Lines: 389
+
+### Grade: C
+
+To view: cat /home/marche/noricum/reviews/reports/2026-03-06-08.md
+
+=== Running Auto-Fix Pass ===
+Fix log: /home/marche/noricum/reviews/reports/2026-03-06-08-fixes.md
+=== Noricum Multi-Stakeholder Review ===
+Date: 2026-03-06-10
+Collecting project metrics...
+Metrics collected to /tmp/noricum-metrics-QGNALQ.txt
+
+Running review with Claude Code...
+(This may take several minutes)
+
+=== Review Complete ===
+Report: /home/marche/noricum/reviews/reports/2026-03-06-10.md
+Lines: 442
+
+### Grade: C+ (6.87)
+
+To view: cat /home/marche/noricum/reviews/reports/2026-03-06-10.md
+
+=== Running Auto-Fix Pass ===
+Fix log: /home/marche/noricum/reviews/reports/2026-03-06-10-fixes.md
+=== Noricum Multi-Stakeholder Review ===
+Date: 2026-03-06-12
+Collecting project metrics...
+Metrics collected to /tmp/noricum-metrics-k6Y17U.txt
+
+Running review with Claude Code...
+(This may take several minutes)
+
+=== Review Complete ===
+Report: /home/marche/noricum/reviews/reports/2026-03-06-12.md
+Lines: 405
+
+### Grade: B
+
+To view: cat /home/marche/noricum/reviews/reports/2026-03-06-12.md
+
+=== Running Auto-Fix Pass ===
+Fix log: /home/marche/noricum/reviews/reports/2026-03-06-12-fixes.md

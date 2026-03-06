@@ -155,7 +155,10 @@ fn count_unsafe_recursive(cursor: &mut tree_sitter::TreeCursor, count: &mut u32)
                         break;
                     }
                     // Stop looking once we reach fn keyword or beyond
-                    if child.kind() == "fn" || child.kind() == "identifier" || child.kind() == "parameters" {
+                    if child.kind() == "fn"
+                        || child.kind() == "identifier"
+                        || child.kind() == "parameters"
+                    {
                         break;
                     }
                 }
@@ -247,7 +250,6 @@ fn uses_unsafe() {
         let source = "pub unsafe fn danger() {}";
         assert_eq!(count_unsafe_blocks(source), 1);
     }
-
 
     #[test]
     fn test_count_unsafe_pub_crate_fn() {

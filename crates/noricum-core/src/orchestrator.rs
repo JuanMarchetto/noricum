@@ -429,8 +429,7 @@ pub async fn migrate_file(
     unit.metrics.llm_calls += 1;
     // Estimate token usage for analysis call
     unit.metrics.input_tokens += noricum_agents::estimate_tokens(&unit.c_source);
-    unit.metrics.output_tokens +=
-        noricum_agents::estimate_tokens(&format!("{analysis:?}"));
+    unit.metrics.output_tokens += noricum_agents::estimate_tokens(&format!("{analysis:?}"));
     info!(
         function = %name,
         state = ?unit.state,
@@ -509,7 +508,11 @@ pub async fn migrate_file(
     // --- Stage 6: Validate ---
     let validation =
         noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
-    noricum_validation::apply_validation_with_max(&mut unit, &validation, config.max_repair_iterations);
+    noricum_validation::apply_validation_with_max(
+        &mut unit,
+        &validation,
+        config.max_repair_iterations,
+    );
     info!(
         function = %name,
         state = ?unit.state,
@@ -606,7 +609,11 @@ pub async fn migrate_file(
 
             let re_validation =
                 noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
-            noricum_validation::apply_validation_with_max(&mut unit, &re_validation, config.max_repair_iterations);
+            noricum_validation::apply_validation_with_max(
+                &mut unit,
+                &re_validation,
+                config.max_repair_iterations,
+            );
             info!(
                 function = %name,
                 iteration,

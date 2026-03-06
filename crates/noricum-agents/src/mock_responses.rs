@@ -10,8 +10,7 @@ pub const MOCK_ANALYSIS_COMPLEX: &str = r#"{"difficulty":"hard","patterns":["mal
 
 pub const MOCK_ANALYSIS_MALFORMED: &str = "Sure! Here's some analysis without JSON";
 
-pub const MOCK_TRANSLATION_FENCED: &str =
-    "```rust\nfn add(a: i32, b: i32) -> i32 { a + b }\n```";
+pub const MOCK_TRANSLATION_FENCED: &str = "```rust\nfn add(a: i32, b: i32) -> i32 { a + b }\n```";
 
 pub const MOCK_TRANSLATION_BARE: &str = "fn add(a: i32, b: i32) -> i32 { a + b }";
 
@@ -33,7 +32,8 @@ pub const MOCK_TRANSLATION_ONLY_PROSE: &str =
 pub const MOCK_ANALYSIS_FENCED: &str = "Here is the analysis:\n```json\n{\"difficulty\":\"medium\",\"patterns\":[\"ptr_arithmetic\",\"error_codes\"],\"rust_equivalents\":{\"ptr_arithmetic\":\"slice indexing\",\"error_codes\":\"Result type\"},\"dependencies\":[],\"risks\":[\"null pointer dereference\"],\"strategy\":\"Use slices and Result\"}\n```\n";
 
 /// Mock repair response with a compilable fix.
-pub const MOCK_REPAIR_COMPILABLE: &str = "```rust\npub fn add(a: i32, b: i32) -> i32 {\n    a.wrapping_add(b)\n}\n```";
+pub const MOCK_REPAIR_COMPILABLE: &str =
+    "```rust\npub fn add(a: i32, b: i32) -> i32 {\n    a.wrapping_add(b)\n}\n```";
 
 /// Mock test generation response.
 pub const MOCK_TEST_GEN: &str = "```rust\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_add_positive() {\n        assert_eq!(add(2, 3), 5);\n    }\n\n    #[test]\n    fn test_add_negative() {\n        assert_eq!(add(-1, 1), 0);\n    }\n\n    #[test]\n    fn test_add_zero() {\n        assert_eq!(add(0, 0), 0);\n    }\n}\n```";

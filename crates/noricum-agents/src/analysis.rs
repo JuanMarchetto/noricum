@@ -63,7 +63,12 @@ pub async fn analyze_function_with_temperature(
     temperature: Option<f64>,
 ) -> Result<AnalysisResult, AgentError> {
     let temp = temperature.unwrap_or(0.2);
-    info!(function = function_name, model, temperature = temp, "starting analysis");
+    info!(
+        function = function_name,
+        model,
+        temperature = temp,
+        "starting analysis"
+    );
 
     let agent = client
         .agent(model)

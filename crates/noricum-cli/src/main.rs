@@ -178,7 +178,9 @@ async fn main() {
             eprintln!("  caused by: {cause}");
         }
         eprintln!();
-        eprintln!("hint: try `noricum doctor` to check tool availability, or `--no-llm` to skip LLM agents");
+        eprintln!(
+            "hint: try `noricum doctor` to check tool availability, or `--no-llm` to skip LLM agents"
+        );
         std::process::exit(1);
     }
 }
@@ -228,13 +230,22 @@ async fn cmd_migrate(opts: MigrateOpts) -> Result<()> {
             .await
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
-        if opts.docs && let Some(ref rust) = unit.rust_output {
+        if opts.docs
+            && let Some(ref rust) = unit.rust_output
+        {
             let documented =
                 noricum_tools::doc_gen::add_docs_to_rust(rust, &unit.c_source, &unit.name);
             unit.rust_output = Some(documented);
         }
 
-        print_unit_result(&unit, &opts.output, opts.diff_test, opts.json, opts.fuzz, opts.fuzz_iterations)?;
+        print_unit_result(
+            &unit,
+            &opts.output,
+            opts.diff_test,
+            opts.json,
+            opts.fuzz,
+            opts.fuzz_iterations,
+        )?;
 
         if let Some(report) = opts.report.as_deref() {
             write_html_report_single(&unit, report)?;
@@ -267,7 +278,14 @@ async fn cmd_migrate(opts: MigrateOpts) -> Result<()> {
 
             for unit in &project.units {
                 println!();
-                print_unit_result(unit, &opts.output, opts.diff_test, opts.json, opts.fuzz, opts.fuzz_iterations)?;
+                print_unit_result(
+                    unit,
+                    &opts.output,
+                    opts.diff_test,
+                    opts.json,
+                    opts.fuzz,
+                    opts.fuzz_iterations,
+                )?;
             }
         }
 

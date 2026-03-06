@@ -59,9 +59,7 @@ fn validate_file_path(path: &str) -> Result<(), RigToolError> {
             })?
         } else if let Some(parent) = p.parent() {
             let canon_parent = parent.canonicalize().map_err(|e| {
-                RigToolError::PathViolation(format!(
-                    "cannot resolve parent of {path}: {e}"
-                ))
+                RigToolError::PathViolation(format!("cannot resolve parent of {path}: {e}"))
             })?;
             if let Some(file_name) = p.file_name() {
                 canon_parent.join(file_name)
