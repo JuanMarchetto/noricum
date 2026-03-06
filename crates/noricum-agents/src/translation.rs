@@ -72,10 +72,22 @@ pub async fn translate_function_with_patterns_and_temperature(
     let analysis_json = serde_json::to_string_pretty(analysis)
         .map_err(|e| AgentError::Provider(format!("failed to serialize analysis: {e}")))?;
 
-    let mut user_message = format!(
+    let mut user_message = String::new();
+
+    // For very large files (>2000 LOC), prepend a structural summary
+    // to help the LLM understand the codebase before translating.
+    let c_lines = c_source.lines().count();
+    if c_lines > 2000 {
+        let summary = build_structural_summary(c_source);
+        user_message.push_str(&format!(
+            "## Structural summary ({c_lines} lines)\n{summary}\n\n"
+        ));
+    }
+
+    user_message.push_str(&format!(
         "## Original C source\n<c_source>\n{c_source}\n</c_source>\n\n\
          ## Analysis\n```json\n{analysis_json}\n```\n"
-    );
+    ));
 
     if let Some(c2rust) = c2rust_output {
         user_message.push_str(&format!(
@@ -99,7 +111,7 @@ pub async fn translate_function_with_patterns_and_temperature(
 
     // Scale max_tokens based on C source size: Rust output is typically 1.5x C input.
     // Estimate ~4 chars per token, multiply by 2 for headroom.
-    let max_tokens = ((c_source.len() as u64 / 4) * 2).clamp(8192, 32768);
+    let max_tokens = ((c_source.len() as u64 / 4) * 2).clamp(8192, 65536);
 
     debug!(max_tokens, "sending translation prompt to LLM");
 
@@ -113,4 +125,134 @@ pub async fn translate_function_with_patterns_and_temperature(
     );
 
     Ok(crate::extract_rust_code(&response))
+}
+
+/// Build a condensed structural summary of a large C source file.
+///
+/// Extracts struct/enum/union declarations, typedefs, function signatures,
+/// and global variables to give the LLM an architectural overview before
+/// attempting full translation.
+fn build_structural_summary(c_source: &str) -> String {
+    let mut structs = Vec::new();
+    let mut functions = Vec::new();
+    let mut typedefs = Vec::new();
+    let mut globals = Vec::new();
+
+    let mut in_struct = false;
+    let mut brace_depth: i32 = 0;
+
+    for line in c_source.lines() {
+        let trimmed = line.trim();
+
+        // Track brace depth
+        let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
+        let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
+
+        if in_struct {
+            brace_depth += opens - closes;
+            if brace_depth <= 0 {
+                in_struct = false;
+                brace_depth = 0;
+            }
+            continue;
+        }
+
+        // Struct/enum/union declarations
+        if (trimmed.starts_with("struct ")
+            || trimmed.starts_with("enum ")
+            || trimmed.starts_with("union "))
+            && trimmed.contains('{')
+        {
+            structs.push(
+                trimmed
+                    .split('{')
+                    .next()
+                    .unwrap_or(trimmed)
+                    .trim()
+                    .to_string(),
+            );
+            in_struct = true;
+            brace_depth = opens - closes;
+            if brace_depth <= 0 {
+                in_struct = false;
+                brace_depth = 0;
+            }
+            continue;
+        }
+
+        // Typedefs
+        if trimmed.starts_with("typedef") {
+            typedefs.push(trimmed.to_string());
+            continue;
+        }
+
+        // Function signatures (top-level, not inside structs)
+        if brace_depth == 0
+            && !trimmed.starts_with("//")
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with("typedef")
+            && trimmed.contains('(')
+            && (trimmed.ends_with('{') || trimmed.ends_with(')'))
+            && !trimmed.starts_with("if")
+            && !trimmed.starts_with("while")
+            && !trimmed.starts_with("for")
+        {
+            let sig = trimmed.split('{').next().unwrap_or(trimmed).trim();
+            if !sig.is_empty() {
+                functions.push(sig.to_string());
+            }
+        }
+
+        // Global variables (top-level assignments)
+        if brace_depth == 0
+            && !trimmed.starts_with("//")
+            && !trimmed.starts_with('#')
+            && trimmed.contains('=')
+            && trimmed.ends_with(';')
+            && !trimmed.contains('(')
+        {
+            globals.push(trimmed.to_string());
+        }
+
+        brace_depth += opens - closes;
+        if brace_depth < 0 {
+            brace_depth = 0;
+        }
+    }
+
+    let mut summary = String::new();
+
+    if !typedefs.is_empty() {
+        summary.push_str(&format!("**Typedefs ({}):** ", typedefs.len()));
+        summary.push_str(&typedefs.join("; "));
+        summary.push('\n');
+    }
+    if !structs.is_empty() {
+        summary.push_str(&format!("**Structs/Enums ({}):** ", structs.len()));
+        summary.push_str(&structs.join(", "));
+        summary.push('\n');
+    }
+    if !functions.is_empty() {
+        summary.push_str(&format!("**Functions ({}):**\n", functions.len()));
+        for f in &functions {
+            summary.push_str(&format!("- `{f}`\n"));
+        }
+    }
+    if !globals.is_empty() {
+        summary.push_str(&format!("**Globals ({}):** ", globals.len()));
+        summary.push_str(
+            &globals
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+        if globals.len() > 10 {
+            summary.push_str(&format!(" ... and {} more", globals.len() - 10));
+        }
+        summary.push('\n');
+    }
+
+    summary
 }

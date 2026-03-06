@@ -121,14 +121,18 @@ pub async fn repair_function_with_temperature(
         ));
     }
 
+    // For large C sources, abbreviate to save context tokens.
+    // The repair agent primarily needs the Rust code + errors; the C source is just reference.
+    let c_context = abbreviate_c_source(c_source, 300);
+
     user_message.push_str(&format!(
-        "## Original C source (for reference)\n<c_source>\n{c_source}\n</c_source>\n\n\
+        "## Original C source (for reference)\n<c_source>\n{c_context}\n</c_source>\n\n\
          Fix all issues. The Rust output must match the C output exactly byte-for-byte. \
          Output ONLY the complete corrected Rust source code."
     ));
 
     // Scale max_tokens based on current Rust source size + headroom for fixes.
-    let max_tokens = ((rust_source.len() as u64 / 4) * 2).clamp(8192, 32768);
+    let max_tokens = ((rust_source.len() as u64 / 4) * 2).clamp(8192, 65536);
 
     debug!(
         error_count,
@@ -148,4 +152,77 @@ pub async fn repair_function_with_temperature(
     debug!(response_len = response.len(), "received repair response");
 
     Ok(crate::extract_rust_code(&response))
+}
+
+/// Abbreviate large C source files to reduce context token usage.
+///
+/// For files under `max_lines`, returns the full source unchanged.
+/// For larger files, keeps struct/typedef declarations, function signatures,
+/// and the main() function body, replacing other function bodies with `// ...`.
+fn abbreviate_c_source(c_source: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = c_source.lines().collect();
+    if lines.len() <= max_lines {
+        return c_source.to_string();
+    }
+
+    let mut result = Vec::new();
+    let mut brace_depth: i32 = 0;
+    let mut in_function_body = false;
+    let mut body_omitted = false;
+
+    for line in &lines {
+        let trimmed = line.trim();
+
+        // Always keep preprocessor directives, typedefs, struct/enum/union declarations
+        let is_declaration = trimmed.starts_with("#include")
+            || trimmed.starts_with("#define")
+            || trimmed.starts_with("typedef")
+            || trimmed.starts_with("struct ")
+            || trimmed.starts_with("enum ")
+            || trimmed.starts_with("union ");
+
+        // Always keep the main function fully
+        let is_main = trimmed.starts_with("int main")
+            || trimmed.starts_with("void main")
+            || trimmed.starts_with("int main(");
+
+        // Track brace depth
+        let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
+        let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
+
+        if is_main {
+            in_function_body = false; // don't abbreviate main
+        }
+
+        if brace_depth == 0 && opens > 0 && !is_declaration && !is_main {
+            // Entering a function body — keep the signature line, abbreviate body
+            result.push(*line);
+            in_function_body = true;
+            body_omitted = false;
+            brace_depth += opens - closes;
+            continue;
+        }
+
+        if in_function_body && brace_depth > 0 {
+            if !body_omitted {
+                result.push("    // ... (body abbreviated for context)");
+                body_omitted = true;
+            }
+            brace_depth += opens - closes;
+            if brace_depth <= 0 {
+                result.push("}");
+                in_function_body = false;
+                brace_depth = 0;
+            }
+            continue;
+        }
+
+        brace_depth += opens - closes;
+        if brace_depth < 0 {
+            brace_depth = 0;
+        }
+        result.push(line);
+    }
+
+    result.join("\n")
 }
