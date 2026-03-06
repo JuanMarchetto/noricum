@@ -196,3 +196,79 @@ fn golden_cjson_test() {
         "create: {\"name\":\"noricum\",\"version\":1,\"valid\":true}\nkey=value\nnum=42\narray_size=5\nitem_2=3\ndone\n"
     );
 }
+
+/// Compile a Rust fixture and return its stdout.
+fn compile_and_run_rust(fixture_path: &str) -> String {
+    let full_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture_path);
+    assert!(
+        full_path.exists(),
+        "fixture not found: {}",
+        full_path.display()
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("test_exe");
+
+    let compile = Command::new("rustc")
+        .arg(&full_path)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("failed to run rustc");
+
+    assert!(
+        compile.status.success(),
+        "Rust compilation failed for {}: {}",
+        fixture_path,
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(&exe)
+        .output()
+        .expect("failed to run compiled executable");
+
+    assert!(
+        run.status.success(),
+        "executable failed for {}: {}",
+        fixture_path,
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    String::from_utf8_lossy(&run.stdout).to_string()
+}
+
+#[test]
+fn golden_cjson_combined() {
+    // Verify the C combined source produces expected output
+    let c_output = compile_and_run("tests/fixtures/cjson/cjson_combined.c");
+    assert_eq!(
+        c_output,
+        "create: {\"name\":\"noricum\",\"version\":1,\"valid\":true}\nkey=value\nnum=42\narray_size=5\nitem_2=3\ndone\n"
+    );
+
+    // Verify the migrated Rust output produces byte-exact same output
+    let rust_output = compile_and_run_rust("output/cjson/cjson_combined.rs");
+    assert_eq!(
+        c_output, rust_output,
+        "Rust migration output must match C output byte-for-byte"
+    );
+}
+
+#[test]
+fn golden_cjson_combined_extended() {
+    let c_output = compile_and_run("tests/fixtures/cjson/cjson_combined_extended.c");
+    assert_eq!(
+        c_output,
+        "empty_obj: {}\nnested: {\"a\":{\"b\":1}}\n\
+         escaped: {\"quote\":\"say \\\"hello\\\"\",\"backslash\":\"path\\\\to\\\\file\",\"newline\":\"line1\\nline2\",\"tab\":\"col1\\tcol2\"}\n\
+         roundtrip: {\"x\":10,\"y\":[1,2,3],\"z\":{\"w\":true}}\n\
+         parse_fail: NULL\nparse_fail2: NULL\n\
+         arr_size: 5\narr[0]=10\narr[1]=20\narr[2]=30\narr[3]=40\narr[4]=50\n\
+         zero: 0\nnegative: -42\nlarge: 1000000\n\
+         bools: {\"t\":true,\"f\":false}\n\
+         null_val: null\nneg_parse: -99\n\
+         whitespace: {\"a\":1,\"b\":2}\n\
+         empty_arr: []\nempty_arr_size: 0\n\
+         extended_done\n"
+    );
+}

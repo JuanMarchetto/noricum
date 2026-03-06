@@ -87,8 +87,15 @@ pub mod models {
 }
 
 /// Select a model based on task difficulty and available providers.
-pub fn select_model(config: &ProviderConfig, difficulty: Difficulty, task: &str) -> ModelSelection {
-    // If Anthropic is available, use it for medium/hard tasks
+///
+/// Returns `Err` if no usable provider is configured. Ollama support is
+/// declared in `ProviderKind` but not yet implemented; selecting it returns
+/// an error rather than silently proceeding.
+pub fn select_model(
+    config: &ProviderConfig,
+    difficulty: Difficulty,
+    task: &str,
+) -> Result<ModelSelection, crate::AgentError> {
     if config.anthropic_api_key.is_some() {
         let model = match (difficulty, task) {
             (Difficulty::Hard, _) => models::CLAUDE_4_OPUS.to_string(),
@@ -96,18 +103,17 @@ pub fn select_model(config: &ProviderConfig, difficulty: Difficulty, task: &str)
             (Difficulty::Easy, _) => models::CLAUDE_3_5_HAIKU.to_string(),
         };
         info!(provider = "anthropic", model = %model, ?difficulty, "selected model");
-        return ModelSelection {
+        return Ok(ModelSelection {
             provider: ProviderKind::Anthropic,
             model,
-        };
+        });
     }
 
-    // Fallback to Ollama
-    info!(provider = "ollama", model = %config.ollama_model, ?difficulty, "selected model (fallback)");
-    ModelSelection {
-        provider: ProviderKind::Ollama,
-        model: config.ollama_model.clone(),
-    }
+    // Ollama provider is not yet implemented
+    Err(crate::AgentError::NoProvider(
+        "no LLM provider available: Anthropic API key not set and Ollama is not yet implemented"
+            .into(),
+    ))
 }
 
 #[cfg(test)]
@@ -121,25 +127,24 @@ mod tests {
             ..Default::default()
         };
 
-        let selection = select_model(&config, Difficulty::Hard, "translation");
+        let selection = select_model(&config, Difficulty::Hard, "translation").unwrap();
         assert_eq!(selection.provider, ProviderKind::Anthropic);
         assert_eq!(selection.model, "claude-opus-4-0");
 
-        let selection = select_model(&config, Difficulty::Easy, "translation");
+        let selection = select_model(&config, Difficulty::Easy, "translation").unwrap();
         assert_eq!(selection.provider, ProviderKind::Anthropic);
         assert_eq!(selection.model, models::CLAUDE_3_5_HAIKU);
     }
 
     #[test]
-    fn test_select_model_ollama_fallback() {
+    fn test_select_model_no_provider_returns_error() {
         let config = ProviderConfig {
             anthropic_api_key: None,
             ..Default::default()
         };
 
-        let selection = select_model(&config, Difficulty::Hard, "translation");
-        assert_eq!(selection.provider, ProviderKind::Ollama);
-        assert_eq!(selection.model, "llama3.2");
+        let result = select_model(&config, Difficulty::Hard, "translation");
+        assert!(result.is_err(), "should error when no provider is available");
     }
 
     #[test]

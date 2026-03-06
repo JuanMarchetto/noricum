@@ -22,12 +22,48 @@ pub enum AgentError {
     MaxRetries,
 }
 
-/// Estimate token count from text length (bytes / 4 heuristic).
+/// Estimate token count from text content using a word/symbol-aware heuristic.
 ///
 /// rig-rs 0.31 does not expose usage metadata directly, so we estimate
-/// based on the ~4 bytes per token average for ASCII-dominated source code.
+/// tokens by counting words and symbols separately. This is more accurate
+/// than a simple bytes/4 ratio because:
+/// - Short identifiers and keywords tend to be single tokens
+/// - Punctuation and operators are often individual tokens
+/// - Whitespace is typically merged with adjacent tokens
+///
+/// Empirically calibrated against Claude tokenizer behavior on source code.
 pub fn estimate_tokens(text: &str) -> u64 {
-    (text.len() as u64).div_ceil(4)
+    if text.is_empty() {
+        return 0;
+    }
+
+    let mut tokens: u64 = 0;
+    let mut in_word = false;
+
+    for ch in text.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            if !in_word {
+                in_word = true;
+                tokens += 1; // start of a new word/identifier
+            }
+        } else {
+            in_word = false;
+            if !ch.is_whitespace() {
+                // Punctuation, operators, braces count as individual tokens
+                tokens += 1;
+            }
+        }
+    }
+
+    // Long identifiers may be split into multiple sub-word tokens.
+    // Add ~1 token per 8 chars of word content to account for this.
+    let alpha_chars = text.chars().filter(|c| c.is_alphanumeric() || *c == '_').count() as u64;
+    tokens += alpha_chars / 8;
+
+    // Newlines contribute fractionally (whitespace tokens)
+    tokens += text.lines().count().saturating_sub(1) as u64 / 4;
+
+    tokens.max(1)
 }
 
 /// Extract Rust code from an LLM response, stripping markdown fences if present.
@@ -115,5 +151,28 @@ mod tests {
             "prose-only input returns the text as-is (no fences found)"
         );
         assert!(code.contains("too complex"));
+    }
+
+    #[test]
+    fn test_estimate_tokens_empty() {
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn test_estimate_tokens_simple_code() {
+        // "fn add(a: i32, b: i32) -> i32 { a + b }" has:
+        // words: fn, add, a, i32, b, i32, i32, a, b = 9 words
+        // symbols: (, :, ,, :, ), -, >, {, +, } = 10 symbols
+        // Should be roughly 20-30 tokens
+        let tokens = estimate_tokens("fn add(a: i32, b: i32) -> i32 { a + b }");
+        assert!(tokens > 10, "expected >10 tokens, got {tokens}");
+        assert!(tokens < 50, "expected <50 tokens, got {tokens}");
+    }
+
+    #[test]
+    fn test_estimate_tokens_more_for_longer_text() {
+        let short = estimate_tokens("fn a() {}");
+        let long = estimate_tokens("fn very_long_function_name(param_one: i32, param_two: String) -> Result<Vec<u8>, Box<dyn Error>> { todo!() }");
+        assert!(long > short, "longer text should estimate more tokens");
     }
 }

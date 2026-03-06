@@ -369,6 +369,38 @@ fn test_miniz_test_c_compiles() {
     );
 }
 
+/// Test that cjson combined fixture compiles as single-file C.
+#[test]
+fn test_cjson_combined_c_compiles() {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("cjson_combined");
+
+    let output = std::process::Command::new("cc")
+        .args(["-std=c11", "-lm", "-o"])
+        .arg(&exe)
+        .arg(base.join("tests/fixtures/cjson/cjson_combined.c"))
+        .output()
+        .expect("failed to compile cjson_combined.c");
+
+    assert!(
+        output.status.success(),
+        "cjson_combined.c should compile, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("failed to run cjson_combined");
+
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("done"),
+        "cjson_combined should produce expected output"
+    );
+}
+
 /// Test that cjson fixture compiles as multi-file C.
 #[test]
 fn test_cjson_c_compiles() {
