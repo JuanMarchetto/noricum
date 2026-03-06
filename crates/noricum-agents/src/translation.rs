@@ -5,13 +5,11 @@
 /// When relevant patterns are available from the PatternStore, they are included
 /// as few-shot examples in the prompt.
 use noricum_ir::pattern_store::MigrationPattern;
-use rig::client::CompletionClient;
-use rig::completion::Prompt;
-use rig::providers::anthropic;
 use tracing::{debug, info};
 
 use crate::AgentError;
 use crate::analysis::AnalysisResult;
+use crate::providers::LlmClient;
 
 /// System prompt for the translation agent, loaded from the prompts directory at compile time.
 const TRANSLATION_PREAMBLE: &str = include_str!("../../../prompts/translation.md");
@@ -22,7 +20,7 @@ const TRANSLATION_PREAMBLE: &str = include_str!("../../../prompts/translation.md
 /// analysis, and relevant migration patterns (RAG) to produce the best possible
 /// Rust translation.
 pub async fn translate_function(
-    client: &anthropic::Client,
+    client: &LlmClient,
     model: &str,
     c_source: &str,
     c2rust_output: Option<&str>,
@@ -33,7 +31,7 @@ pub async fn translate_function(
 
 /// Translate with explicit pattern context (for testability and orchestrator integration).
 pub async fn translate_function_with_patterns(
-    client: &anthropic::Client,
+    client: &LlmClient,
     model: &str,
     c_source: &str,
     c2rust_output: Option<&str>,
@@ -54,7 +52,7 @@ pub async fn translate_function_with_patterns(
 
 /// Translate with pattern context and optional temperature override.
 pub async fn translate_function_with_patterns_and_temperature(
-    client: &anthropic::Client,
+    client: &LlmClient,
     model: &str,
     c_source: &str,
     c2rust_output: Option<&str>,
@@ -70,13 +68,6 @@ pub async fn translate_function_with_patterns_and_temperature(
         temperature = temp,
         "starting translation"
     );
-
-    let agent = client
-        .agent(model)
-        .preamble(TRANSLATION_PREAMBLE)
-        .temperature(temp)
-        .max_tokens(8192)
-        .build();
 
     let analysis_json = serde_json::to_string_pretty(analysis)
         .map_err(|e| AgentError::Provider(format!("failed to serialize analysis: {e}")))?;
@@ -108,10 +99,9 @@ pub async fn translate_function_with_patterns_and_temperature(
 
     debug!("sending translation prompt to LLM");
 
-    let response = agent
-        .prompt(&user_message)
-        .await
-        .map_err(|e| AgentError::Provider(format!("translation LLM call failed: {e}")))?;
+    let response = client
+        .run_prompt(model, TRANSLATION_PREAMBLE, temp, 8192, &user_message)
+        .await?;
 
     debug!(
         response_len = response.len(),

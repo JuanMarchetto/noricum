@@ -3,13 +3,11 @@
 ///
 /// The agent classifies difficulty, identifies C patterns, suggests Rust equivalents,
 /// lists dependencies, flags risks, and recommends a migration strategy.
-use rig::client::CompletionClient;
-use rig::completion::Prompt;
-use rig::providers::anthropic;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::AgentError;
+use crate::providers::LlmClient;
 
 /// System prompt for the analysis agent, loaded from the prompts directory at compile time.
 const ANALYSIS_PREAMBLE: &str = include_str!("../../../prompts/analysis.md");
@@ -46,7 +44,7 @@ pub struct AnalysisResult {
 /// Returns `AgentError::Provider` if the LLM call fails, or `AgentError::Parse`
 /// if the response cannot be parsed as JSON.
 pub async fn analyze_function(
-    client: &anthropic::Client,
+    client: &LlmClient,
     model: &str,
     c_source: &str,
     function_name: &str,
@@ -56,7 +54,7 @@ pub async fn analyze_function(
 
 /// Analyze with an optional temperature override.
 pub async fn analyze_function_with_temperature(
-    client: &anthropic::Client,
+    client: &LlmClient,
     model: &str,
     c_source: &str,
     function_name: &str,
@@ -70,13 +68,6 @@ pub async fn analyze_function_with_temperature(
         "starting analysis"
     );
 
-    let agent = client
-        .agent(model)
-        .preamble(ANALYSIS_PREAMBLE)
-        .temperature(temp)
-        .max_tokens(4096)
-        .build();
-
     let user_message = format!(
         "Analyze the following C function named `{function_name}` for migration to Rust.\n\
          Respond ONLY with the JSON object as specified in the output format.\n\n\
@@ -85,10 +76,9 @@ pub async fn analyze_function_with_temperature(
 
     debug!(function = function_name, "sending analysis prompt to LLM");
 
-    let response = agent
-        .prompt(&user_message)
-        .await
-        .map_err(|e| AgentError::Provider(format!("analysis LLM call failed: {e}")))?;
+    let response = client
+        .run_prompt(model, ANALYSIS_PREAMBLE, temp, 4096, &user_message)
+        .await?;
 
     debug!(
         function = function_name,

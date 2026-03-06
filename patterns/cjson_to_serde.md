@@ -1,14 +1,6 @@
-# Pattern: cJSON to serde_json
+# Pattern: cJSON to Idiomatic Rust
 
 ## C Pattern
-Manual JSON manipulation using cJSON library: `cJSON_CreateObject`, `cJSON_AddStringToObject`,
-`cJSON_Parse`, `cJSON_GetObjectItem`, `cJSON_Delete`, `free(json_string)`.
-
-## Rust Pattern
-Use `serde_json` crate with `serde_json::json!{}` macro for creation,
-`serde_json::from_str` for parsing, and automatic memory management.
-
-## C Example
 ```c
 #include "cJSON.h"
 
@@ -25,35 +17,59 @@ const char *val = cJSON_GetObjectItem(parsed, "key")->valuestring;
 cJSON_Delete(parsed);
 ```
 
-## Rust Example
+## Rust Equivalent
 ```rust
-use serde_json::{json, Value};
+use std::collections::HashMap;
 
-let obj = json!({
-    "name": "noricum",
-    "version": 1
-});
-println!("{}", obj.to_string());
+enum JsonValue {
+    Null,
+    Bool(bool),
+    Number(f64),
+    Str(String),
+    Array(Vec<JsonValue>),
+    Object(Vec<(String, JsonValue)>),
+}
 
-let parsed: Value = serde_json::from_str(r#"{"key":"value"}"#).unwrap();
-let val = parsed["key"].as_str().unwrap();
+impl JsonValue {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            JsonValue::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+// Creation — no manual free needed (RAII)
+let obj = JsonValue::Object(vec![
+    ("name".to_string(), JsonValue::Str("noricum".to_string())),
+    ("version".to_string(), JsonValue::Number(1.0)),
+]);
+println!("{}", format_json(&obj));
+
+// Parsing returns Result, not NULL
+let parsed = parse_json(r#"{"key":"value"}"#)?;
+let val = get_object_item(&parsed, "key")
+    .and_then(|v| v.as_str())
+    .unwrap_or("");
 ```
 
 ## Key Mappings
-| cJSON | serde_json |
-|-------|------------|
-| `cJSON_CreateObject()` | `json!({})` or `Value::Object(Map::new())` |
-| `cJSON_AddStringToObject(obj, k, v)` | `obj[k] = json!(v)` |
-| `cJSON_AddNumberToObject(obj, k, n)` | `obj[k] = json!(n)` |
-| `cJSON_Parse(s)` | `serde_json::from_str(s)` |
-| `cJSON_GetObjectItem(obj, k)` | `obj[k]` or `obj.get(k)` |
-| `cJSON_GetArrayItem(arr, i)` | `arr[i]` |
-| `cJSON_GetArraySize(arr)` | `arr.as_array().unwrap().len()` |
-| `cJSON_PrintUnformatted(obj)` | `obj.to_string()` |
+| cJSON | Idiomatic Rust |
+|-------|----------------|
+| `cJSON_CreateObject()` | `JsonValue::Object(Vec::new())` |
+| `cJSON_AddStringToObject(obj, k, v)` | `.push((k, JsonValue::Str(v)))` |
+| `cJSON_AddNumberToObject(obj, k, n)` | `.push((k, JsonValue::Number(n)))` |
+| `cJSON_Parse(s)` | `parse_json(s) -> Result<JsonValue, String>` |
+| `cJSON_GetObjectItem(obj, k)` | `get_object_item(&obj, k) -> Option<&JsonValue>` |
+| `cJSON_GetArrayItem(arr, i)` | `arr[i]` on `Vec<JsonValue>` |
+| `cJSON_GetArraySize(arr)` | `.len()` on `Vec<JsonValue>` |
+| `cJSON_PrintUnformatted(obj)` | `format_json(&obj) -> String` |
 | `cJSON_Delete(obj)` | (automatic — Drop) |
 | `free(json_str)` | (automatic — Drop) |
 
 ## Notes
 - cJSON requires manual `cJSON_Delete()` for every allocated object — Rust handles this via RAII
 - cJSON returns NULL on parse failure — use `Result` in Rust
-- Array access in cJSON walks a linked list (O(n)) — serde_json uses Vec (O(1) index)
+- Array access in cJSON walks a linked list (O(n)) — Vec gives O(1) index
+- Recursive data structures use `enum` with `Box`/`Vec` — no raw pointer graphs
+- No external crate needed — hand-rolled `JsonValue` enum suffices for cJSON semantics

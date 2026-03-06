@@ -3,7 +3,8 @@
 /// Manages connections to Anthropic (Claude API) and Ollama (local models).
 /// Model routing selects the appropriate provider/model based on task difficulty.
 use noricum_ir::Difficulty;
-use rig::client::Nothing;
+use rig::client::{CompletionClient, Nothing};
+use rig::completion::Prompt;
 use rig::providers::{anthropic, ollama};
 use tracing::info;
 
@@ -41,6 +42,61 @@ pub struct ModelSelection {
 pub enum ProviderKind {
     Anthropic,
     Ollama,
+}
+
+/// Unified LLM client wrapping either Anthropic or Ollama.
+pub enum LlmClient {
+    Anthropic(anthropic::Client),
+    Ollama(ollama::Client),
+}
+
+impl LlmClient {
+    /// Build an agent with the given config and run a prompt.
+    pub async fn run_prompt(
+        &self,
+        model: &str,
+        preamble: &str,
+        temperature: f64,
+        max_tokens: u64,
+        message: &str,
+    ) -> Result<String, AgentError> {
+        match self {
+            LlmClient::Anthropic(client) => {
+                let agent = client
+                    .agent(model)
+                    .preamble(preamble)
+                    .temperature(temperature)
+                    .max_tokens(max_tokens)
+                    .build();
+                agent
+                    .prompt(message)
+                    .await
+                    .map_err(|e| AgentError::Provider(format!("LLM call failed: {e}")))
+            }
+            LlmClient::Ollama(client) => {
+                let agent = client
+                    .agent(model)
+                    .preamble(preamble)
+                    .temperature(temperature)
+                    .max_tokens(max_tokens)
+                    .build();
+                agent
+                    .prompt(message)
+                    .await
+                    .map_err(|e| AgentError::Provider(format!("LLM call failed: {e}")))
+            }
+        }
+    }
+}
+
+/// Create an LLM client, preferring Anthropic if a key is available, falling back to Ollama.
+pub fn create_llm_client(config: &ProviderConfig) -> Result<LlmClient, AgentError> {
+    if let Some(ref key) = config.anthropic_api_key {
+        let client = create_anthropic_client_with_key(key)?;
+        return Ok(LlmClient::Anthropic(client));
+    }
+    let client = create_ollama_client_with_url(&config.ollama_url)?;
+    Ok(LlmClient::Ollama(client))
 }
 
 /// Create an Anthropic client from an API key.
@@ -87,8 +143,14 @@ pub mod models {
 }
 
 /// Select a model based on task difficulty and available providers.
-pub fn select_model(config: &ProviderConfig, difficulty: Difficulty, task: &str) -> ModelSelection {
-    // If Anthropic is available, use it for medium/hard tasks
+///
+/// Prefers Anthropic if an API key is configured; otherwise falls through
+/// to Ollama with the configured model name.
+pub fn select_model(
+    config: &ProviderConfig,
+    difficulty: Difficulty,
+    task: &str,
+) -> Result<ModelSelection, crate::AgentError> {
     if config.anthropic_api_key.is_some() {
         let model = match (difficulty, task) {
             (Difficulty::Hard, _) => models::CLAUDE_4_OPUS.to_string(),
@@ -96,18 +158,18 @@ pub fn select_model(config: &ProviderConfig, difficulty: Difficulty, task: &str)
             (Difficulty::Easy, _) => models::CLAUDE_3_5_HAIKU.to_string(),
         };
         info!(provider = "anthropic", model = %model, ?difficulty, "selected model");
-        return ModelSelection {
+        return Ok(ModelSelection {
             provider: ProviderKind::Anthropic,
             model,
-        };
+        });
     }
 
-    // Fallback to Ollama
-    info!(provider = "ollama", model = %config.ollama_model, ?difficulty, "selected model (fallback)");
-    ModelSelection {
+    // Fall through to Ollama
+    info!(provider = "ollama", model = %config.ollama_model, ?difficulty, "selected model (Ollama fallback)");
+    Ok(ModelSelection {
         provider: ProviderKind::Ollama,
         model: config.ollama_model.clone(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -121,25 +183,47 @@ mod tests {
             ..Default::default()
         };
 
-        let selection = select_model(&config, Difficulty::Hard, "translation");
+        let selection = select_model(&config, Difficulty::Hard, "translation").unwrap();
         assert_eq!(selection.provider, ProviderKind::Anthropic);
         assert_eq!(selection.model, "claude-opus-4-0");
 
-        let selection = select_model(&config, Difficulty::Easy, "translation");
+        let selection = select_model(&config, Difficulty::Easy, "translation").unwrap();
         assert_eq!(selection.provider, ProviderKind::Anthropic);
         assert_eq!(selection.model, models::CLAUDE_3_5_HAIKU);
     }
 
     #[test]
-    fn test_select_model_ollama_fallback() {
+    fn test_select_model_falls_through_to_ollama() {
         let config = ProviderConfig {
             anthropic_api_key: None,
             ..Default::default()
         };
 
-        let selection = select_model(&config, Difficulty::Hard, "translation");
+        let selection = select_model(&config, Difficulty::Hard, "translation").unwrap();
         assert_eq!(selection.provider, ProviderKind::Ollama);
         assert_eq!(selection.model, "llama3.2");
+    }
+
+    #[test]
+    fn test_create_llm_client_ollama_fallback() {
+        let config = ProviderConfig {
+            anthropic_api_key: None,
+            ..Default::default()
+        };
+        let client = create_llm_client(&config);
+        assert!(client.is_ok());
+        assert!(matches!(client.unwrap(), LlmClient::Ollama(_)));
+    }
+
+    #[test]
+    fn test_create_llm_client_anthropic_preferred() {
+        let config = ProviderConfig {
+            anthropic_api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        let client = create_llm_client(&config);
+        assert!(client.is_ok());
+        assert!(matches!(client.unwrap(), LlmClient::Anthropic(_)));
     }
 
     #[test]

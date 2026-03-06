@@ -50,19 +50,21 @@ Real migration results on test fixtures (LLM-powered pipeline):
 | `buffer.c` | 36 | 2 | 94/100 | 0 | PASS | 0 |
 | **`hash_table.c`** | **204** | **8** | **89/100** | **0** | **PASS** | **0** |
 | **`miniz_test.c`** | **154** | **2** | **93/100** | **0** | **PASS** | **0** |
+| **`cjson_combined.c`** | **520** | **12** | **100/100** | **0** | **PASS** | **1** |
 
-**12/12 files validated, 0 unsafe blocks, 100% diff test pass rate.**
+**13/13 files validated, 0 unsafe blocks, 100% diff test pass rate.**
 
 ### Noricum vs C2Rust
 
 | Metric | C2Rust Alone | Noricum |
 |--------|-------------|---------|
 | Translation | Mechanical AST lowering | LLM-powered idiomatic |
-| Unsafe blocks | Wraps everything in `unsafe` | 0 across 12+ files |
+| Unsafe blocks | Wraps everything in `unsafe` | 0 across 13+ files |
 | Diff test verification | None | Byte-exact + exit code automated |
 | Repair loop | None | Up to 5 iterations with diff feedback |
 | Avg. idiomatic score | N/A | 89-100/100 |
 | `hash_table.c` | ~250 LOC unsafe, raw ptrs | ~180 LOC safe, Vec/Box |
+| `cjson_combined.c` | ~520 LOC unsafe, manual alloc | ~400 LOC safe, enum JsonValue |
 | Float tolerance | N/A | Configurable epsilon comparison |
 | Multi-input testing | N/A | Multiple stdin/args per test |
 | REST API | None | 6 endpoints (`/api/health`, `/api/migrate`, ...) |
