@@ -1,5 +1,6 @@
 pub mod analysis;
 #[cfg(test)]
+#[allow(dead_code)]
 mod mock_responses;
 pub mod providers;
 pub mod repair;
