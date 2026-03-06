@@ -218,11 +218,9 @@ mod cache {
     }
 
     fn cache_key(c_source: &str) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        c_source.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(c_source.as_bytes());
+        format!("{:064x}", hash)
     }
 
     /// Look up a cached translation for the given C source.
@@ -387,7 +385,7 @@ pub async fn migrate_file(
     config: &MigrationConfig,
 ) -> Result<FunctionUnit, CoreError> {
     let source_path = c_file.to_string_lossy().to_string();
-    let c_source = std::fs::read_to_string(c_file)?;
+    let c_source = tokio::fs::read_to_string(c_file).await?;
 
     if c_source.len() > MAX_C_SOURCE_SIZE {
         return Err(CoreError::Orchestration(format!(
@@ -1165,5 +1163,65 @@ fn main() {
         let rust = "let x = 5;\nstruct Foo { bar: i32 }";
         let sigs = extract_rust_signatures(rust);
         assert!(sigs.is_empty());
+    }
+
+    #[test]
+    fn test_effective_small() {
+        assert_eq!(effective_repair_iterations(5, 500), 5);
+    }
+
+    #[test]
+    fn test_effective_large() {
+        assert_eq!(effective_repair_iterations(5, 1500), 3);
+    }
+
+    #[test]
+    fn test_effective_very_large() {
+        assert_eq!(effective_repair_iterations(5, 3000), 2);
+    }
+
+    #[test]
+    fn test_effective_already_low() {
+        assert_eq!(effective_repair_iterations(1, 3000), 1);
+    }
+
+    #[test]
+    fn test_effective_boundary_1000() {
+        // 1000 is NOT > LARGE_FILE_LOC (1000), so no reduction
+        assert_eq!(effective_repair_iterations(5, 1000), 5);
+    }
+
+    #[test]
+    fn test_effective_boundary_2001() {
+        // 2001 > VERY_LARGE_FILE_LOC (2000), so min(5, 2) = 2
+        assert_eq!(effective_repair_iterations(5, 2001), 2);
+    }
+
+    #[test]
+    fn test_cache_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Run test in the temp directory so .noricum-cache is isolated
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let src = "int cache_test_unique_123() { return 42; }";
+
+        // Miss
+        assert!(cache::get(src).is_none(), "should miss on empty cache");
+
+        // Put + Hit
+        cache::put(src, "fn cache_test_unique_123() -> i32 { 42 }");
+        let hit = cache::get(src);
+        assert!(hit.is_some(), "should hit after put");
+        assert_eq!(hit.unwrap(), "fn cache_test_unique_123() -> i32 { 42 }");
+
+        // Different key = miss
+        assert!(cache::get("int other() { return 0; }").is_none());
+
+        // Empty value = miss (cache::get skips empty)
+        cache::put("int empty_val() {}", "");
+        assert!(cache::get("int empty_val() {}").is_none(), "empty = miss");
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 }

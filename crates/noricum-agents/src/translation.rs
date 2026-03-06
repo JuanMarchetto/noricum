@@ -256,3 +256,80 @@ fn build_structural_summary(c_source: &str) -> String {
 
     summary
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_summary_typedefs() {
+        let source = "typedef int myint;\ntypedef unsigned long ulong;\nvoid f() {}\n";
+        let summary = build_structural_summary(source);
+        assert!(
+            summary.contains("Typedefs (2)"),
+            "should report 2 typedefs, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_summary_structs() {
+        let source = "\
+struct Foo {
+    int x;
+};
+enum Color {
+    RED, GREEN, BLUE
+};
+void f() {}
+";
+        let summary = build_structural_summary(source);
+        assert!(
+            summary.contains("Structs/Enums (2)"),
+            "should report 2 structs/enums, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_summary_functions() {
+        let source = "\
+void foo(int a) {
+    return;
+}
+int bar(int b) {
+    return b;
+}
+double baz(double x) {
+    return x;
+}
+";
+        let summary = build_structural_summary(source);
+        assert!(
+            summary.contains("Functions (3)"),
+            "should report 3 functions, got: {summary}"
+        );
+        assert!(summary.contains("foo"), "should contain foo");
+        assert!(summary.contains("bar"), "should contain bar");
+        assert!(summary.contains("baz"), "should contain baz");
+    }
+
+    #[test]
+    fn test_summary_globals_truncate() {
+        // Generate 15 globals
+        let mut source = String::new();
+        for i in 0..15 {
+            source.push_str(&format!("int g{i} = {i};\n"));
+        }
+        source.push_str("void f() {}\n");
+        let summary = build_structural_summary(&source);
+        assert!(
+            summary.contains("... and 5 more"),
+            "should truncate globals beyond 10, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_summary_empty() {
+        let summary = build_structural_summary("");
+        assert!(summary.is_empty(), "empty source should produce empty summary");
+    }
+}

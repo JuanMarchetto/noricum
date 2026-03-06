@@ -226,3 +226,88 @@ fn abbreviate_c_source(c_source: &str, max_lines: usize) -> String {
 
     result.join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_abbreviate_short_source() {
+        let source = "int main() {\n    return 0;\n}\n";
+        assert_eq!(abbreviate_c_source(source, 10), source);
+    }
+
+    #[test]
+    fn test_abbreviate_keeps_main() {
+        let source = "\
+void helper(int x) {
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    return;
+}
+
+int main() {
+    helper(1);
+    return 0;
+}
+";
+        let result = abbreviate_c_source(source, 5);
+        assert!(result.contains("int main()"), "main should be kept");
+        assert!(result.contains("helper(1);"), "main body should be kept");
+        assert!(
+            result.contains("// ... (body abbreviated for context)"),
+            "helper body should be abbreviated"
+        );
+    }
+
+    #[test]
+    fn test_abbreviate_keeps_declarations() {
+        let source = "\
+#include <stdio.h>
+typedef int myint;
+struct Foo { int x; };
+void helper(int x) {
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    return;
+}
+int main() {
+    return 0;
+}
+";
+        let result = abbreviate_c_source(source, 3);
+        assert!(
+            result.contains("#include <stdio.h>"),
+            "includes should be preserved"
+        );
+        assert!(
+            result.contains("typedef int myint;"),
+            "typedefs should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_abbreviate_nested_braces() {
+        let source = "\
+void outer(int x) {
+    if (x > 0) {
+        while (x > 0) {
+            x--;
+        }
+    }
+}
+int main() { return 0; }
+";
+        let result = abbreviate_c_source(source, 3);
+        // The function body (with nested braces) should be collapsed to a single comment
+        let comment_count = result.matches("// ... (body abbreviated for context)").count();
+        assert_eq!(comment_count, 1, "should have exactly one abbreviation comment");
+    }
+
+    #[test]
+    fn test_abbreviate_empty() {
+        assert_eq!(abbreviate_c_source("", 10), "");
+    }
+}
