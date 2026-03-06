@@ -17,6 +17,13 @@ repair_model = "claude-sonnet-4-6"
 base_url = "http://localhost:11434"
 model = "llama3.2"
 
+[llm.temperature]
+# Defaults used if not set: analysis=0.2, translation=0.3, repair=0.4, test_gen=0.3
+# analysis = 0.2
+# translation = 0.3
+# repair_base = 0.4
+# test_gen = 0.3
+
 [migration]
 # Maximum repair iterations before fallback to unsafe
 max_repair_iterations = 5
