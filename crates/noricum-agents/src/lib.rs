@@ -57,7 +57,10 @@ pub fn estimate_tokens(text: &str) -> u64 {
 
     // Long identifiers may be split into multiple sub-word tokens.
     // Add ~1 token per 8 chars of word content to account for this.
-    let alpha_chars = text.chars().filter(|c| c.is_alphanumeric() || *c == '_').count() as u64;
+    let alpha_chars = text
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .count() as u64;
     tokens += alpha_chars / 8;
 
     // Newlines contribute fractionally (whitespace tokens)
@@ -172,7 +175,9 @@ mod tests {
     #[test]
     fn test_estimate_tokens_more_for_longer_text() {
         let short = estimate_tokens("fn a() {}");
-        let long = estimate_tokens("fn very_long_function_name(param_one: i32, param_two: String) -> Result<Vec<u8>, Box<dyn Error>> { todo!() }");
+        let long = estimate_tokens(
+            "fn very_long_function_name(param_one: i32, param_two: String) -> Result<Vec<u8>, Box<dyn Error>> { todo!() }",
+        );
         assert!(long > short, "longer text should estimate more tokens");
     }
 }

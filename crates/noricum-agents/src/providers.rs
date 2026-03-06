@@ -144,7 +144,10 @@ mod tests {
         };
 
         let result = select_model(&config, Difficulty::Hard, "translation");
-        assert!(result.is_err(), "should error when no provider is available");
+        assert!(
+            result.is_err(),
+            "should error when no provider is available"
+        );
     }
 
     #[test]

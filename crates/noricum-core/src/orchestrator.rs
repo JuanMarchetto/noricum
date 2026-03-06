@@ -461,23 +461,24 @@ pub async fn migrate_file(
         model = %translation_model_sel.model,
         "calling translation agent"
     );
-    let rust_code = match noricum_agents::translation::translate_function_with_patterns_and_temperature(
-        &client,
-        &translation_model_sel.model,
-        &unit.c_source,
-        unit.c2rust_output.as_deref(),
-        &analysis,
-        &relevant_patterns,
-        config.translation_temperature,
-    )
-    .await
-    {
-        Ok(code) => code,
-        Err(e) => {
-            warn!(function = %name, error = %e, "translation agent failed, falling back to sync");
-            return migrate_file_sync(c_file);
-        }
-    };
+    let rust_code =
+        match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+            &client,
+            &translation_model_sel.model,
+            &unit.c_source,
+            unit.c2rust_output.as_deref(),
+            &analysis,
+            &relevant_patterns,
+            config.translation_temperature,
+        )
+        .await
+        {
+            Ok(code) => code,
+            Err(e) => {
+                warn!(function = %name, error = %e, "translation agent failed, falling back to sync");
+                return migrate_file_sync(c_file);
+            }
+        };
     unit.rust_output = Some(rust_code);
     unit.state = MigrationState::Refined;
     unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
