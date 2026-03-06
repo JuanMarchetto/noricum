@@ -139,6 +139,12 @@ impl DependencyGraph {
                         if *deg == 0 {
                             next.push(call.as_str());
                         }
+                    } else {
+                        tracing::warn!(
+                            node = %node,
+                            call = %call,
+                            "topological sort: edge target not in in_degree map (external or phantom call)"
+                        );
                     }
                 }
                 // Sort for deterministic order

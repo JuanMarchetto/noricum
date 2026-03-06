@@ -2,6 +2,7 @@
 ///
 /// Provides terminal-based side-by-side comparison of C and Rust code,
 /// allowing the user to approve, retranslate, edit, skip, or abort migrations.
+///
 use std::io::Write;
 
 /// Action the user can take during interactive review.

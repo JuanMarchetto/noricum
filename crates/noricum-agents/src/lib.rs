@@ -1,7 +1,5 @@
 pub mod analysis;
-#[cfg(test)]
-#[allow(dead_code)]
-mod mock_responses;
+pub mod mock_responses;
 pub mod providers;
 pub mod repair;
 pub mod test_gen;
@@ -24,10 +22,10 @@ pub enum AgentError {
     MaxRetries,
 }
 
-/// Estimate token count from text length (chars / 4 heuristic).
+/// Estimate token count from text length (bytes / 4 heuristic).
 ///
 /// rig-rs 0.31 does not expose usage metadata directly, so we estimate
-/// based on the ~4 characters per token average for English/code.
+/// based on the ~4 bytes per token average for ASCII-dominated source code.
 pub fn estimate_tokens(text: &str) -> u64 {
     (text.len() as u64).div_ceil(4)
 }
@@ -35,7 +33,7 @@ pub fn estimate_tokens(text: &str) -> u64 {
 /// Extract Rust code from an LLM response, stripping markdown fences if present.
 ///
 /// Shared by translation and repair agents to avoid duplication.
-pub(crate) fn extract_rust_code(response: &str) -> String {
+pub fn extract_rust_code(response: &str) -> String {
     // Try to extract code from ```rust ... ``` fences
     if let Some(start) = response.find("```rust") {
         let after_fence = &response[start + 7..];
