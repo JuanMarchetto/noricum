@@ -19,6 +19,11 @@ use tracing::{debug, info, warn};
 /// Prevents OOM on extremely large C files.
 const MAX_C_SOURCE_SIZE: usize = 5 * 1024 * 1024;
 
+/// LOC threshold above which repair iterations are reduced to save tokens.
+const LARGE_FILE_LOC: usize = 1000;
+/// LOC threshold above which repair iterations are further reduced.
+const VERY_LARGE_FILE_LOC: usize = 2000;
+
 use crate::CoreError;
 use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit};
 
@@ -143,6 +148,109 @@ fn check_budget(
         )));
     }
     Ok(())
+}
+
+/// Estimate total token cost for migrating a file before starting.
+///
+/// Returns (estimated_tokens, estimated_usd). Logs a warning if the estimate
+/// exceeds 80% of the configured budget.
+fn preflight_budget_check(config: &MigrationConfig, c_source: &str, name: &str) {
+    let c_tokens = noricum_agents::estimate_tokens(c_source);
+    // Analysis: C source in + analysis out (~500 tokens)
+    let analysis_cost = c_tokens + 500;
+    // Translation: C source + analysis context in, Rust (~1.5x) out
+    let translation_cost = c_tokens * 2 + c_tokens * 3 / 2;
+    // Repair (per iter): Rust source + C source + errors in, Rust out
+    let repair_per_iter = c_tokens * 4;
+    let c_lines = c_source.lines().count();
+    let effective_iters = effective_repair_iterations(config.max_repair_iterations, c_lines);
+    let repair_cost = repair_per_iter * effective_iters as u64;
+    // Test gen: C + Rust in, tests out
+    let test_gen_cost = c_tokens * 3;
+
+    let total_estimate = analysis_cost + translation_cost + repair_cost + test_gen_cost;
+
+    info!(
+        function = %name,
+        estimated_tokens = total_estimate,
+        c_lines,
+        effective_repair_iters = effective_iters,
+        "pre-flight budget estimate"
+    );
+
+    if let Some(budget) = config.max_tokens_budget {
+        let threshold = budget * 80 / 100;
+        if total_estimate > threshold {
+            warn!(
+                function = %name,
+                estimated = total_estimate,
+                budget,
+                "estimated token usage exceeds 80% of budget"
+            );
+        }
+    }
+}
+
+/// Compute effective max repair iterations based on file size.
+///
+/// Large files use fewer iterations to conserve tokens — each repair
+/// iteration sends the full Rust + C source, which is expensive.
+fn effective_repair_iterations(configured_max: u32, c_lines: usize) -> u32 {
+    if c_lines > VERY_LARGE_FILE_LOC {
+        configured_max.min(2)
+    } else if c_lines > LARGE_FILE_LOC {
+        configured_max.min(3)
+    } else {
+        configured_max
+    }
+}
+
+/// Simple file-based translation cache.
+///
+/// Caches successful translations keyed by a hash of the C source content.
+/// Cache directory: `.noricum-cache/` in the current working directory.
+mod cache {
+    use std::path::PathBuf;
+    use tracing::debug;
+
+    fn cache_dir() -> PathBuf {
+        PathBuf::from(".noricum-cache")
+    }
+
+    fn cache_key(c_source: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        c_source.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    /// Look up a cached translation for the given C source.
+    pub fn get(c_source: &str) -> Option<String> {
+        let key = cache_key(c_source);
+        let path = cache_dir().join(format!("{key}.rs"));
+        match std::fs::read_to_string(&path) {
+            Ok(cached) if !cached.is_empty() => {
+                debug!(cache_key = %key, "translation cache hit");
+                Some(cached)
+            }
+            _ => None,
+        }
+    }
+
+    /// Store a successful translation in the cache.
+    pub fn put(c_source: &str, rust_source: &str) {
+        let key = cache_key(c_source);
+        let dir = cache_dir();
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let path = dir.join(format!("{key}.rs"));
+            if let Err(e) = std::fs::write(&path, rust_source) {
+                debug!(error = %e, "failed to write translation cache");
+            } else {
+                debug!(cache_key = %key, path = %path.display(), "cached translation");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +441,9 @@ pub async fn migrate_file(
 
     let provider_config = ProviderConfig::from(config);
 
+    // --- Pre-flight budget estimate ---
+    preflight_budget_check(config, &c_source, &name);
+
     let mut unit = FunctionUnit::new(name.clone(), source_path, c_source);
     unit.state = MigrationState::Extracted;
     info!(function = %name, state = ?unit.state, "state -> Extracted");
@@ -438,62 +549,71 @@ pub async fn migrate_file(
         );
     }
 
+    // --- Translation cache check ---
+    if let Some(cached_rust) = cache::get(&unit.c_source) {
+        info!(function = %name, "using cached translation, skipping LLM call");
+        unit.rust_output = Some(cached_rust);
+        unit.state = MigrationState::Refined;
+        // Skip to validation (no LLM cost)
+    }
+
     // --- Stage 5: Translation agent (with RAG pattern context) ---
-    let pattern_store = PatternStore::load_seed_patterns();
-    let relevant_patterns = pattern_store.find_relevant(&unit.c_source, 3);
-    if !relevant_patterns.is_empty() {
+    if unit.state != MigrationState::Refined {
+        let pattern_store = PatternStore::load_seed_patterns();
+        let relevant_patterns = pattern_store.find_relevant(&unit.c_source, 3);
+        if !relevant_patterns.is_empty() {
+            info!(
+                function = %name,
+                patterns = relevant_patterns.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+                "injecting RAG patterns into translation prompt"
+            );
+        }
+
+        let translation_start = Instant::now();
+        let translation_model_sel = select_model(&provider_config, difficulty, "translation")?;
         info!(
             function = %name,
-            patterns = relevant_patterns.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
-            "injecting RAG patterns into translation prompt"
+            model = %translation_model_sel.model,
+            "calling translation agent"
         );
+        let rust_code =
+            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                &client,
+                &translation_model_sel.model,
+                &unit.c_source,
+                unit.c2rust_output.as_deref(),
+                &analysis,
+                &relevant_patterns,
+                config.translation_temperature,
+            )
+            .await
+            {
+                Ok(code) => code,
+                Err(e) => {
+                    warn!(function = %name, error = %e, "translation agent failed, falling back to sync");
+                    return migrate_file_sync(c_file);
+                }
+            };
+        unit.rust_output = Some(rust_code);
+        unit.state = MigrationState::Refined;
+        unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
+        unit.metrics.llm_calls += 1;
+        // Estimate token usage for translation call
+        unit.metrics.input_tokens += noricum_agents::estimate_tokens(&unit.c_source);
+        if let Some(ref rust) = unit.rust_output {
+            unit.metrics.output_tokens += noricum_agents::estimate_tokens(rust);
+        }
+        info!(function = %name, state = ?unit.state, translation_ms = unit.metrics.translation_ms, "state -> Refined");
+        check_budget(config, &unit.metrics)?;
     }
-
-    let translation_start = Instant::now();
-    let translation_model_sel = select_model(&provider_config, difficulty, "translation")?;
-    info!(
-        function = %name,
-        model = %translation_model_sel.model,
-        "calling translation agent"
-    );
-    let rust_code =
-        match noricum_agents::translation::translate_function_with_patterns_and_temperature(
-            &client,
-            &translation_model_sel.model,
-            &unit.c_source,
-            unit.c2rust_output.as_deref(),
-            &analysis,
-            &relevant_patterns,
-            config.translation_temperature,
-        )
-        .await
-        {
-            Ok(code) => code,
-            Err(e) => {
-                warn!(function = %name, error = %e, "translation agent failed, falling back to sync");
-                return migrate_file_sync(c_file);
-            }
-        };
-    unit.rust_output = Some(rust_code);
-    unit.state = MigrationState::Refined;
-    unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
-    unit.metrics.llm_calls += 1;
-    // Estimate token usage for translation call
-    unit.metrics.input_tokens += noricum_agents::estimate_tokens(&unit.c_source);
-    if let Some(ref rust) = unit.rust_output {
-        unit.metrics.output_tokens += noricum_agents::estimate_tokens(rust);
-    }
-    info!(function = %name, state = ?unit.state, translation_ms = unit.metrics.translation_ms, "state -> Refined");
-    check_budget(config, &unit.metrics)?;
 
     // --- Stage 6: Validate ---
+    let c_lines = unit.c_source.lines().count();
+    let max_iters = effective_repair_iterations(config.max_repair_iterations, c_lines);
+
     let validation =
         noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
-    noricum_validation::apply_validation_with_max(
-        &mut unit,
-        &validation,
-        config.max_repair_iterations,
-    );
+    noricum_validation::apply_validation_with_max(&mut unit, &validation, max_iters);
     info!(
         function = %name,
         state = ?unit.state,
@@ -518,17 +638,27 @@ pub async fn migrate_file(
         );
     }
 
-    // --- Stage 7: Repair loop ---
+    // --- Stage 7: Repair loop (token-aware iteration limit) ---
     if !validation.passed {
         let repair_start = Instant::now();
         let repair_model_sel = select_model(&provider_config, difficulty, "repair")?;
 
+        if max_iters < config.max_repair_iterations {
+            info!(
+                function = %name,
+                c_lines,
+                configured = config.max_repair_iterations,
+                effective = max_iters,
+                "reducing repair iterations for large file"
+            );
+        }
+
         let mut iteration = 1u32;
-        while iteration <= config.max_repair_iterations {
+        while iteration <= max_iters {
             info!(
                 function = %name,
                 iteration,
-                max = config.max_repair_iterations,
+                max = max_iters,
                 model = %repair_model_sel.model,
                 "entering repair iteration"
             );
@@ -550,7 +680,7 @@ pub async fn migrate_file(
                     AuditEvent::RepairIteration {
                         function_name: name.clone(),
                         iteration,
-                        max_iterations: config.max_repair_iterations,
+                        max_iterations: max_iters,
                         error_count: errors.len(),
                         diff_feedback_count: diff_feedback.len(),
                     },
@@ -565,7 +695,7 @@ pub async fn migrate_file(
                 diff_feedback,
                 &unit.c_source,
                 iteration,
-                config.max_repair_iterations,
+                max_iters,
                 config.repair_base_temperature,
             )
             .await?;
@@ -583,11 +713,7 @@ pub async fn migrate_file(
 
             let re_validation =
                 noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
-            noricum_validation::apply_validation_with_max(
-                &mut unit,
-                &re_validation,
-                config.max_repair_iterations,
-            );
+            noricum_validation::apply_validation_with_max(&mut unit, &re_validation, max_iters);
             info!(
                 function = %name,
                 iteration,
@@ -665,6 +791,13 @@ pub async fn migrate_file(
                 );
             }
         }
+    }
+
+    // --- Cache successful translations ---
+    if unit.state == MigrationState::Validated
+        && let Some(ref rust) = unit.rust_output
+    {
+        cache::put(&unit.c_source, rust);
     }
 
     // --- Fuzz testing (after validation passes) ---
