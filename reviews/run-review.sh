@@ -4,7 +4,7 @@
 #   --no-fix  Skip the automatic fix pass (default: always fix)
 # Cron:  0 */2 * * * cd /home/marche/noricum && bash reviews/run-review.sh >> reviews/reports/cron.log 2>&1
 
-set -euo pipefail
+set -uo pipefail
 
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 if [ -z "${TERM:-}" ]; then
@@ -44,14 +44,14 @@ if cargo check --workspace 2>&1 | tail -5 >> "$METRICS_FILE"; then
     echo "RESULT: PASS" >> "$METRICS_FILE"
 else
     echo "RESULT: FAIL" >> "$METRICS_FILE"
-fi
+fi || true
 echo '```' >> "$METRICS_FILE"
 echo "" >> "$METRICS_FILE"
 
 # 2. Test results
 echo "## Tests" >> "$METRICS_FILE"
 echo '```' >> "$METRICS_FILE"
-cargo test --workspace 2>&1 | grep -E "^test result|^running|failures" >> "$METRICS_FILE" || echo "No test output captured" >> "$METRICS_FILE"
+(cargo test --workspace 2>&1 | grep -E "^test result|^running|failures" >> "$METRICS_FILE") || echo "No test output captured" >> "$METRICS_FILE"
 echo '```' >> "$METRICS_FILE"
 echo "" >> "$METRICS_FILE"
 
@@ -62,7 +62,7 @@ if cargo clippy --workspace -- -D warnings 2>&1 | tail -5 >> "$METRICS_FILE"; th
     echo "RESULT: PASS (0 warnings)" >> "$METRICS_FILE"
 else
     echo "RESULT: WARNINGS/ERRORS FOUND" >> "$METRICS_FILE"
-fi
+fi || true
 echo '```' >> "$METRICS_FILE"
 echo "" >> "$METRICS_FILE"
 
@@ -73,7 +73,7 @@ if cargo fmt --all -- --check 2>&1 | head -20 >> "$METRICS_FILE"; then
     echo "RESULT: PASS" >> "$METRICS_FILE"
 else
     echo "RESULT: FORMAT ISSUES FOUND" >> "$METRICS_FILE"
-fi
+fi || true
 echo '```' >> "$METRICS_FILE"
 echo "" >> "$METRICS_FILE"
 

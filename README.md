@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-296%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
+[![Tests](https://img.shields.io/badge/tests-309%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
 [![LOC](https://img.shields.io/badge/LOC-~13%2C200-blue)](https://github.com/JuanMarchetto/noricum)
 

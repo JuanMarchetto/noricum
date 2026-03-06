@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Launch readiness assessment system (`reviews/run-readiness.sh`) with daily cron and 6-dimension weighted scoring
+- Blog post: "I Built an LLM Agent That Migrates C to Safe Rust — With 0 Unsafe Blocks"
+- Expression evaluator fixture (`tests/fixtures/large/expr_eval.c`) — 1,686 LOC, largest test fixture
+- Demo recording script (`scripts/record-demo.sh`) for asciinema
 - cJSON library migration — 520 LOC, score 100/100, 0 unsafe, diff test PASS (basic + 12 extended edge-case tests)
 - Combined single-file C fixtures for standalone diff testing
 - Extended behavioral test harness with 12 edge cases (nested objects, arrays, escaping, unicode, nulls)
