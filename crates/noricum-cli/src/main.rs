@@ -562,6 +562,7 @@ async fn cmd_bench(
     let mut total_failed = 0u32;
     let mut total_llm_calls = 0u32;
     let mut total_repair_iters = 0u32;
+    let mut total_cost_usd = 0.0f64;
 
     for c_file in &c_files {
         let name = c_file
@@ -584,6 +585,7 @@ async fn cmd_bench(
         }
         total_llm_calls += unit.metrics.llm_calls;
         total_repair_iters += unit.metrics.repair_iterations;
+        total_cost_usd += unit.metrics.estimated_cost_usd;
 
         if !json {
             let status = if passed { "PASS" } else { "FAIL" };
@@ -621,6 +623,9 @@ async fn cmd_bench(
             "test_gen_ms": unit.metrics.test_gen_ms,
             "c_lines": unit.metrics.c_lines,
             "rust_lines": unit.metrics.rust_lines,
+            "input_tokens": unit.metrics.input_tokens,
+            "output_tokens": unit.metrics.output_tokens,
+            "estimated_cost_usd": unit.metrics.estimated_cost_usd,
         }));
     }
 
@@ -642,6 +647,7 @@ async fn cmd_bench(
                 "total_llm_calls": total_llm_calls,
                 "total_repair_iterations": total_repair_iters,
                 "total_time_ms": total_time.as_millis() as u64,
+                "estimated_cost_usd": total_cost_usd,
                 "mode": if use_llm { "llm" } else { "sync" },
             },
             "results": results,
@@ -657,6 +663,7 @@ async fn cmd_bench(
         println!("  Success rate: {success_rate:.1}%");
         println!("  LLM calls:    {total_llm_calls}");
         println!("  Repair iters: {total_repair_iters}");
+        println!("  Est. cost:    ${total_cost_usd:.4}");
         println!("  Total time:   {:.1}s", total_time.as_secs_f64());
     }
 
@@ -670,6 +677,7 @@ async fn cmd_bench(
             "total_llm_calls": total_llm_calls,
             "total_repair_iterations": total_repair_iters,
             "total_time_ms": total_time.as_millis() as u64,
+            "estimated_cost_usd": total_cost_usd,
         },
         "results": results,
     });

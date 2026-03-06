@@ -127,10 +127,22 @@ pub async fn repair_function_with_temperature(
          Output ONLY the complete corrected Rust source code."
     ));
 
-    debug!(error_count, diff_count, "sending repair prompt to LLM");
+    // Scale max_tokens based on current Rust source size + headroom for fixes.
+    let max_tokens = ((rust_source.len() as u64 / 4) * 2).clamp(8192, 32768);
+
+    debug!(
+        error_count,
+        diff_count, max_tokens, "sending repair prompt to LLM"
+    );
 
     let response = client
-        .run_prompt(model, REPAIR_PREAMBLE, temperature, 8192, &user_message)
+        .run_prompt(
+            model,
+            REPAIR_PREAMBLE,
+            temperature,
+            max_tokens,
+            &user_message,
+        )
         .await?;
 
     debug!(response_len = response.len(), "received repair response");
