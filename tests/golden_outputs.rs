@@ -20,9 +20,10 @@ fn compile_and_run(fixture_path: &str) -> String {
     let exe = tmp.path().join("test_exe");
 
     let compile = Command::new("cc")
-        .args(["-std=c11", "-o"])
+        .args(["-std=gnu11", "-o"])
         .arg(&exe)
         .arg(&full_path)
+        .arg("-lm")
         .output()
         .expect("failed to run cc");
 
@@ -255,6 +256,23 @@ fn golden_cjson_combined() {
             "Rust migration output must match C output byte-for-byte"
         );
     }
+}
+
+#[test]
+fn golden_expr_eval_fixture() {
+    let output = compile_and_run("tests/fixtures/large/expr_eval.c");
+    assert!(
+        output.contains("=== Basic Arithmetic ==="),
+        "should contain basic arithmetic header"
+    );
+    assert!(
+        output.contains("2 + 3 = 5"),
+        "should contain 2 + 3 = 5"
+    );
+    assert!(
+        output.contains("All tests completed."),
+        "should contain completion message"
+    );
 }
 
 #[test]
