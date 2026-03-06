@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
 # Multi-Stakeholder Review Runner for Noricum
-# Usage: bash reviews/run-review.sh
-# Cron:  0 9 * * 1 cd /home/marche/noricum && bash reviews/run-review.sh
+# Usage: bash reviews/run-review.sh [--fix]
+#   --fix  After generating report, automatically fix blocking/high-priority issues
+# Cron:  0 */2 * * * cd /home/marche/noricum && bash reviews/run-review.sh >> reviews/reports/cron.log 2>&1
 
 set -euo pipefail
+
+export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+if [ -z "${TERM:-}" ]; then
+    [ -f "$HOME/.profile" ] && source "$HOME/.profile" || true
+fi
+
+FIX_MODE=false
+if [[ "${1:-}" == "--fix" ]]; then
+    FIX_MODE=true
+fi
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-DATE=$(date +%Y-%m-%d)
+DATE=$(date +%Y-%m-%d-%H)
 REPORT_DIR="$PROJECT_ROOT/reviews/reports"
 REPORT_FILE="$REPORT_DIR/${DATE}.md"
 METRICS_FILE=$(mktemp /tmp/noricum-metrics-XXXXXX.txt)
@@ -209,4 +220,18 @@ else
     echo "ERROR: Review produced empty output."
     echo "Try running manually: claude -p \"$(head -5 "$METRICS_FILE")...\""
     exit 1
+fi
+
+# --- Auto-Fix Pass ---
+if $FIX_MODE && [ -s "$REPORT_FILE" ]; then
+    echo ""
+    echo "=== Running Auto-Fix Pass ==="
+    FIX_PROMPT="Read the stakeholder review at $REPORT_FILE. For every Blocking and High-priority issue listed, implement the fix directly. Run cargo check, cargo test, and cargo clippy after each change to verify. Do NOT fix Nice-to-have items unless trivial."
+
+    claude -p "$FIX_PROMPT" \
+        --allowedTools 'Read,Write,Edit,Grep,Glob,Bash' \
+        --output-format text \
+        > "${REPORT_DIR}/${DATE}-fixes.md" 2>/dev/null
+
+    echo "Fix log: ${REPORT_DIR}/${DATE}-fixes.md"
 fi
