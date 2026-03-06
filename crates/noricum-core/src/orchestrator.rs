@@ -8,12 +8,10 @@
 /// - `migrate_file`: async, full LLM agent pipeline (analysis, translation, repair, test gen)
 use std::path::Path;
 
-use noricum_agents::providers::{
-    ProviderConfig, create_anthropic_client, create_anthropic_client_with_key, select_model,
-};
+use noricum_agents::LlmClient;
+use noricum_agents::providers::{ProviderConfig, create_llm_client, select_model};
 use noricum_ir::pattern_store::PatternStore;
 use noricum_ir::{FunctionUnit, MigrationProject, MigrationState};
-use rig::providers::anthropic;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -31,6 +29,8 @@ pub struct MigrationConfig {
     pub anthropic_api_key: Option<String>,
     /// Ollama URL override. If `None`, uses the default `http://localhost:11434`.
     pub ollama_url: Option<String>,
+    /// Ollama model name override. Defaults to "llama3.2".
+    pub ollama_model: Option<String>,
     /// Maximum number of repair iterations before falling back to unsafe.
     pub max_repair_iterations: u32,
     /// Minimum idiomatic score (0-100) required to pass validation.
@@ -70,6 +70,7 @@ impl Default for MigrationConfig {
         Self {
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             ollama_url: None,
+            ollama_model: None,
             max_repair_iterations: 5,
             min_idiomatic_score: 60,
             generate_tests: true,
@@ -97,29 +98,23 @@ impl From<&MigrationConfig> for ProviderConfig {
                 .ollama_url
                 .clone()
                 .unwrap_or_else(|| "http://localhost:11434".to_string()),
-            ..Self::default()
+            ollama_model: config
+                .ollama_model
+                .clone()
+                .unwrap_or_else(|| "llama3.2".to_string()),
         }
     }
 }
 
 impl MigrationConfig {
-    /// Try to create an Anthropic client from the configured API key.
-    fn create_client(&self) -> Option<anthropic::Client> {
-        if let Some(ref key) = self.anthropic_api_key {
-            match create_anthropic_client_with_key(key) {
-                Ok(client) => Some(client),
-                Err(e) => {
-                    warn!(error = %e, "failed to create Anthropic client from configured key");
-                    None
-                }
-            }
-        } else {
-            match create_anthropic_client() {
-                Ok(client) => Some(client),
-                Err(e) => {
-                    debug!(error = %e, "no Anthropic client available");
-                    None
-                }
+    /// Try to create an LLM client (Anthropic preferred, Ollama fallback).
+    fn create_client(&self) -> Option<LlmClient> {
+        let provider_config = ProviderConfig::from(self);
+        match create_llm_client(&provider_config) {
+            Ok(client) => Some(client),
+            Err(e) => {
+                warn!(error = %e, "no LLM client available");
+                None
             }
         }
     }

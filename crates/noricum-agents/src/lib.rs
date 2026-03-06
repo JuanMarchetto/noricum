@@ -5,6 +5,8 @@ pub mod repair;
 pub mod test_gen;
 pub mod translation;
 
+pub use providers::LlmClient;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

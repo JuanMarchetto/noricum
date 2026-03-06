@@ -2,12 +2,10 @@
 /// behavioral equivalence between original C code and the migrated Rust code.
 ///
 /// The generated tests compare inputs/outputs to ensure semantic correctness.
-use rig::client::CompletionClient;
-use rig::completion::Prompt;
-use rig::providers::anthropic;
 use tracing::{debug, info};
 
 use crate::AgentError;
+use crate::providers::LlmClient;
 
 /// System prompt for the test generation agent.
 const TEST_GEN_PREAMBLE: &str = "\
@@ -52,7 +50,7 @@ No explanations.";
 /// # Errors
 /// Returns `AgentError::Provider` if the LLM call fails.
 pub async fn generate_tests(
-    client: &anthropic::Client,
+    client: &LlmClient,
     model: &str,
     c_source: &str,
     rust_source: &str,
@@ -63,7 +61,7 @@ pub async fn generate_tests(
 
 /// Generate tests with an optional temperature override.
 pub async fn generate_tests_with_temperature(
-    client: &anthropic::Client,
+    client: &LlmClient,
     model: &str,
     c_source: &str,
     rust_source: &str,
@@ -78,13 +76,6 @@ pub async fn generate_tests_with_temperature(
         "starting test generation"
     );
 
-    let agent = client
-        .agent(model)
-        .preamble(TEST_GEN_PREAMBLE)
-        .temperature(temp)
-        .max_tokens(8192)
-        .build();
-
     let user_message = format!(
         "Generate Rust #[test] functions for the function `{function_name}`.\n\n\
          ## Original C source\n<c_source>\n{c_source}\n</c_source>\n\n\
@@ -98,10 +89,9 @@ pub async fn generate_tests_with_temperature(
         "sending test generation prompt to LLM"
     );
 
-    let response = agent
-        .prompt(&user_message)
-        .await
-        .map_err(|e| AgentError::Provider(format!("test generation LLM call failed: {e}")))?;
+    let response = client
+        .run_prompt(model, TEST_GEN_PREAMBLE, temp, 8192, &user_message)
+        .await?;
 
     debug!(
         function = function_name,
