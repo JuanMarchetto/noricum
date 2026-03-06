@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Economic Evaluation Runner for Noricum
-# Usage: bash reviews/run-economic-eval.sh [--fix]
-#   --fix  After generating evaluation, automatically execute high-priority economic recommendations
+# Usage: bash reviews/run-economic-eval.sh [--no-fix]
+#   --no-fix  Skip the automatic fix pass (default: always fix)
 # Cron:  0 */6 * * * cd /home/marche/noricum && bash reviews/run-economic-eval.sh >> reviews/reports/econ-cron.log 2>&1
 
 set -euo pipefail
@@ -11,9 +11,9 @@ if [ -z "${TERM:-}" ]; then
     [ -f "$HOME/.profile" ] && source "$HOME/.profile" || true
 fi
 
-FIX_MODE=false
-if [[ "${1:-}" == "--fix" ]]; then
-    FIX_MODE=true
+FIX_MODE=true
+if [[ "${1:-}" == "--no-fix" ]]; then
+    FIX_MODE=false
 fi
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -176,7 +176,7 @@ if $FIX_MODE && [ -s "$REPORT_FILE" ]; then
     FIX_PROMPT="Read the economic evaluation at $REPORT_FILE. For every high-priority economic recommendation, implement what can be done in code (documentation improvements, API readiness, benchmark additions, etc.). Run cargo check and cargo test after changes."
 
     env -u CLAUDECODE claude -p "$FIX_PROMPT" \
-        --allowedTools 'Read,Write,Edit,Grep,Glob,Bash' \
+        --dangerously-skip-permissions \
         --output-format text \
         > "${REPORT_DIR}/econ-${DATE}-fixes.md" 2>/dev/null
 

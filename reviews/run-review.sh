@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Multi-Stakeholder Review Runner for Noricum
-# Usage: bash reviews/run-review.sh [--fix]
-#   --fix  After generating report, automatically fix blocking/high-priority issues
+# Usage: bash reviews/run-review.sh [--no-fix]
+#   --no-fix  Skip the automatic fix pass (default: always fix)
 # Cron:  0 */2 * * * cd /home/marche/noricum && bash reviews/run-review.sh >> reviews/reports/cron.log 2>&1
 
 set -euo pipefail
@@ -11,9 +11,9 @@ if [ -z "${TERM:-}" ]; then
     [ -f "$HOME/.profile" ] && source "$HOME/.profile" || true
 fi
 
-FIX_MODE=false
-if [[ "${1:-}" == "--fix" ]]; then
-    FIX_MODE=true
+FIX_MODE=true
+if [[ "${1:-}" == "--no-fix" ]]; then
+    FIX_MODE=false
 fi
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -231,7 +231,7 @@ if $FIX_MODE && [ -s "$REPORT_FILE" ]; then
     FIX_PROMPT="Read the stakeholder review at $REPORT_FILE. For every Blocking and High-priority issue listed, implement the fix directly. Run cargo check, cargo test, and cargo clippy after each change to verify. Do NOT fix Nice-to-have items unless trivial."
 
     env -u CLAUDECODE claude -p "$FIX_PROMPT" \
-        --allowedTools 'Read,Write,Edit,Grep,Glob,Bash' \
+        --dangerously-skip-permissions \
         --output-format text \
         > "${REPORT_DIR}/${DATE}-fixes.md" 2>/dev/null
 
