@@ -607,43 +607,43 @@ pub async fn migrate_file(
     }
 
     // --- Fuzz testing (after validation passes) ---
-    if config.fuzz_test && unit.state == MigrationState::Validated {
-        if let Some(ref rust_output) = unit.rust_output {
-            let fuzz_config = noricum_tools::fuzz_test::FuzzConfig {
-                iterations: config.fuzz_iterations,
-                seed: Some(42),
-                ..Default::default()
-            };
-            match noricum_tools::fuzz_test::run_fuzz_test(&unit.c_source, rust_output, &fuzz_config)
-            {
-                Ok(result) => {
-                    unit.metrics.fuzz_test_passed = Some(result.all_passed);
-                    unit.metrics.fuzz_divergence_count = result.failures;
-                    if !result.all_passed {
-                        info!(
-                            function = %name,
-                            failures = result.failures,
-                            iterations = result.iterations_run,
-                            "fuzz test found divergences"
-                        );
-                        // Feed divergences back as diff feedback for potential repair
-                        if let Some(ref div) = result.first_divergence {
-                            unit.last_diff_feedback.push(format!(
-                                "Fuzz divergence (input {:?}): C={:?} Rust={:?}",
-                                div.input.label, div.c_output, div.rust_output
-                            ));
-                        }
-                    } else {
-                        info!(
-                            function = %name,
-                            iterations = result.iterations_run,
-                            "fuzz test passed"
-                        );
+    if config.fuzz_test
+        && unit.state == MigrationState::Validated
+        && let Some(ref rust_output) = unit.rust_output
+    {
+        let fuzz_config = noricum_tools::fuzz_test::FuzzConfig {
+            iterations: config.fuzz_iterations,
+            seed: Some(42),
+            ..Default::default()
+        };
+        match noricum_tools::fuzz_test::run_fuzz_test(&unit.c_source, rust_output, &fuzz_config) {
+            Ok(result) => {
+                unit.metrics.fuzz_test_passed = Some(result.all_passed);
+                unit.metrics.fuzz_divergence_count = result.failures;
+                if !result.all_passed {
+                    info!(
+                        function = %name,
+                        failures = result.failures,
+                        iterations = result.iterations_run,
+                        "fuzz test found divergences"
+                    );
+                    // Feed divergences back as diff feedback for potential repair
+                    if let Some(ref div) = result.first_divergence {
+                        unit.last_diff_feedback.push(format!(
+                            "Fuzz divergence (input {:?}): C={:?} Rust={:?}",
+                            div.input.label, div.c_output, div.rust_output
+                        ));
                     }
+                } else {
+                    info!(
+                        function = %name,
+                        iterations = result.iterations_run,
+                        "fuzz test passed"
+                    );
                 }
-                Err(e) => {
-                    debug!(function = %name, error = %e, "fuzz test failed (non-fatal)");
-                }
+            }
+            Err(e) => {
+                debug!(function = %name, error = %e, "fuzz test failed (non-fatal)");
             }
         }
     }
@@ -680,10 +680,10 @@ pub async fn migrate_file(
             },
         );
         // Finalize the audit trail
-        if let Ok(t) = std::sync::Arc::try_unwrap(trail.clone()) {
-            if let Ok(inner) = t.into_inner() {
-                let _ = inner.finalize();
-            }
+        if let Ok(t) = std::sync::Arc::try_unwrap(trail.clone())
+            && let Ok(inner) = t.into_inner()
+        {
+            let _ = inner.finalize();
         }
     }
 

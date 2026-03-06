@@ -4,7 +4,7 @@
 /// and produces an aggregate report for benchmarking against DARPA TRACTOR teams.
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use noricum_core::MigrationConfig;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};

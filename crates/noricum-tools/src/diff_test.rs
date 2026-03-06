@@ -49,18 +49,10 @@ pub struct DiffTestResult {
 }
 
 /// Options for differential testing.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DiffTestOptions {
     /// If set, use approximate float comparison with this epsilon.
     pub float_tolerance: Option<f64>,
-}
-
-impl Default for DiffTestOptions {
-    fn default() -> Self {
-        Self {
-            float_tolerance: None,
-        }
-    }
 }
 
 /// Run a differential test: compile C and Rust, run both, compare outputs.
@@ -181,33 +173,6 @@ pub(crate) fn compile_c_exe(c_file: &Path, output_path: &Path) -> Result<bool, T
     Ok(output.status.success())
 }
 
-/// Compile multiple C source files to an executable, with an include directory.
-/// Returns `true` if compilation succeeded.
-pub(crate) fn compile_c_multi(
-    c_files: &[&Path],
-    include_dir: &Path,
-    output_path: &Path,
-) -> Result<bool, ToolError> {
-    let mut cmd = Command::new("cc");
-    cmd.args(["-std=c11", "-lm", "-I"])
-        .arg(include_dir)
-        .arg("-o")
-        .arg(output_path);
-    for f in c_files {
-        cmd.arg(f);
-    }
-    let output = cmd
-        .output()
-        .map_err(|_| ToolError::CommandNotFound("cc".to_string()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        debug!(stderr = %stderr, "C multi-file compilation failed");
-    }
-
-    Ok(output.status.success())
-}
-
 /// Compile a Rust source file to an executable.
 /// Returns `true` if compilation succeeded.
 pub(crate) fn compile_rust_exe(rs_file: &Path, output_path: &Path) -> Result<bool, ToolError> {
@@ -250,11 +215,11 @@ pub(crate) fn run_exe(
         .map_err(ToolError::Io)?;
 
     // Write stdin before reading stdout/stderr to avoid deadlock
-    if let Some(input) = stdin_input {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input.as_bytes());
-            // Drop stdin to signal EOF
-        }
+    if let Some(input) = stdin_input
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        let _ = stdin.write_all(input.as_bytes());
+        // Drop stdin to signal EOF
     }
 
     // Read stdout in a separate thread to avoid pipe buffer deadlock

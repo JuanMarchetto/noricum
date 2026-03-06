@@ -35,10 +35,10 @@ fn extract_c_functions_ast(c_source: &str) -> Option<Vec<CFunction>> {
 
     let mut functions = Vec::new();
     walk_tree(root, c_source, &mut |node, src| {
-        if node.kind() == "function_definition" {
-            if let Some(func) = parse_function_def(node, src) {
-                functions.push(func);
-            }
+        if node.kind() == "function_definition"
+            && let Some(func) = parse_function_def(node, src)
+        {
+            functions.push(func);
         }
     });
 
@@ -91,10 +91,10 @@ fn find_identifier(node: tree_sitter::Node, source: &str) -> Option<String> {
             .map(|s| s.to_string());
     }
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if let Some(id) = find_identifier(child, source) {
-                return Some(id);
-            }
+        if let Some(child) = node.child(i)
+            && let Some(id) = find_identifier(child, source)
+        {
+            return Some(id);
         }
     }
     None
@@ -155,14 +155,12 @@ fn extract_c_calls_ast(c_source: &str, known: &[String]) -> Option<Vec<String>> 
     let mut calls = Vec::new();
 
     walk_tree(root, c_source, &mut |node, src| {
-        if node.kind() == "call_expression" {
-            if let Some(func_node) = node.child(0) {
-                if let Ok(name) = func_node.utf8_text(src.as_bytes()) {
-                    if known_set.contains(name) {
-                        calls.push(name.to_string());
-                    }
-                }
-            }
+        if node.kind() == "call_expression"
+            && let Some(func_node) = node.child(0)
+            && let Ok(name) = func_node.utf8_text(src.as_bytes())
+            && known_set.contains(name)
+        {
+            calls.push(name.to_string());
         }
     });
 
@@ -230,22 +228,21 @@ fn classify_difficulty_ast_inner(c_source: &str) -> Option<Difficulty> {
             "pointer_declarator" => pointer_decl_count += 1,
             "cast_expression" => cast_count += 1,
             "type_descriptor" => {
-                if let Ok(text) = node.utf8_text(src.as_bytes()) {
-                    if text.contains("void") && text.contains('*') {
-                        void_ptr = true;
-                    }
+                if let Ok(text) = node.utf8_text(src.as_bytes())
+                    && text.contains("void")
+                    && text.contains('*')
+                {
+                    void_ptr = true;
                 }
             }
             "function_declarator" => {
                 // Check for function pointer parameters (callbacks)
-                if let Some(parent) = node.parent() {
-                    if parent.kind() == "pointer_declarator" {
-                        if let Some(grandparent) = parent.parent() {
-                            if grandparent.kind() == "parameter_declaration" {
-                                callback = true;
-                            }
-                        }
-                    }
+                if let Some(parent) = node.parent()
+                    && parent.kind() == "pointer_declarator"
+                    && let Some(grandparent) = parent.parent()
+                    && grandparent.kind() == "parameter_declaration"
+                {
+                    callback = true;
                 }
             }
             _ => {}
@@ -378,23 +375,21 @@ fn extract_c_types_ast(c_source: &str) -> Option<Vec<String>> {
             "struct_specifier" | "enum_specifier" | "union_specifier" => {
                 // Find the tag name
                 for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i) {
-                        if child.kind() == "type_identifier" || child.kind() == "identifier" {
-                            if let Ok(name) = child.utf8_text(src.as_bytes()) {
-                                types.push(name.to_string());
-                            }
-                        }
+                    if let Some(child) = node.child(i)
+                        && (child.kind() == "type_identifier" || child.kind() == "identifier")
+                        && let Ok(name) = child.utf8_text(src.as_bytes())
+                    {
+                        types.push(name.to_string());
                     }
                 }
             }
             "type_definition" => {
                 // typedef: the last identifier is the alias name
-                if let Some(last_child) = node.child(node.child_count().saturating_sub(2)) {
-                    if last_child.kind() == "type_identifier" {
-                        if let Ok(name) = last_child.utf8_text(src.as_bytes()) {
-                            types.push(name.to_string());
-                        }
-                    }
+                if let Some(last_child) = node.child(node.child_count().saturating_sub(2))
+                    && last_child.kind() == "type_identifier"
+                    && let Ok(name) = last_child.utf8_text(src.as_bytes())
+                {
+                    types.push(name.to_string());
                 }
             }
             _ => {}

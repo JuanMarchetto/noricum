@@ -1,5 +1,6 @@
 mod api;
 mod crust_bench;
+#[allow(dead_code)]
 mod interactive;
 mod report;
 
