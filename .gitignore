@@ -5,3 +5,6 @@
 *.swo
 *~
 .env
+/docs/marketing/
+/demo.cast
+/demo.gif
