@@ -26,8 +26,13 @@ DATE=$(date +%Y-%m-%d-%H)
 mkdir -p "$REPORT_DIR"
 
 # --- Check if enough changes since last eval ---
-LAST_COMMIT=$(cat "$LAST_COMMIT_FILE" 2>/dev/null || echo "HEAD~50")
-CHANGED_FILES=$(git diff --name-only "$LAST_COMMIT" HEAD 2>/dev/null | wc -l || echo "0")
+if [ -f "$LAST_COMMIT_FILE" ] && git cat-file -t "$(cat "$LAST_COMMIT_FILE")" &>/dev/null; then
+    LAST_COMMIT=$(cat "$LAST_COMMIT_FILE")
+else
+    # First run or invalid commit — use initial commit as baseline
+    LAST_COMMIT=$(git rev-list --max-parents=0 HEAD 2>/dev/null | head -1)
+fi
+CHANGED_FILES=$(git diff --name-only "$LAST_COMMIT" HEAD 2>/dev/null | wc -l | tr -d ' ')
 
 if [ "$CHANGED_FILES" -lt 10 ]; then
     echo "[$DATE] No significant changes since last eval ($CHANGED_FILES files changed, need 10+). Skipping."
@@ -122,6 +127,8 @@ You are performing an economic viability evaluation of the Noricum project, a C-
 
 Produce a complete markdown report with all scores filled in. Be specific and actionable. Be honest — do not inflate scores.
 
+IMPORTANT: Output the entire report as text to stdout. Do NOT attempt to write files. Just print the full markdown report.
+
 ## Automated Metrics
 
 PROMPT_END
@@ -141,7 +148,7 @@ if ! command -v claude &> /dev/null; then
     exit 1
 fi
 
-claude -p "$FULL_PROMPT" \
+env -u CLAUDECODE claude -p "$FULL_PROMPT" \
     --allowedTools 'Read,Grep,Glob,Bash(read-only)' \
     --output-format text \
     > "$REPORT_FILE" 2>/dev/null
@@ -168,7 +175,7 @@ if $FIX_MODE && [ -s "$REPORT_FILE" ]; then
     echo "=== Running Economic Auto-Fix Pass ==="
     FIX_PROMPT="Read the economic evaluation at $REPORT_FILE. For every high-priority economic recommendation, implement what can be done in code (documentation improvements, API readiness, benchmark additions, etc.). Run cargo check and cargo test after changes."
 
-    claude -p "$FIX_PROMPT" \
+    env -u CLAUDECODE claude -p "$FIX_PROMPT" \
         --allowedTools 'Read,Write,Edit,Grep,Glob,Bash' \
         --output-format text \
         > "${REPORT_DIR}/econ-${DATE}-fixes.md" 2>/dev/null

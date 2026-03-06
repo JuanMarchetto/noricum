@@ -170,6 +170,8 @@ You are performing a comprehensive multi-stakeholder review of the Noricum proje
 
 Produce a complete markdown report following the structure in STAKEHOLDER_REVIEW.md, with all scores filled in and findings documented. Be specific — cite file paths and line numbers. Be honest — do not inflate scores.
 
+IMPORTANT: Output the entire report as text to stdout. Do NOT attempt to write files or ask questions. Just print the full markdown report directly.
+
 ## Automated Metrics
 
 PROMPT_END
@@ -196,8 +198,8 @@ if ! command -v claude &> /dev/null; then
     exit 1
 fi
 
-# Run Claude in non-interactive mode
-claude -p "$FULL_PROMPT" \
+# Run Claude in non-interactive mode (unset CLAUDECODE to allow nested invocation)
+env -u CLAUDECODE claude -p "$FULL_PROMPT" \
     --allowedTools 'Read,Grep,Glob,Bash(read-only)' \
     --output-format text \
     > "$REPORT_FILE" 2>/dev/null
@@ -228,7 +230,7 @@ if $FIX_MODE && [ -s "$REPORT_FILE" ]; then
     echo "=== Running Auto-Fix Pass ==="
     FIX_PROMPT="Read the stakeholder review at $REPORT_FILE. For every Blocking and High-priority issue listed, implement the fix directly. Run cargo check, cargo test, and cargo clippy after each change to verify. Do NOT fix Nice-to-have items unless trivial."
 
-    claude -p "$FIX_PROMPT" \
+    env -u CLAUDECODE claude -p "$FIX_PROMPT" \
         --allowedTools 'Read,Write,Edit,Grep,Glob,Bash' \
         --output-format text \
         > "${REPORT_DIR}/${DATE}-fixes.md" 2>/dev/null
