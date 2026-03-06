@@ -2,7 +2,6 @@
 ///
 /// Parses C function signatures and generates calling code with representative
 /// inputs so that library functions can be diff-tested.
-
 /// A parsed C function signature.
 struct CSignature {
     return_type: String,
@@ -13,7 +12,7 @@ struct CSignature {
 /// A parsed C function parameter.
 struct CParam {
     type_name: String,
-    param_name: String,
+    _param_name: String,
 }
 
 /// Generate a C test harness with `main()` for a library function.
@@ -161,7 +160,7 @@ fn parse_params(params_str: &str) -> Vec<CParam> {
 
         params.push(CParam {
             type_name,
-            param_name,
+            _param_name: param_name,
         });
     }
 

@@ -21,6 +21,7 @@ pub enum ReviewAction {
 
 /// Point in the pipeline where review is requested.
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum ReviewPoint {
     AfterTranslation {
         function_name: String,
@@ -169,7 +170,7 @@ pub fn generate_review_report(units: &[noricum_ir::FunctionUnit], project_name: 
         .filter(|u| u.state == noricum_ir::MigrationState::Validated)
         .count();
     md.push_str("## Summary\n\n");
-    md.push_str(&format!("| Metric | Value |\n|--------|-------|\n"));
+    md.push_str("| Metric | Value |\n|--------|-------|\n");
     md.push_str(&format!("| Total functions | {total} |\n"));
     md.push_str(&format!("| Validated | {validated} |\n"));
     md.push_str(&format!(

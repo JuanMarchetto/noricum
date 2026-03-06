@@ -146,8 +146,7 @@ impl AuditTrail {
             event,
         };
 
-        let json = serde_json::to_string(&entry)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string(&entry).map_err(std::io::Error::other)?;
         writeln!(self.writer, "{json}")?;
         Ok(())
     }
