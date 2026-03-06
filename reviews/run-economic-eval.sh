@@ -186,7 +186,7 @@ if $FIX_MODE && [ -s "$REPORT_FILE" ]; then
     echo "=== Running Economic Auto-Fix Pass ==="
 
     # Safety: create a git checkpoint before autonomous changes
-    git stash push -m "pre-econ-fix-${DATE}" --include-untracked 2>/dev/null || true
+    git stash push -m "pre-econ-fix-${DATE}" 2>/dev/null || true
 
     FIX_PROMPT="You are a Rust software engineer working on the Noricum project (a C-to-Rust migration tool).
 
