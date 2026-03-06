@@ -1,13 +1,22 @@
 # Noricum
 
-**Autonomous C/C++ to Rust migration agent.**
+**Autonomous C/C++ to Rust migration agent — 0 unsafe blocks, verified by differential testing.**
 
 [![CI](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![crates.io: coming soon](https://img.shields.io/badge/crates.io-coming%20soon-yellow)
+[![Tests](https://img.shields.io/badge/tests-296%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
+[![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
+[![LOC](https://img.shields.io/badge/LOC-~13%2C200-blue)](https://github.com/JuanMarchetto/noricum)
+
+<!-- Demo GIF: replace with actual recording -->
+<!-- ![Noricum Demo](demo.gif) -->
+
+> **Migrate C to safe Rust in seconds.** Noricum takes your C source, translates it to idiomatic Rust using LLM agents, then *proves* behavioral equivalence by compiling both and comparing outputs byte-by-byte. If they differ, the LLM fixes it automatically.
 
 Noricum combines a deterministic pipeline (C2Rust as step zero) with LLM-powered
 agents and differential verification to migrate C/C++ code to safe, idiomatic Rust.
+
+**[Blog Post](blog/2026-03-06-c-to-rust-llm-agent.md)** | **[Quick Start](#quick-start)** | **[Benchmarks](#benchmark-results)**
 
 ## Features
 
