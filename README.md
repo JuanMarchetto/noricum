@@ -18,6 +18,21 @@ agents and differential verification to migrate C/C++ code to safe, idiomatic Ru
 
 **[Blog Post](blog/2026-03-06-c-to-rust-llm-agent.md)** | **[Quick Start](#quick-start)** | **[Benchmarks](#benchmark-results)**
 
+## Why Noricum
+
+Existing C-to-Rust migration tools fall into two camps: **mechanical transpilers** that wrap everything in `unsafe`, and **manual rewriting** that's slow and error-prone. Noricum takes a third approach — an **agent-based pipeline** that combines LLM intelligence with automated verification.
+
+| | C2Rust | Manual Rewrite | Noricum |
+|---|--------|---------------|---------|
+| **Approach** | AST lowering | Human engineer | LLM agent + diff testing |
+| **Output safety** | Everything in `unsafe` | Depends on engineer | **0 unsafe blocks** (14/14 files) |
+| **Verification** | Compiles | Code review | Byte-exact differential testing |
+| **Auto-repair** | None | N/A | Up to 5 LLM-driven iterations |
+| **Speed** | Seconds | Days/weeks | Seconds per file |
+| **IDE integration** | None | N/A | MCP server for Claude Code |
+
+**Key differentiator:** Noricum doesn't just translate — it *verifies*. Every migration is validated by compiling both the original C and generated Rust, running them with identical inputs, and comparing outputs byte-by-byte. If they differ, the LLM automatically repairs the translation. No other tool in this space offers automated behavioral verification with a self-healing repair loop.
+
 ## Features
 
 - **C2Rust mechanical translation** as step zero — guaranteed baseline output
@@ -60,8 +75,9 @@ Real migration results on test fixtures (LLM-powered pipeline):
 | **`hash_table.c`** | **204** | **8** | **89/100** | **0** | **PASS** | **0** |
 | **`miniz_test.c`** | **154** | **2** | **93/100** | **0** | **PASS** | **0** |
 | **`cjson_combined.c`** | **520** | **12** | **100/100** | **0** | **PASS** | **1** |
+| **`expr_eval.c`** | **1686** | **74** | **100/100** | **0** | **PASS** | **0** |
 
-**13/13 files validated, 0 unsafe blocks, 100% diff test pass rate.**
+**14/14 files validated, 0 unsafe blocks, 100% diff test pass rate.**
 
 ### Noricum vs C2Rust
 

@@ -718,6 +718,7 @@ pub async fn migrate_file(
         .map(|s| s.lines().count() as u32)
         .unwrap_or(0);
     unit.metrics.diff_test_passed = validation.diff_test_passed;
+    unit.metrics.compute_cost();
 
     info!(
         function = %name,

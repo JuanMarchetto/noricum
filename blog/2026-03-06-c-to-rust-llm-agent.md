@@ -43,14 +43,19 @@ I tested Noricum against 13 C files, from trivial (13 LOC) to complex (520 LOC):
 | `hash_table.c` | 204 | 89/100 | 0 | PASS |
 | `miniz_test.c` | 154 | 93/100 | 0 | PASS |
 | **`cjson_combined.c`** | **520** | **100/100** | **0** | **PASS** |
+| **`expr_eval.c`** | **1686** | **100/100** | **0** | **PASS** |
 
-**13/13 files migrated successfully. 0 unsafe blocks across all outputs. 100% diff test pass rate.**
+**14/14 files migrated successfully. 0 unsafe blocks across all outputs. 100% diff test pass rate.**
 
-The cJSON migration is the most interesting — it's a real JSON parser with:
-- Recursive data structures (`cJSON *next`, `cJSON *child`)
-- Manual memory management (`malloc`/`free`)
-- String escaping and parsing
-- Pointer arithmetic throughout
+The expr_eval.c migration is the crown jewel — a full expression evaluator with:
+- Recursive descent parser (lexer + parser + evaluator)
+- 74 functions including 25+ built-in math/string operations
+- Manual HashMap implementation with chaining
+- DataSet with statistical computations (mean, variance, stddev, median)
+- Dynamic variable store with global state
+- String manipulation, type coercion, and control flow (if/else/while)
+
+All 1686 lines translated to 1446 lines of safe Rust with zero unsafe blocks, zero repair iterations, and byte-exact output matching.
 
 Noricum converted all of this to safe Rust using:
 - `enum JsonValue` with `Vec<(String, JsonValue)>` for objects
