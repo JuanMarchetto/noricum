@@ -97,10 +97,14 @@ pub async fn translate_function_with_patterns_and_temperature(
     user_message
         .push_str("\nTranslate the C function to safe, idiomatic Rust. Output ONLY the Rust code.");
 
-    debug!("sending translation prompt to LLM");
+    // Scale max_tokens based on C source size: Rust output is typically 1.5x C input.
+    // Estimate ~4 chars per token, multiply by 2 for headroom.
+    let max_tokens = ((c_source.len() as u64 / 4) * 2).clamp(8192, 32768);
+
+    debug!(max_tokens, "sending translation prompt to LLM");
 
     let response = client
-        .run_prompt(model, TRANSLATION_PREAMBLE, temp, 8192, &user_message)
+        .run_prompt(model, TRANSLATION_PREAMBLE, temp, max_tokens, &user_message)
         .await?;
 
     debug!(

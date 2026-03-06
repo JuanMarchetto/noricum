@@ -32,9 +32,10 @@ pub fn compile_c(c_file: &Path, output_path: &Path) -> Result<CompileResult, Too
     info!(file = %c_file.display(), "compiling C file");
 
     let output = Command::new("cc")
-        .args(["-std=c11", "-Wall", "-o"])
+        .args(["-std=gnu11", "-Wall", "-o"])
         .arg(output_path)
         .arg(c_file)
+        .arg("-lm")
         .output()
         .map_err(|_| ToolError::CommandNotFound("cc".to_string()))?;
 

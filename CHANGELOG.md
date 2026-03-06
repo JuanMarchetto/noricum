@@ -7,7 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- expr_eval.c migration — 1686 LOC expression evaluator, score 100/100, 0 unsafe, 0 repairs, diff test PASS (largest file migrated: 3.2x previous record)
+- Dynamic max_tokens scaling for translation/repair agents based on input size (fixes truncation on large files)
 - cJSON library migration — 520 LOC, score 100/100, 0 unsafe, diff test PASS (basic + 12 extended edge-case tests)
+
+### Fixed
+- C compiler flags: `-std=c11` → `-std=gnu11` (fixes `strdup` implicit declaration causing segfaults)
+- C linker flags: added `-lm` for math.h functions (sqrt, pow, fabs, floor, ceil, round)
 - Combined single-file C fixtures for standalone diff testing
 - Extended behavioral test harness with 12 edge cases (nested objects, arrays, escaping, unicode, nulls)
 - RAG seed pattern `cjson_to_serde` updated to hand-rolled idioms (no external crate dependency)
