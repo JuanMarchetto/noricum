@@ -73,7 +73,7 @@ pub fn discover_projects(dataset_path: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Migrate a single CRUST-Bench project.
-async fn run_project(project_dir: &Path, config: &MigrationConfig) -> ProjectResult {
+pub(crate) async fn run_project(project_dir: &Path, config: &MigrationConfig) -> ProjectResult {
     let name = project_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -170,8 +170,21 @@ pub async fn run_crust_bench(config: &CrustBenchConfig) -> Result<CrustBenchRepo
     );
 
     let mut results = Vec::new();
-    for project_dir in &projects {
+    for (i, project_dir) in projects.iter().enumerate() {
+        info!(
+            project = %project_dir.file_name().unwrap_or_default().to_string_lossy(),
+            progress = format!("[{}/{}]", i + 1, projects.len()),
+            "starting project migration"
+        );
         let result = run_project(project_dir, &config.migration_config).await;
+        info!(
+            project = %result.name,
+            compilation = result.compilation_success,
+            score = format!("{:.0}", result.idiomatic_score_avg),
+            time_ms = result.total_ms,
+            progress = format!("[{}/{}]", i + 1, projects.len()),
+            "completed project"
+        );
         results.push(result);
     }
 
@@ -184,6 +197,21 @@ pub async fn run_crust_bench(config: &CrustBenchConfig) -> Result<CrustBenchRepo
     } else {
         scores.iter().sum::<f64>() / scores.len() as f64
     };
+
+    info!(
+        total,
+        compiled,
+        compilation_rate = format!(
+            "{:.1}%",
+            if total > 0 {
+                compiled as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            }
+        ),
+        avg_score = format!("{:.1}", avg_score),
+        "CRUST-Bench evaluation complete"
+    );
 
     Ok(CrustBenchReport {
         total_projects: total,
@@ -222,6 +250,25 @@ mod tests {
 
         let projects = discover_projects(tmp.path()).unwrap();
         assert_eq!(projects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_project_simple() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("add.c"),
+            "int add(int a, int b) { return a + b; }",
+        )
+        .unwrap();
+
+        let config = MigrationConfig {
+            anthropic_api_key: None,
+            generate_tests: false,
+            ..MigrationConfig::default()
+        };
+        let result = run_project(tmp.path(), &config).await;
+        assert!(!result.name.is_empty());
+        assert!(result.total_ms > 0);
     }
 
     #[test]
