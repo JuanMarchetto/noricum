@@ -1,7 +1,5 @@
 mod api;
 mod crust_bench;
-#[allow(dead_code)]
-mod interactive;
 mod report;
 
 use std::path::{Path, PathBuf};
@@ -12,7 +10,7 @@ use clap::{Parser, Subcommand};
 use noricum_core::MigrationConfig;
 use noricum_core::audit::AuditLevel;
 use noricum_ir::FunctionUnit;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "noricum")]
@@ -30,52 +28,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Migrate a C file or directory to Rust
-    Migrate {
-        /// Path to a C file or directory containing C files
-        path: PathBuf,
-        /// Force synchronous mode (no LLM agents)
-        #[arg(long)]
-        no_llm: bool,
-        /// Output directory for generated Rust files (default: ./output)
-        #[arg(short, long, default_value = "output")]
-        output: PathBuf,
-        /// Run differential tests after migration
-        #[arg(long)]
-        diff_test: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-        /// Generate HTML report at this path
-        #[arg(long)]
-        report: Option<PathBuf>,
-        /// Run fuzz testing for behavioral comparison
-        #[arg(long)]
-        fuzz: bool,
-        /// Number of fuzz test iterations (default: 100)
-        #[arg(long, default_value_t = 100)]
-        fuzz_iterations: u32,
-        /// Write audit trail to this file (JSON-lines format)
-        #[arg(long)]
-        audit_log: Option<PathBuf>,
-        /// Audit detail level: summary, detailed, or full
-        #[arg(long, default_value = "summary")]
-        audit_level: String,
-        /// Incremental migration mode (track per-function state)
-        #[arg(long)]
-        incremental: bool,
-        /// Migrate only these functions (comma-separated names)
-        #[arg(long, value_delimiter = ',')]
-        functions: Option<Vec<String>>,
-        /// Directory for incremental state files
-        #[arg(long, default_value = ".noricum-state")]
-        state_dir: PathBuf,
-        /// Interactive review mode
-        #[arg(long)]
-        interactive: bool,
-        /// Generate doc comments on migrated Rust functions
-        #[arg(long)]
-        docs: bool,
-    },
+    Migrate(MigrateOpts),
     /// Analyze a C file and report difficulty classification
     Analyze {
         /// Path to a C file
@@ -127,6 +80,50 @@ enum Commands {
     },
 }
 
+/// Options for the `migrate` subcommand.
+#[derive(Parser)]
+struct MigrateOpts {
+    /// Path to a C file or directory containing C files
+    path: PathBuf,
+    /// Force synchronous mode (no LLM agents)
+    #[arg(long)]
+    no_llm: bool,
+    /// Output directory for generated Rust files (default: ./output)
+    #[arg(short, long, default_value = "output")]
+    output: PathBuf,
+    /// Run differential tests after migration
+    #[arg(long)]
+    diff_test: bool,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+    /// Generate HTML report at this path
+    #[arg(long)]
+    report: Option<PathBuf>,
+    /// Run fuzz testing for behavioral comparison
+    #[arg(long)]
+    fuzz: bool,
+    /// Number of fuzz test iterations (default: 100)
+    #[arg(long, default_value_t = 100)]
+    fuzz_iterations: u32,
+    /// Write audit trail to this file (JSON-lines format)
+    #[arg(long)]
+    audit_log: Option<PathBuf>,
+    /// Audit detail level: summary, detailed, or full
+    #[arg(long, default_value = "summary")]
+    audit_level: String,
+    /// Generate doc comments on migrated Rust functions
+    #[arg(long)]
+    docs: bool,
+    /// Maximum total token budget (input + output) per run; exceeding aborts the migration
+    /// (default: 500000, use 0 for unlimited)
+    #[arg(long)]
+    max_tokens: Option<u64>,
+    /// Maximum number of LLM API calls per run (default: 20, use 0 for unlimited)
+    #[arg(long)]
+    max_llm_calls: Option<u32>,
+}
+
 fn setup_tracing(verbosity: u8) {
     let filter = match verbosity {
         0 => "noricum=info",
@@ -148,48 +145,7 @@ async fn main() {
     setup_tracing(cli.verbose);
 
     let result = match cli.command {
-        Commands::Migrate {
-            path,
-            no_llm,
-            output,
-            diff_test,
-            json,
-            report,
-            fuzz,
-            fuzz_iterations,
-            audit_log,
-            audit_level,
-            incremental,
-            functions,
-            state_dir: _,
-            interactive,
-            docs,
-        } => {
-            if incremental {
-                warn!("--incremental is not yet implemented, ignoring");
-            }
-            if functions.is_some() {
-                warn!("--functions is not yet implemented, ignoring");
-            }
-            if interactive {
-                warn!("--interactive is not yet implemented, ignoring");
-            }
-            let level: AuditLevel = audit_level.parse().unwrap_or(AuditLevel::Summary);
-            cmd_migrate(
-                &path,
-                no_llm,
-                &output,
-                diff_test,
-                json,
-                report.as_deref(),
-                fuzz,
-                fuzz_iterations,
-                audit_log.as_deref(),
-                level,
-                docs,
-            )
-            .await
-        }
+        Commands::Migrate(opts) => cmd_migrate(opts).await,
         Commands::Analyze { path } => cmd_analyze(&path),
         Commands::Doctor => cmd_doctor(),
         Commands::Serve { host, port } => cmd_serve(&host, port).await,
@@ -221,46 +177,50 @@ async fn main() {
         for cause in e.chain().skip(1) {
             eprintln!("  caused by: {cause}");
         }
+        eprintln!();
+        eprintln!(
+            "hint: try `noricum doctor` to check tool availability, or `--no-llm` to skip LLM agents"
+        );
         std::process::exit(1);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn cmd_migrate(
-    path: &Path,
-    no_llm: bool,
-    output_dir: &Path,
-    run_diff: bool,
-    json: bool,
-    report_path: Option<&Path>,
-    fuzz: bool,
-    fuzz_iterations: u32,
-    audit_log: Option<&Path>,
-    audit_level: AuditLevel,
-    generate_docs: bool,
-) -> Result<()> {
-    let path = path
+async fn cmd_migrate(opts: MigrateOpts) -> Result<()> {
+    let path = opts
+        .path
         .canonicalize()
-        .with_context(|| format!("path not found: {}", path.display()))?;
+        .with_context(|| format!("path not found: {}", opts.path.display()))?;
 
-    if no_llm {
+    let level: AuditLevel = opts.audit_level.parse().unwrap_or(AuditLevel::Summary);
+
+    if opts.no_llm {
         return cmd_migrate_sync(
             &path,
-            output_dir,
-            run_diff,
-            json,
-            report_path,
-            fuzz,
-            fuzz_iterations,
+            &opts.output,
+            opts.diff_test,
+            opts.json,
+            opts.report.as_deref(),
+            opts.fuzz,
+            opts.fuzz_iterations,
         );
     }
 
     let config = MigrationConfig {
-        fuzz_test: fuzz,
-        fuzz_iterations,
-        audit_log: audit_log.map(|p| p.to_path_buf()),
-        audit_level,
-        generate_docs,
+        fuzz_test: opts.fuzz,
+        fuzz_iterations: opts.fuzz_iterations,
+        audit_log: opts.audit_log.map(|p| p.to_path_buf()),
+        audit_level: level,
+        generate_docs: opts.docs,
+        max_tokens_budget: match opts.max_tokens {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None => MigrationConfig::default().max_tokens_budget,
+        },
+        max_llm_calls: match opts.max_llm_calls {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None => MigrationConfig::default().max_llm_calls,
+        },
         ..MigrationConfig::default()
     };
 
@@ -270,15 +230,24 @@ async fn cmd_migrate(
             .await
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
-        if generate_docs && let Some(ref rust) = unit.rust_output {
+        if opts.docs
+            && let Some(ref rust) = unit.rust_output
+        {
             let documented =
                 noricum_tools::doc_gen::add_docs_to_rust(rust, &unit.c_source, &unit.name);
             unit.rust_output = Some(documented);
         }
 
-        print_unit_result(&unit, output_dir, run_diff, json, fuzz, fuzz_iterations)?;
+        print_unit_result(
+            &unit,
+            &opts.output,
+            opts.diff_test,
+            opts.json,
+            opts.fuzz,
+            opts.fuzz_iterations,
+        )?;
 
-        if let Some(report) = report_path {
+        if let Some(report) = opts.report.as_deref() {
             write_html_report_single(&unit, report)?;
         }
     } else if path.is_dir() {
@@ -287,7 +256,7 @@ async fn cmd_migrate(
             .await
             .with_context(|| format!("migration failed for {}", path.display()))?;
 
-        if generate_docs {
+        if opts.docs {
             for unit in &mut project.units {
                 if let Some(ref rust) = unit.rust_output {
                     let documented =
@@ -297,7 +266,7 @@ async fn cmd_migrate(
             }
         }
 
-        if json {
+        if opts.json {
             println!("{}", serde_json::to_string_pretty(&project)?);
         } else {
             let summary = project.progress_summary();
@@ -309,16 +278,23 @@ async fn cmd_migrate(
 
             for unit in &project.units {
                 println!();
-                print_unit_result(unit, output_dir, run_diff, json, fuzz, fuzz_iterations)?;
+                print_unit_result(
+                    unit,
+                    &opts.output,
+                    opts.diff_test,
+                    opts.json,
+                    opts.fuzz,
+                    opts.fuzz_iterations,
+                )?;
             }
         }
 
         // Write output files regardless of json mode
         for unit in &project.units {
-            write_unit_output(unit, output_dir)?;
+            write_unit_output(unit, &opts.output)?;
         }
 
-        if let Some(report) = report_path {
+        if let Some(report) = opts.report.as_deref() {
             write_html_report_project(&project.units, &project.name, report)?;
         }
     } else {
@@ -758,16 +734,58 @@ async fn cmd_bench(
     Ok(())
 }
 
+/// Wait for a shutdown signal (Ctrl+C or SIGTERM).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for ctrl+c");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to listen for SIGTERM")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    info!("shutdown signal received, draining connections…");
+}
+
 async fn cmd_serve(host: &str, port: u16) -> Result<()> {
-    let config = MigrationConfig::default();
+    let mut config = MigrationConfig::default();
+    // Enable audit logging by default for the REST API server
+    if config.audit_log.is_none() {
+        config.audit_log = Some("noricum-audit.jsonl".into());
+        config.audit_level = noricum_core::audit::AuditLevel::Summary;
+        info!("audit logging enabled by default (noricum-audit.jsonl)");
+    }
     let api_key = std::env::var("NORICUM_API_KEY").ok();
-    let state = Arc::new(api::AppState { config, api_key });
+    let is_public = host != "127.0.0.1" && host != "localhost" && host != "::1";
+    if is_public && api_key.is_none() {
+        eprintln!("WARNING: serving on non-localhost ({host}) without NORICUM_API_KEY.");
+        eprintln!("  All mutating endpoints will require authentication.");
+        eprintln!("  Set NORICUM_API_KEY env var to enable access.");
+    }
+    let state = Arc::new(api::AppState {
+        config,
+        api_key,
+        is_public,
+    });
     let app = api::build_router(state);
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Noricum API listening on http://{addr}");
     println!("Noricum API listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
 }
 

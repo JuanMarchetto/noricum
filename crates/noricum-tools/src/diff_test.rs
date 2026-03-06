@@ -192,7 +192,27 @@ pub(crate) fn compile_rust_exe(rs_file: &Path, output_path: &Path) -> Result<boo
     Ok(output.status.success())
 }
 
+/// Maximum virtual memory for diff_test executables (256 MB).
+const MAX_VIRTUAL_MEMORY: u64 = 256 * 1024 * 1024;
+/// Maximum file size that diff_test executables can create (10 MB).
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+/// Maximum number of child processes diff_test executables can spawn.
+const MAX_NPROC: u64 = 0;
+
 /// Run an executable and capture its stdout, stderr, and exit code, with a timeout.
+///
+/// # Security
+///
+/// The executable is run with:
+/// - **Cleared environment**: no PATH, HOME, API keys, etc.
+/// - **Timeout**: killed after `RUN_TIMEOUT_SECS` seconds.
+/// - **Resource limits** (Unix only): memory cap (256 MB), file size cap (10 MB),
+///   and no child process spawning via `setrlimit`.
+///
+/// **Trust boundary**: This is designed for *developer-supplied* C source code.
+/// It does NOT provide full container/namespace isolation. Do NOT expose this to
+/// untrusted third-party input without an additional sandbox layer (e.g., Docker,
+/// bubblewrap, or seccomp).
 ///
 /// Optionally accepts stdin input and command-line arguments.
 pub(crate) fn run_exe(
@@ -206,13 +226,45 @@ pub(crate) fn run_exe(
         Stdio::null()
     };
 
-    let mut child = Command::new(exe_path)
-        .args(args)
+    let mut cmd = Command::new(exe_path);
+    cmd.args(args)
+        .env_clear()
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(stdin_mode)
-        .spawn()
-        .map_err(ToolError::Io)?;
+        .stdin(stdin_mode);
+
+    // On Unix, set resource limits via pre_exec to constrain the child process.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: pre_exec runs between fork and exec. The closure only calls
+        // async-signal-safe libc::setrlimit, which is permitted in this context.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mem_limit = libc::rlimit {
+                    rlim_cur: MAX_VIRTUAL_MEMORY,
+                    rlim_max: MAX_VIRTUAL_MEMORY,
+                };
+                libc::setrlimit(libc::RLIMIT_AS, &mem_limit);
+
+                let file_limit = libc::rlimit {
+                    rlim_cur: MAX_FILE_SIZE,
+                    rlim_max: MAX_FILE_SIZE,
+                };
+                libc::setrlimit(libc::RLIMIT_FSIZE, &file_limit);
+
+                let nproc_limit = libc::rlimit {
+                    rlim_cur: MAX_NPROC,
+                    rlim_max: MAX_NPROC,
+                };
+                libc::setrlimit(libc::RLIMIT_NPROC, &nproc_limit);
+
+                Ok(())
+            });
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(ToolError::Io)?;
 
     // Write stdin before reading stdout/stderr to avoid deadlock
     if let Some(input) = stdin_input

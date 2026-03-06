@@ -5,6 +5,8 @@
 //! - `analyze_function`: takes C source, returns difficulty + analysis
 //! - `check_compilation`: takes Rust source, returns success/errors
 //! - `get_idiomatic_score`: takes Rust source, returns score
+//! - `diff_test`: compares C and Rust output byte-by-byte
+//! - `repair`: re-checks compilation and provides structured diagnostics
 
 use std::io::{self, BufRead, Write};
 use std::sync::LazyLock;
@@ -115,10 +117,13 @@ fn handle_initialize(id: serde_json::Value) -> JsonRpcResponse {
         },
     };
 
-    JsonRpcResponse::success(
-        id,
-        serde_json::to_value(result).expect("InitializeResult serialization"),
-    )
+    match serde_json::to_value(result) {
+        Ok(val) => JsonRpcResponse::success(id, val),
+        Err(e) => {
+            error!(error = %e, "failed to serialize InitializeResult");
+            JsonRpcResponse::error(id, -32603, format!("serialization error: {e}"))
+        }
+    }
 }
 
 /// Handle `tools/list` request.
@@ -268,10 +273,24 @@ fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRp
         other => ToolResult::error(format!("unknown tool: {other}")),
     };
 
-    JsonRpcResponse::success(
-        id,
-        serde_json::to_value(result).expect("ToolsListResult serialization"),
-    )
+    match serde_json::to_value(result) {
+        Ok(val) => JsonRpcResponse::success(id, val),
+        Err(e) => {
+            error!(error = %e, "failed to serialize tool result");
+            JsonRpcResponse::error(id, -32603, format!("serialization error: {e}"))
+        }
+    }
+}
+
+/// Serialize a JSON value to a pretty-printed string, returning a ToolResult error on failure.
+fn json_to_tool_result(value: &serde_json::Value) -> ToolResult {
+    match serde_json::to_string_pretty(value) {
+        Ok(s) => ToolResult::text(s),
+        Err(e) => {
+            error!(error = %e, "failed to serialize JSON result");
+            ToolResult::error(format!("serialization error: {e}"))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +355,7 @@ fn tool_migrate_function(source: Option<String>) -> ToolResult {
         "unsafe_count": unit.unsafe_count,
         "diff_test_passed": unit.metrics.diff_test_passed,
     });
-    ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
+    json_to_tool_result(&result)
 }
 
 /// `analyze_function`: Classify difficulty and report characteristics.
@@ -367,7 +386,7 @@ fn tool_analyze_function(source: Option<String>) -> ToolResult {
             "has_goto": has_goto,
         }
     });
-    ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
+    json_to_tool_result(&result)
 }
 
 /// `check_compilation`: Compile Rust source and report results.
@@ -376,6 +395,12 @@ fn tool_check_compilation(source: Option<String>) -> ToolResult {
         Some(s) => s,
         None => return ToolResult::error("missing 'source' parameter".to_string()),
     };
+    if source.len() > MAX_MCP_SOURCE_SIZE {
+        return ToolResult::error(format!(
+            "source exceeds maximum size of {} bytes",
+            MAX_MCP_SOURCE_SIZE
+        ));
+    }
 
     match noricum_tools::compiler::check_rust_compiles(&source) {
         Ok(compile_result) => {
@@ -383,7 +408,7 @@ fn tool_check_compilation(source: Option<String>) -> ToolResult {
                 "success": compile_result.success,
                 "errors": compile_result.stderr,
             });
-            ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
+            json_to_tool_result(&result)
         }
         Err(e) => ToolResult::error(format!("compilation check failed: {e}")),
     }
@@ -395,10 +420,21 @@ fn tool_get_idiomatic_score(source: Option<String>) -> ToolResult {
         Some(s) => s,
         None => return ToolResult::error("missing 'source' parameter".to_string()),
     };
+    if source.len() > MAX_MCP_SOURCE_SIZE {
+        return ToolResult::error(format!(
+            "source exceeds maximum size of {} bytes",
+            MAX_MCP_SOURCE_SIZE
+        ));
+    }
 
     let unsafe_count = noricum_tools::compiler::count_unsafe_blocks(&source);
-    let clippy_warnings =
-        noricum_tools::compiler::run_clippy_on_source(&source).unwrap_or_default();
+    let clippy_warnings = match noricum_tools::compiler::run_clippy_on_source(&source) {
+        Ok(warnings) => warnings,
+        Err(e) => {
+            tracing::warn!(error = %e, "clippy analysis failed, score may be incomplete");
+            Vec::new()
+        }
+    };
 
     let score =
         noricum_validation::compute_idiomatic_score(unsafe_count, clippy_warnings.len() as u32);
@@ -409,7 +445,7 @@ fn tool_get_idiomatic_score(source: Option<String>) -> ToolResult {
         "clippy_warning_count": clippy_warnings.len(),
         "clippy_warnings": clippy_warnings,
     });
-    ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
+    json_to_tool_result(&result)
 }
 
 /// `diff_test`: Run differential test between C and Rust source.
@@ -432,7 +468,7 @@ fn tool_diff_test(c_source: Option<String>, rust_source: Option<String>) -> Tool
                 "c_output": result.c_output,
                 "rust_output": result.rust_output,
             });
-            ToolResult::text(serde_json::to_string_pretty(&res).expect("JSON serialization"))
+            json_to_tool_result(&res)
         }
         Err(e) => ToolResult::error(format!("diff test failed: {e}")),
     }
@@ -447,6 +483,12 @@ fn tool_repair(source: Option<String>, errors: Option<String>) -> ToolResult {
         Some(s) => s,
         None => return ToolResult::error("missing 'source' parameter".to_string()),
     };
+    if source.len() > MAX_MCP_SOURCE_SIZE {
+        return ToolResult::error(format!(
+            "source exceeds maximum size of {} bytes",
+            MAX_MCP_SOURCE_SIZE
+        ));
+    }
     let errors_str = errors.unwrap_or_default();
 
     // Re-check compilation to get fresh diagnostics
@@ -455,8 +497,13 @@ fn tool_repair(source: Option<String>, errors: Option<String>) -> ToolResult {
         Err(e) => return ToolResult::error(format!("compilation check failed: {e}")),
     };
 
-    let clippy_warnings =
-        noricum_tools::compiler::run_clippy_on_source(&source).unwrap_or_default();
+    let clippy_warnings = match noricum_tools::compiler::run_clippy_on_source(&source) {
+        Ok(warnings) => warnings,
+        Err(e) => {
+            tracing::warn!(error = %e, "clippy analysis failed in repair, diagnostics may be incomplete");
+            Vec::new()
+        }
+    };
     let unsafe_count = noricum_tools::compiler::count_unsafe_blocks(&source);
 
     let result = json!({
@@ -471,7 +518,7 @@ fn tool_repair(source: Option<String>, errors: Option<String>) -> ToolResult {
             "Code has compilation errors. Review the compiler_output for details."
         }
     });
-    ToolResult::text(serde_json::to_string_pretty(&result).expect("JSON serialization"))
+    json_to_tool_result(&result)
 }
 
 #[cfg(test)]

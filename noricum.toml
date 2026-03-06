@@ -3,26 +3,26 @@
 [llm]
 # Primary provider for migration tasks
 primary_provider = "anthropic"
-# Fallback for simple tasks
-fallback_provider = "ollama"
 
 [llm.anthropic]
 # Model selection by task complexity
-analysis_model = "claude-opus-4-6"
-translation_model = "claude-sonnet-4-6"
-repair_model = "claude-sonnet-4-6"
-
-[llm.ollama]
-# Local model on i5 server
-base_url = "http://localhost:11434"
-model = "llama3.2"
+# Hard tasks use Opus, Medium uses Sonnet, Easy uses Haiku
+hard_model = "claude-opus-4-6"
+medium_model = "claude-sonnet-4-6"
+easy_model = "claude-3-5-haiku-latest"
 
 [llm.temperature]
-# Defaults used if not set: analysis=0.2, translation=0.3, repair=0.4, test_gen=0.3
+# Defaults used if not set
 # analysis = 0.2
 # translation = 0.3
 # repair_base = 0.4
 # test_gen = 0.3
+
+[llm.budget]
+# Maximum total token budget per run (input + output). Set to 0 for unlimited.
+max_tokens = 500000
+# Maximum LLM API calls per run. Set to 0 for unlimited.
+max_llm_calls = 20
 
 [migration]
 # Maximum repair iterations before fallback to unsafe
@@ -31,6 +31,8 @@ max_repair_iterations = 5
 min_idiomatic_score = 60
 # Allow unsafe blocks in final output as fallback
 allow_unsafe_fallback = true
+# Maximum C source file size in bytes (5 MB)
+max_source_size = 5242880
 
 [validation]
 # Run differential tests comparing C and Rust output

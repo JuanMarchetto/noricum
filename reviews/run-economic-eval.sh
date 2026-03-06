@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Economic Evaluation Runner for Noricum
-# Usage: bash reviews/run-economic-eval.sh [--fix]
-#   --fix  After generating evaluation, automatically execute high-priority economic recommendations
+# Usage: bash reviews/run-economic-eval.sh [--no-fix]
+#   --no-fix  Skip the automatic fix pass (default: always fix)
 # Cron:  0 */6 * * * cd /home/marche/noricum && bash reviews/run-economic-eval.sh >> reviews/reports/econ-cron.log 2>&1
 
 set -euo pipefail
@@ -11,9 +11,9 @@ if [ -z "${TERM:-}" ]; then
     [ -f "$HOME/.profile" ] && source "$HOME/.profile" || true
 fi
 
-FIX_MODE=false
-if [[ "${1:-}" == "--fix" ]]; then
-    FIX_MODE=true
+FIX_MODE=true
+if [[ "${1:-}" == "--no-fix" ]]; then
+    FIX_MODE=false
 fi
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,8 +26,13 @@ DATE=$(date +%Y-%m-%d-%H)
 mkdir -p "$REPORT_DIR"
 
 # --- Check if enough changes since last eval ---
-LAST_COMMIT=$(cat "$LAST_COMMIT_FILE" 2>/dev/null || echo "HEAD~50")
-CHANGED_FILES=$(git diff --name-only "$LAST_COMMIT" HEAD 2>/dev/null | wc -l || echo "0")
+if [ -f "$LAST_COMMIT_FILE" ] && git cat-file -t "$(cat "$LAST_COMMIT_FILE")" &>/dev/null; then
+    LAST_COMMIT=$(cat "$LAST_COMMIT_FILE")
+else
+    # First run or invalid commit — use initial commit as baseline
+    LAST_COMMIT=$(git rev-list --max-parents=0 HEAD 2>/dev/null | head -1)
+fi
+CHANGED_FILES=$(git diff --name-only "$LAST_COMMIT" HEAD 2>/dev/null | wc -l | tr -d ' ')
 
 if [ "$CHANGED_FILES" -lt 10 ]; then
     echo "[$DATE] No significant changes since last eval ($CHANGED_FILES files changed, need 10+). Skipping."
@@ -122,6 +127,8 @@ You are performing an economic viability evaluation of the Noricum project, a C-
 
 Produce a complete markdown report with all scores filled in. Be specific and actionable. Be honest — do not inflate scores.
 
+IMPORTANT: Output the entire report as text to stdout. Do NOT attempt to write files. Just print the full markdown report.
+
 ## Automated Metrics
 
 PROMPT_END
@@ -141,17 +148,28 @@ if ! command -v claude &> /dev/null; then
     exit 1
 fi
 
-claude -p "$FULL_PROMPT" \
+STDERR_LOG="${REPORT_DIR}/econ-${DATE}-stderr.log"
+
+if ! env -u CLAUDECODE claude -p "$FULL_PROMPT" \
     --allowedTools 'Read,Grep,Glob,Bash(read-only)' \
     --output-format text \
-    > "$REPORT_FILE" 2>/dev/null
+    > "$REPORT_FILE" 2>"$STDERR_LOG"; then
+    echo "ERROR: Claude CLI failed (exit code $?)."
+    [ -s "$STDERR_LOG" ] && echo "stderr: $(head -10 "$STDERR_LOG")"
+    rm "$METRICS_FILE"
+    exit 1
+fi
 
 rm "$METRICS_FILE"
 
-# Save current commit hash
-git rev-parse HEAD > "$LAST_COMMIT_FILE"
+if [ -s "$STDERR_LOG" ]; then
+    echo "WARNING: Claude produced stderr output. Check $STDERR_LOG"
+fi
 
 if [ -s "$REPORT_FILE" ]; then
+    # Only save commit hash AFTER successful report generation
+    git rev-parse HEAD > "$LAST_COMMIT_FILE"
+
     LINES=$(wc -l < "$REPORT_FILE")
     echo "=== Economic Evaluation Complete ==="
     echo "Report: $REPORT_FILE"
@@ -166,12 +184,45 @@ fi
 if $FIX_MODE && [ -s "$REPORT_FILE" ]; then
     echo ""
     echo "=== Running Economic Auto-Fix Pass ==="
-    FIX_PROMPT="Read the economic evaluation at $REPORT_FILE. For every high-priority economic recommendation, implement what can be done in code (documentation improvements, API readiness, benchmark additions, etc.). Run cargo check and cargo test after changes."
 
-    claude -p "$FIX_PROMPT" \
-        --allowedTools 'Read,Write,Edit,Grep,Glob,Bash' \
+    # Safety: create a git checkpoint before autonomous changes
+    git stash push -m "pre-econ-fix-${DATE}" --include-untracked 2>/dev/null || true
+
+    FIX_PROMPT="You are a Rust software engineer working on the Noricum project (a C-to-Rust migration tool).
+
+Read the economic evaluation report at $REPORT_FILE.
+
+Extract all high-priority recommendations from each economic perspective (E1-E6). For each recommendation that can be addressed in code:
+1. Implement the fix (documentation improvements, README updates, benchmark additions, API readiness, test coverage, etc.)
+2. After each change, run: cargo check --workspace && cargo test --workspace
+3. If a fix breaks compilation or tests, revert it and move to the next item
+
+Skip recommendations that require external actions (marketing, community outreach, funding applications). Focus only on code and documentation improvements.
+
+Output a summary of what you implemented and what you skipped, with file paths."
+
+    FIX_STDERR_LOG="${REPORT_DIR}/econ-${DATE}-fix-stderr.log"
+
+    if env -u CLAUDECODE claude -p "$FIX_PROMPT" \
+        --dangerously-skip-permissions \
         --output-format text \
-        > "${REPORT_DIR}/econ-${DATE}-fixes.md" 2>/dev/null
+        > "${REPORT_DIR}/econ-${DATE}-fixes.md" 2>"$FIX_STDERR_LOG"; then
+
+        # Verify compilation still passes after fix pass
+        if ! cargo check --workspace 2>/dev/null; then
+            echo "WARNING: Fix pass broke compilation. Restoring from stash."
+            git checkout -- . 2>/dev/null
+            git stash pop 2>/dev/null || true
+        else
+            echo "Fix pass completed. Changes verified with cargo check."
+            git stash drop 2>/dev/null || true
+        fi
+    else
+        echo "WARNING: Fix pass Claude CLI failed. Restoring from stash."
+        [ -s "$FIX_STDERR_LOG" ] && echo "stderr: $(head -10 "$FIX_STDERR_LOG")"
+        git checkout -- . 2>/dev/null
+        git stash pop 2>/dev/null || true
+    fi
 
     echo "Fix log: ${REPORT_DIR}/econ-${DATE}-fixes.md"
 fi

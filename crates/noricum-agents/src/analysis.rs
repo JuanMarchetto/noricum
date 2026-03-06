@@ -51,19 +51,36 @@ pub async fn analyze_function(
     c_source: &str,
     function_name: &str,
 ) -> Result<AnalysisResult, AgentError> {
-    info!(function = function_name, model, "starting analysis");
+    analyze_function_with_temperature(client, model, c_source, function_name, None).await
+}
+
+/// Analyze with an optional temperature override.
+pub async fn analyze_function_with_temperature(
+    client: &anthropic::Client,
+    model: &str,
+    c_source: &str,
+    function_name: &str,
+    temperature: Option<f64>,
+) -> Result<AnalysisResult, AgentError> {
+    let temp = temperature.unwrap_or(0.2);
+    info!(
+        function = function_name,
+        model,
+        temperature = temp,
+        "starting analysis"
+    );
 
     let agent = client
         .agent(model)
         .preamble(ANALYSIS_PREAMBLE)
-        .temperature(0.2)
+        .temperature(temp)
         .max_tokens(4096)
         .build();
 
     let user_message = format!(
         "Analyze the following C function named `{function_name}` for migration to Rust.\n\
          Respond ONLY with the JSON object as specified in the output format.\n\n\
-         ```c\n{c_source}\n```"
+         <c_source>\n{c_source}\n</c_source>"
     );
 
     debug!(function = function_name, "sending analysis prompt to LLM");
@@ -83,7 +100,7 @@ pub async fn analyze_function(
 }
 
 /// Extract JSON from the LLM response, handling markdown code fences.
-pub(crate) fn parse_analysis_response(response: &str) -> Result<AnalysisResult, AgentError> {
+pub fn parse_analysis_response(response: &str) -> Result<AnalysisResult, AgentError> {
     // Try to extract JSON from markdown code fences first
     let json_str = if let Some(start) = response.find("```json") {
         let after_fence = &response[start + 7..];

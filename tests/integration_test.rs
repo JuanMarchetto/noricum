@@ -424,10 +424,10 @@ fn test_migrate_sync_empty_file() {
         .expect("failed to run noricum migrate on empty.c");
 
     // Should not panic — either succeed with empty output or report gracefully
-    // We don't assert success because an empty file may legitimately error
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() || !output.status.success(),
-        "should not panic on empty file"
+        !stderr.contains("panicked"),
+        "should not panic on empty file, stderr: {stderr}"
     );
 }
 
@@ -447,7 +447,11 @@ fn test_migrate_sync_syntax_error() {
         .expect("failed to run noricum migrate on syntax_error.c");
 
     // Should not panic on malformed input
-    let _stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "should not panic on syntax error input, stderr: {stderr}"
+    );
 }
 
 /// Test that migrating a file with no main function does not panic.

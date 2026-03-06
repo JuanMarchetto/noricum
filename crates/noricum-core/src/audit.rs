@@ -111,7 +111,7 @@ struct AuditEntry {
     event: AuditEvent,
 }
 
-/// Audit trail writer. Thread-safe via Arc<Mutex>.
+/// Audit trail writer. Thread-safe via `Arc<Mutex>`.
 pub struct AuditTrail {
     level: AuditLevel,
     writer: BufWriter<File>,
@@ -183,8 +183,15 @@ pub fn create_shared_audit(path: &Path, level: AuditLevel) -> std::io::Result<Sh
 
 /// Log an event to a shared audit trail (convenience function).
 pub fn audit_log(trail: &SharedAuditTrail, event: AuditEvent) {
-    if let Ok(mut t) = trail.lock() {
-        let _ = t.log(event);
+    match trail.lock() {
+        Ok(mut t) => {
+            if let Err(e) = t.log(event) {
+                tracing::warn!(error = %e, "failed to write audit event");
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "audit trail mutex poisoned");
+        }
     }
 }
 

@@ -18,3 +18,9 @@ tree-sitter-c = { workspace = true }
 tree-sitter-rust = { workspace = true }
 regex = { workspace = true }
 rand = { version = "0.9", features = ["small_rng"] }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

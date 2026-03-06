@@ -12,7 +12,7 @@ agents and differential verification to migrate C/C++ code to safe, idiomatic Ru
 ## Features
 
 - **C2Rust mechanical translation** as step zero — guaranteed baseline output
-- **LLM-powered analysis, translation, and repair** via Claude API and Ollama (local)
+- **LLM-powered analysis, translation, and repair** via Claude API
 - **Automatic difficulty classification** and model routing (easy/medium/hard)
 - **Differential testing** — compile both C and Rust, compare outputs byte-by-byte
 - **Enhanced idiomatic scoring** based on unsafe count, clippy, positive/negative Rust patterns (0-100)
@@ -24,13 +24,13 @@ agents and differential verification to migrate C/C++ code to safe, idiomatic Ru
 - **`--docs` flag** — automatically generate Rust doc comments from C source comments
 - **Security hardened** — path validation for LLM tools, API auth, CORS restrictions, input size limits
 
-### Experimental Features
+### Planned Features
 
-The following features are parsed by the CLI but not yet implemented:
+The following features are on the roadmap but not yet implemented:
 
-- `--incremental` — Incremental per-function migration state tracking
-- `--functions` — Selective function-level migration
-- `--interactive` — Terminal-based human-in-the-loop review mode
+- **Incremental migration** — Per-function state tracking across runs
+- **Selective function migration** — Migrate specific functions by name
+- **Interactive review** — Terminal-based human-in-the-loop review mode
 
 ## Benchmark Results
 
@@ -144,27 +144,15 @@ noricum -vv migrate file.c   # Trace logging
 
 ## Configuration
 
-Noricum reads configuration from `noricum.toml` in the project root. Key settings:
+Configuration is driven by CLI flags and environment variables. Key defaults:
 
-```toml
-[llm]
-primary_provider = "anthropic"
-fallback_provider = "ollama"
-
-[llm.anthropic]
-analysis_model = "claude-opus-4-6"
-translation_model = "claude-sonnet-4-6"
-repair_model = "claude-sonnet-4-6"
-
-[migration]
-max_repair_iterations = 5
-min_idiomatic_score = 60
-allow_unsafe_fallback = true
-
-[validation]
-differential_testing = true
-clippy_check = true
-```
+| Setting | Default | CLI Flag / Env Var |
+|---------|---------|-------------------|
+| Max repair iterations | 5 | — |
+| Min idiomatic score | 60 | — |
+| Differential testing | enabled | `--diff-test` |
+| Clippy check | enabled | — |
+| Max token budget | unlimited | `--max-tokens` |
 
 ### Environment Variables
 
@@ -260,6 +248,48 @@ Add to your project's `.mcp.json`:
 | `get_idiomatic_score` | Score Rust source for idiomatic quality (0-100) |
 | `diff_test` | Run differential test between C and Rust sources |
 | `repair` | Re-check compilation and return structured diagnostics |
+
+## REST API
+
+Start the API server:
+
+```bash
+noricum serve --host 127.0.0.1 --port 3000
+```
+
+### Example Requests
+
+```bash
+# Health check
+curl http://localhost:3000/api/health
+
+# Analyze C source difficulty
+curl -X POST http://localhost:3000/api/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"source": "int add(int a, int b) { return a + b; }"}'
+
+# Check Rust compilation
+curl -X POST http://localhost:3000/api/check \
+  -H "Content-Type: application/json" \
+  -d '{"source": "pub fn add(a: i32, b: i32) -> i32 { a + b }"}'
+
+# Get idiomatic score
+curl -X POST http://localhost:3000/api/score \
+  -H "Content-Type: application/json" \
+  -d '{"source": "pub fn add(a: i32, b: i32) -> i32 { a + b }", "c_source": "int add(int a, int b) { return a + b; }"}'
+
+# Run differential test
+curl -X POST http://localhost:3000/api/diff-test \
+  -H "Content-Type: application/json" \
+  -d '{"c_source": "#include <stdio.h>\nint main(void) { printf(\"5\\n\"); return 0; }", "rust_source": "fn main() { println!(\"5\"); }"}'
+
+# Migrate C to Rust
+curl -X POST http://localhost:3000/api/migrate \
+  -H "Content-Type: application/json" \
+  -d '{"source": "int add(int a, int b) { return a + b; }", "name": "add"}'
+```
+
+When `NORICUM_API_KEY` is set, include `-H "X-Api-Key: YOUR_KEY"` in requests.
 
 ## Docker
 

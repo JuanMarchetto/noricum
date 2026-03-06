@@ -35,12 +35,12 @@ pub enum RigToolError {
 /// Validate that a file path is safe for LLM agent access.
 ///
 /// Rejects paths containing `..`, and absolute paths outside of `/tmp` or the
-/// current working directory. This prevents LLM agents from reading or writing
-/// arbitrary files on the host.
+/// current working directory. Canonicalizes paths to resolve symlinks before
+/// checking, preventing symlink-based bypass.
 fn validate_file_path(path: &str) -> Result<(), RigToolError> {
     let p = Path::new(path);
 
-    // Reject path traversal
+    // Reject path traversal components
     for component in p.components() {
         if let std::path::Component::ParentDir = component {
             return Err(RigToolError::PathViolation(
@@ -49,12 +49,34 @@ fn validate_file_path(path: &str) -> Result<(), RigToolError> {
         }
     }
 
-    // If absolute, restrict to /tmp or current working directory
+    // If absolute, resolve the path to check against allowed directories.
+    // If the file exists, canonicalize it to resolve symlinks.
+    // If not, canonicalize the parent directory and append the file name.
     if p.is_absolute() {
-        let is_tmp = path.starts_with("/tmp") || path.starts_with("/var/tmp");
+        let canonical = if p.exists() {
+            p.canonicalize().map_err(|e| {
+                RigToolError::PathViolation(format!("cannot resolve path {path}: {e}"))
+            })?
+        } else if let Some(parent) = p.parent() {
+            let canon_parent = parent.canonicalize().map_err(|e| {
+                RigToolError::PathViolation(format!("cannot resolve parent of {path}: {e}"))
+            })?;
+            if let Some(file_name) = p.file_name() {
+                canon_parent.join(file_name)
+            } else {
+                canon_parent
+            }
+        } else {
+            return Err(RigToolError::PathViolation(format!(
+                "cannot resolve path {path}: no parent directory"
+            )));
+        };
+        let tmp = Path::new("/tmp");
+        let var_tmp = Path::new("/var/tmp");
+        let is_tmp = canonical.starts_with(tmp) || canonical.starts_with(var_tmp);
         let is_cwd = std::env::current_dir()
             .ok()
-            .is_some_and(|cwd| path.starts_with(cwd.to_string_lossy().as_ref()));
+            .is_some_and(|cwd| canonical.starts_with(&cwd));
         if !is_tmp && !is_cwd {
             return Err(RigToolError::PathViolation(format!(
                 "absolute path outside allowed directories: {path}"
@@ -520,5 +542,55 @@ fn safe_fn() {
             })
             .await;
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Any path containing ".." must be rejected.
+        #[test]
+        fn paths_with_dotdot_always_rejected(
+            prefix in "[a-z]{0,5}",
+            suffix in "[a-z]{0,5}",
+        ) {
+            let path = format!("{prefix}/../{suffix}");
+            prop_assert!(validate_file_path(&path).is_err(),
+                "path with '..' should be rejected: {path}");
+        }
+
+        /// Simple relative paths (no ..) should be accepted.
+        #[test]
+        fn simple_relative_paths_accepted(
+            segments in proptest::collection::vec("[a-z][a-z0-9_]{0,8}", 1..4),
+        ) {
+            let path = segments.join("/") + ".rs";
+            prop_assert!(validate_file_path(&path).is_ok(),
+                "simple relative path should be accepted: {path}");
+        }
+
+        /// Absolute paths outside /tmp and /var/tmp are rejected.
+        #[test]
+        fn absolute_paths_outside_tmp_rejected(
+            dir in prop_oneof!["/etc", "/root", "/usr", "/home", "/opt", "/var/log"],
+            file in "[a-z]{1,8}",
+        ) {
+            let path = format!("{dir}/{file}");
+            prop_assert!(validate_file_path(&path).is_err(),
+                "absolute path outside allowed dirs should be rejected: {path}");
+        }
+
+        /// Paths under /tmp are accepted.
+        #[test]
+        fn tmp_paths_accepted(
+            file in "[a-z][a-z0-9_]{0,8}\\.rs",
+        ) {
+            let path = format!("/tmp/{file}");
+            prop_assert!(validate_file_path(&path).is_ok(),
+                "/tmp paths should be accepted: {path}");
+        }
     }
 }

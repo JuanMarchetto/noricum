@@ -18,6 +18,10 @@ use rig::providers::anthropic;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
+/// Maximum input C source file size: 5 MB.
+/// Prevents OOM on extremely large C files.
+const MAX_C_SOURCE_SIZE: usize = 5 * 1024 * 1024;
+
 use crate::CoreError;
 use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit};
 
@@ -54,6 +58,12 @@ pub struct MigrationConfig {
     pub repair_base_temperature: Option<f64>,
     /// Temperature for test generation agent (default: 0.3).
     pub test_gen_temperature: Option<f64>,
+    /// Maximum total token budget (input + output) per run.
+    /// Defaults to 500,000 tokens. Set to `None` for unlimited (not recommended in production).
+    pub max_tokens_budget: Option<u64>,
+    /// Maximum number of LLM API calls per run. Prevents runaway loops.
+    /// Defaults to 20. Set to `None` for unlimited.
+    pub max_llm_calls: Option<u32>,
 }
 
 impl Default for MigrationConfig {
@@ -74,23 +84,26 @@ impl Default for MigrationConfig {
             translation_temperature: None,
             repair_base_temperature: None,
             test_gen_temperature: None,
+            max_tokens_budget: Some(500_000),
+            max_llm_calls: Some(20),
+        }
+    }
+}
+
+impl From<&MigrationConfig> for ProviderConfig {
+    fn from(config: &MigrationConfig) -> Self {
+        Self {
+            anthropic_api_key: config.anthropic_api_key.clone(),
+            ollama_url: config
+                .ollama_url
+                .clone()
+                .unwrap_or_else(|| "http://localhost:11434".to_string()),
+            ..Self::default()
         }
     }
 }
 
 impl MigrationConfig {
-    /// Build a `ProviderConfig` from this migration config.
-    fn to_provider_config(&self) -> ProviderConfig {
-        ProviderConfig {
-            anthropic_api_key: self.anthropic_api_key.clone(),
-            ollama_url: self
-                .ollama_url
-                .clone()
-                .unwrap_or_else(|| "http://localhost:11434".to_string()),
-            ..ProviderConfig::default()
-        }
-    }
-
     /// Try to create an Anthropic client from the configured API key.
     fn create_client(&self) -> Option<anthropic::Client> {
         if let Some(ref key) = self.anthropic_api_key {
@@ -113,6 +126,31 @@ impl MigrationConfig {
     }
 }
 
+/// Check whether the accumulated token usage exceeds the configured budget.
+///
+/// Returns `Ok(())` if within budget or no budget is set, otherwise
+/// returns `CoreError::BudgetExceeded`.
+fn check_budget(
+    config: &MigrationConfig,
+    metrics: &noricum_ir::MigrationMetrics,
+) -> Result<(), CoreError> {
+    if let Some(budget) = config.max_tokens_budget {
+        let used = metrics.input_tokens + metrics.output_tokens;
+        if used > budget {
+            return Err(CoreError::BudgetExceeded { used, budget });
+        }
+    }
+    if let Some(max_calls) = config.max_llm_calls
+        && metrics.llm_calls > max_calls
+    {
+        return Err(CoreError::Orchestration(format!(
+            "LLM call limit exceeded: {} calls (max {})",
+            metrics.llm_calls, max_calls
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Synchronous pipeline (backward compat, no LLM)
 // ---------------------------------------------------------------------------
@@ -128,6 +166,14 @@ impl MigrationConfig {
 pub fn migrate_file_sync(c_file: &Path) -> Result<FunctionUnit, CoreError> {
     let source_path = c_file.to_string_lossy().to_string();
     let c_source = std::fs::read_to_string(c_file)?;
+
+    if c_source.len() > MAX_C_SOURCE_SIZE {
+        return Err(CoreError::Orchestration(format!(
+            "source file exceeds maximum size of {} bytes ({} bytes)",
+            MAX_C_SOURCE_SIZE,
+            c_source.len()
+        )));
+    }
 
     let name = c_file
         .file_stem()
@@ -241,6 +287,14 @@ pub async fn migrate_file(
     let source_path = c_file.to_string_lossy().to_string();
     let c_source = std::fs::read_to_string(c_file)?;
 
+    if c_source.len() > MAX_C_SOURCE_SIZE {
+        return Err(CoreError::Orchestration(format!(
+            "source file exceeds maximum size of {} bytes ({} bytes)",
+            MAX_C_SOURCE_SIZE,
+            c_source.len()
+        )));
+    }
+
     let name = c_file
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -283,7 +337,7 @@ pub async fn migrate_file(
         }
     };
 
-    let provider_config = config.to_provider_config();
+    let provider_config = ProviderConfig::from(config);
 
     let mut unit = FunctionUnit::new(name.clone(), source_path, c_source);
     unit.state = MigrationState::Extracted;
@@ -328,8 +382,9 @@ pub async fn migrate_file(
     // --- Stage 3: Try C2Rust transpilation ---
     match noricum_tools::c2rust::transpile(c_file) {
         Ok(output) => {
-            unit.c2rust_output = Some(output.rust_source.clone());
-            unit.rust_output = Some(output.rust_source);
+            let rust_src = output.rust_source;
+            unit.c2rust_output = Some(rust_src.clone());
+            unit.rust_output = Some(rust_src);
             unit.state = MigrationState::C2RustDone;
             info!(function = %name, state = ?unit.state, "state -> C2RustDone");
         }
@@ -349,11 +404,12 @@ pub async fn migrate_file(
     );
     let analysis = match analysis_model_sel.provider {
         ProviderKind::Anthropic => {
-            match noricum_agents::analysis::analyze_function(
+            match noricum_agents::analysis::analyze_function_with_temperature(
                 &client,
                 &analysis_model_sel.model,
                 &unit.c_source,
                 &name,
+                config.analysis_temperature,
             )
             .await
             {
@@ -365,8 +421,7 @@ pub async fn migrate_file(
             }
         }
         ProviderKind::Ollama => {
-            warn!(function = %name, "Ollama not yet supported for analysis agent");
-            return migrate_file_sync(c_file);
+            return Err(CoreError::UnsupportedProvider("Ollama".into()));
         }
     };
     unit.state = MigrationState::Analyzed;
@@ -374,8 +429,7 @@ pub async fn migrate_file(
     unit.metrics.llm_calls += 1;
     // Estimate token usage for analysis call
     unit.metrics.input_tokens += noricum_agents::estimate_tokens(&unit.c_source);
-    unit.metrics.output_tokens +=
-        noricum_agents::estimate_tokens(&format!("{:?}", analysis.patterns));
+    unit.metrics.output_tokens += noricum_agents::estimate_tokens(&format!("{analysis:?}"));
     info!(
         function = %name,
         state = ?unit.state,
@@ -384,6 +438,7 @@ pub async fn migrate_file(
         analysis_ms = unit.metrics.analysis_ms,
         "state -> Analyzed"
     );
+    check_budget(config, &unit.metrics)?;
 
     if let Some(ref trail) = audit {
         audit_log(
@@ -416,13 +471,14 @@ pub async fn migrate_file(
     );
     let rust_code = match translation_model_sel.provider {
         ProviderKind::Anthropic => {
-            match noricum_agents::translation::translate_function_with_patterns(
+            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
                 &client,
                 &translation_model_sel.model,
                 &unit.c_source,
                 unit.c2rust_output.as_deref(),
                 &analysis,
                 &relevant_patterns,
+                config.translation_temperature,
             )
             .await
             {
@@ -434,8 +490,7 @@ pub async fn migrate_file(
             }
         }
         ProviderKind::Ollama => {
-            warn!(function = %name, "Ollama not yet supported for translation agent");
-            return migrate_file_sync(c_file);
+            return Err(CoreError::UnsupportedProvider("Ollama".into()));
         }
     };
     unit.rust_output = Some(rust_code);
@@ -448,11 +503,16 @@ pub async fn migrate_file(
         unit.metrics.output_tokens += noricum_agents::estimate_tokens(rust);
     }
     info!(function = %name, state = ?unit.state, translation_ms = unit.metrics.translation_ms, "state -> Refined");
+    check_budget(config, &unit.metrics)?;
 
     // --- Stage 6: Validate ---
     let validation =
         noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
-    noricum_validation::apply_validation(&mut unit, &validation);
+    noricum_validation::apply_validation_with_max(
+        &mut unit,
+        &validation,
+        config.max_repair_iterations,
+    );
     info!(
         function = %name,
         state = ?unit.state,
@@ -518,7 +578,7 @@ pub async fn migrate_file(
 
             let repaired = match repair_model_sel.provider {
                 ProviderKind::Anthropic => {
-                    noricum_agents::repair::repair_function(
+                    noricum_agents::repair::repair_function_with_temperature(
                         &client,
                         &repair_model_sel.model,
                         current_rust,
@@ -527,12 +587,12 @@ pub async fn migrate_file(
                         &unit.c_source,
                         iteration,
                         config.max_repair_iterations,
+                        config.repair_base_temperature,
                     )
                     .await?
                 }
                 ProviderKind::Ollama => {
-                    warn!(function = %name, "Ollama not yet supported for repair agent");
-                    break;
+                    return Err(CoreError::UnsupportedProvider("Ollama".into()));
                 }
             };
 
@@ -545,10 +605,15 @@ pub async fn migrate_file(
             unit.metrics.input_tokens += input_token_est;
             unit.metrics.output_tokens += output_token_est;
             unit.metrics.repair_iterations = iteration;
+            check_budget(config, &unit.metrics)?;
 
             let re_validation =
                 noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
-            noricum_validation::apply_validation(&mut unit, &re_validation);
+            noricum_validation::apply_validation_with_max(
+                &mut unit,
+                &re_validation,
+                config.max_repair_iterations,
+            );
             info!(
                 function = %name,
                 iteration,
@@ -597,12 +662,13 @@ pub async fn migrate_file(
 
         match test_model_sel.provider {
             ProviderKind::Anthropic => {
-                match noricum_agents::test_gen::generate_tests(
+                match noricum_agents::test_gen::generate_tests_with_temperature(
                     &client,
                     &test_model_sel.model,
                     &unit.c_source,
                     unit.rust_output.as_deref().unwrap_or(""),
                     &name,
+                    config.test_gen_temperature,
                 )
                 .await
                 {
@@ -630,7 +696,7 @@ pub async fn migrate_file(
                 }
             }
             ProviderKind::Ollama => {
-                debug!(function = %name, "Ollama not yet supported for test gen, skipping");
+                warn!(function = %name, "Ollama provider not yet implemented for test gen, skipping");
             }
         }
     }
@@ -914,7 +980,7 @@ mod tests {
             generate_tests: false,
             ..Default::default()
         };
-        let pc = config.to_provider_config();
+        let pc = ProviderConfig::from(&config);
         assert_eq!(pc.anthropic_api_key, Some("test-key".to_string()));
         assert_eq!(pc.ollama_url, "http://custom:1234");
     }

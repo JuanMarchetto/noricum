@@ -17,6 +17,7 @@ edition = "2024"
 publish = false
 
 [dev-dependencies]
+noricum-agents = { path = "crates/noricum-agents" }
 noricum-tools = { path = "crates/noricum-tools" }
 noricum-validation = { path = "crates/noricum-validation" }
 noricum-ir = { path = "crates/noricum-ir" }
@@ -70,14 +71,15 @@ tree-sitter-rust = "0.23"
 
 # Web framework
 axum = "0.8"
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "0.5", features = ["util", "limit"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # Random (fuzz testing)
 rand = { version = "0.9", features = ["small_rng"] }
 
-# Crypto (audit trail)
+# Crypto (audit trail + constant-time comparison)
 sha2 = "0.10"
+subtle = "2"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
@@ -88,3 +90,4 @@ similar = "2"
 
 # Testing
 tempfile = "3"
+proptest = "1"

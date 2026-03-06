@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use noricum_core::MigrationConfig;
 use serde::{Deserialize, Serialize};
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// Maximum request body size: 10 MB.
@@ -21,6 +22,8 @@ pub struct AppState {
     pub config: MigrationConfig,
     /// Optional API key for request authentication.
     pub api_key: Option<String>,
+    /// Whether the server is bound to a non-localhost address.
+    pub is_public: bool,
 }
 
 /// Build the API router with all endpoints.
@@ -44,6 +47,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         ])),
     };
 
+    // Limit concurrent requests to prevent resource exhaustion (configurable via env)
+    let max_concurrent: usize = std::env::var("NORICUM_MAX_CONCURRENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10)
+        .max(1);
+
+    // Security headers middleware
+    let security_headers = axum::middleware::from_fn(add_security_headers);
+
     Router::new()
         .route("/api/health", get(health))
         .route("/api/migrate", post(migrate))
@@ -51,12 +64,52 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/check", post(check))
         .route("/api/score", post(score))
         .route("/api/diff-test", post(diff_test))
+        .layer(security_headers)
+        .layer(ConcurrencyLimitLayer::new(max_concurrent))
         .layer(cors)
         .with_state(state)
 }
 
+/// Middleware that adds security headers to all responses.
+async fn add_security_headers(
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        "x-content-type-options",
+        "nosniff".parse().expect("valid header value literal"),
+    );
+    headers.insert(
+        "x-frame-options",
+        "DENY".parse().expect("valid header value literal"),
+    );
+    headers.insert(
+        "content-security-policy",
+        "default-src 'none'; frame-ancestors 'none'"
+            .parse()
+            .expect("valid header value literal"),
+    );
+    headers.insert(
+        "x-xss-protection",
+        "1; mode=block".parse().expect("valid header value literal"),
+    );
+    headers.insert(
+        "cache-control",
+        "no-store, no-cache, must-revalidate"
+            .parse()
+            .expect("valid header value literal"),
+    );
+    response
+}
+
 /// Validate API key if configured. Returns an error response if auth fails.
+///
+/// Uses constant-time comparison to prevent timing side-channel attacks.
 fn check_api_key(state: &AppState, headers: &HeaderMap) -> Result<(), impl IntoResponse> {
+    use subtle::ConstantTimeEq;
+
     if let Some(ref expected) = state.api_key {
         let provided = headers
             .get("x-api-key")
@@ -68,12 +121,23 @@ fn check_api_key(state: &AppState, headers: &HeaderMap) -> Result<(), impl IntoR
                     .and_then(|v| v.strip_prefix("Bearer "))
             });
         match provided {
-            Some(key) if key == expected => Ok(()),
+            Some(key)
+                if key.len() == expected.len()
+                    && bool::from(key.as_bytes().ct_eq(expected.as_bytes())) =>
+            {
+                Ok(())
+            }
             _ => Err(error_response(
                 StatusCode::UNAUTHORIZED,
                 "invalid or missing API key",
             )),
         }
+    } else if state.is_public {
+        // Require authentication when serving on non-localhost addresses
+        Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "API key required when serving on non-localhost. Set NORICUM_API_KEY env var.",
+        ))
     } else {
         Ok(())
     }
@@ -253,7 +317,13 @@ async fn score(
         return resp.into_response();
     }
     let unsafe_count = noricum_tools::compiler::count_unsafe_blocks(&req.source);
-    let clippy = noricum_tools::compiler::run_clippy_on_source(&req.source).unwrap_or_default();
+    let clippy = match noricum_tools::compiler::run_clippy_on_source(&req.source) {
+        Ok(warnings) => warnings,
+        Err(e) => {
+            tracing::warn!(error = %e, "clippy analysis failed, score may be incomplete");
+            Vec::new()
+        }
+    };
     let c_source = req.c_source.as_deref().unwrap_or("");
     let score = noricum_validation::compute_idiomatic_score_from_source(
         unsafe_count,
@@ -370,6 +440,7 @@ mod tests {
         Arc::new(AppState {
             config: MigrationConfig::default(),
             api_key: None,
+            is_public: false,
         })
     }
 

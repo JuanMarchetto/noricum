@@ -33,6 +33,33 @@ pub async fn repair_function(
     iteration: u32,
     max_iterations: u32,
 ) -> Result<String, AgentError> {
+    repair_function_with_temperature(
+        client,
+        model,
+        rust_source,
+        compiler_errors,
+        diff_feedback,
+        c_source,
+        iteration,
+        max_iterations,
+        None,
+    )
+    .await
+}
+
+/// Repair with an optional base temperature override.
+#[allow(clippy::too_many_arguments)]
+pub async fn repair_function_with_temperature(
+    client: &anthropic::Client,
+    model: &str,
+    rust_source: &str,
+    compiler_errors: &[String],
+    diff_feedback: &[String],
+    c_source: &str,
+    iteration: u32,
+    max_iterations: u32,
+    base_temperature: Option<f64>,
+) -> Result<String, AgentError> {
     let error_count = compiler_errors.len();
     let diff_count = diff_feedback.len();
     info!(model, error_count, diff_count, iteration, "starting repair");
@@ -43,11 +70,12 @@ pub async fn repair_function(
     }
 
     // Increase temperature on later iterations to try different approaches
+    let base = base_temperature.unwrap_or(0.2);
     let temperature = match iteration {
-        1 => 0.2,
-        2 => 0.4,
-        3 => 0.6,
-        _ => 0.8,
+        1 => base,
+        2 => (base + 0.2).min(1.0),
+        3 => (base + 0.4).min(1.0),
+        _ => (base + 0.6).min(1.0),
     };
 
     let agent = client
@@ -103,7 +131,7 @@ pub async fn repair_function(
     }
 
     user_message.push_str(&format!(
-        "## Original C source (for reference)\n```c\n{c_source}\n```\n\n\
+        "## Original C source (for reference)\n<c_source>\n{c_source}\n</c_source>\n\n\
          Fix all issues. The Rust output must match the C output exactly byte-for-byte. \
          Output ONLY the complete corrected Rust source code."
     ));

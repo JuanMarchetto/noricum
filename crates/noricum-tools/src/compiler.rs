@@ -104,9 +104,82 @@ pub fn run_executable(exe_path: &Path, args: &[&str]) -> Result<CompileResult, T
 
 /// Count the number of `unsafe` blocks and `unsafe fn` declarations in Rust source code.
 ///
-/// Uses regex to handle whitespace variants (e.g. `unsafe  {`, `pub unsafe fn`).
-/// A proper implementation would use tree-sitter, but this covers common cases.
+/// Uses tree-sitter for accurate AST-based counting, which correctly handles
+/// unsafe in comments, strings, and nested contexts. Falls back to heuristic
+/// string matching if tree-sitter parsing fails.
 pub fn count_unsafe_blocks(rust_source: &str) -> u32 {
+    match count_unsafe_blocks_tree_sitter(rust_source) {
+        Some(count) => count,
+        None => {
+            debug!("tree-sitter parse failed, using heuristic unsafe counter");
+            count_unsafe_blocks_heuristic(rust_source)
+        }
+    }
+}
+
+/// Tree-sitter-based unsafe block/fn counter.
+fn count_unsafe_blocks_tree_sitter(rust_source: &str) -> Option<u32> {
+    let mut parser = tree_sitter::Parser::new();
+    let language = tree_sitter_rust::LANGUAGE;
+    parser.set_language(&language.into()).ok()?;
+    let tree = parser.parse(rust_source, None)?;
+    let root = tree.root_node();
+
+    let mut count = 0u32;
+    let mut cursor = root.walk();
+    count_unsafe_recursive(&mut cursor, &mut count);
+    Some(count)
+}
+
+/// Walk the tree-sitter AST and count `unsafe_block` and function items with
+/// the `unsafe` modifier.
+fn count_unsafe_recursive(cursor: &mut tree_sitter::TreeCursor, count: &mut u32) {
+    let node = cursor.node();
+    match node.kind() {
+        "unsafe_block" => {
+            *count += 1;
+        }
+        "function_item" => {
+            // Check if this function has an `unsafe` modifier inside `function_modifiers`
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    if child.kind() == "function_modifiers" {
+                        for j in 0..child.child_count() {
+                            if let Some(modifier) = child.child(j)
+                                && modifier.kind() == "unsafe"
+                            {
+                                *count += 1;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    // Stop looking once we reach fn keyword or beyond
+                    if child.kind() == "fn"
+                        || child.kind() == "identifier"
+                        || child.kind() == "parameters"
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if cursor.goto_first_child() {
+        loop {
+            count_unsafe_recursive(cursor, count);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        cursor.goto_parent();
+    }
+}
+
+/// Heuristic string-based unsafe counter (fallback).
+fn count_unsafe_blocks_heuristic(rust_source: &str) -> u32 {
     // Strip line comments to avoid counting "unsafe" in comments
     let stripped: String = rust_source
         .lines()
@@ -122,25 +195,20 @@ pub fn count_unsafe_blocks(rust_source: &str) -> u32 {
 
     let mut count = 0u32;
 
-    // Match `unsafe {` with flexible whitespace (covers `unsafe {`, `unsafe{`, `unsafe  {`)
     for line in stripped.lines() {
         let trimmed = line.trim();
-        // unsafe blocks: `unsafe {` anywhere on the line
         if trimmed.contains("unsafe")
             && trimmed.contains('{')
             && !trimmed.contains("unsafe fn")
             && !trimmed.contains("unsafe impl")
             && !trimmed.contains("unsafe trait")
+            && let Some(pos) = trimmed.find("unsafe")
         {
-            // Verify "unsafe" is followed by `{` (possibly with whitespace)
-            if let Some(pos) = trimmed.find("unsafe") {
-                let after = trimmed[pos + 6..].trim_start();
-                if after.starts_with('{') {
-                    count += 1;
-                }
+            let after = trimmed[pos + 6..].trim_start();
+            if after.starts_with('{') {
+                count += 1;
             }
         }
-        // unsafe fn: covers `unsafe fn`, `pub unsafe fn`, `pub(crate) unsafe fn`
         if trimmed.contains("unsafe fn ") || trimmed.contains("unsafe fn(") {
             count += 1;
         }
