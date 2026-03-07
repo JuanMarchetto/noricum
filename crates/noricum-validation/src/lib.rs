@@ -551,6 +551,48 @@ mod tests {
 
     /// Verify the passed field computation logic matches new expectations.
     #[test]
+    fn test_empty_rust_source_scores_base() {
+        let score = compute_idiomatic_score_from_source(0, 0, "", "int f() { return 0; }");
+        assert!(score <= 100, "empty rust source should score <= 100, got {score}");
+    }
+
+    #[test]
+    fn test_empty_c_source_no_loc_bonus() {
+        let score = compute_idiomatic_score_from_source(0, 0, "fn f() -> i32 { 0 }", "");
+        assert!(score <= 100, "empty c source should score <= 100, got {score}");
+    }
+
+    #[test]
+    fn test_unicode_in_rust_source() {
+        let rust = "fn grüße() -> String { \"héllo wörld 🦀\".to_string() }";
+        let c = "char* gruesse() { return \"hello world\"; }";
+        let score = compute_idiomatic_score_from_source(0, 0, rust, c);
+        assert!(score <= 100, "unicode rust source should score <= 100, got {score}");
+    }
+
+    #[test]
+    fn test_unicode_in_c_source() {
+        let rust = "fn greet() -> &'static str { \"hello\" }";
+        let c = "// 日本語コメント\nchar* greet() { return \"héllo\"; }";
+        let score = compute_idiomatic_score_from_source(0, 0, rust, c);
+        assert!(score <= 100, "unicode c source should score <= 100, got {score}");
+    }
+
+    #[test]
+    fn test_both_sources_empty() {
+        let score = compute_idiomatic_score_from_source(0, 0, "", "");
+        assert!(score <= 100, "both empty should score <= 100, got {score}");
+    }
+
+    #[test]
+    fn test_malformed_rust_patterns_in_source() {
+        let rust = "Result<Result<Result<.iter().iter().iter().unwrap().unwrap().unwrap()";
+        let c = "int f() { return 0; }";
+        let score = compute_idiomatic_score_from_source(0, 0, rust, c);
+        assert!(score <= 100, "malformed patterns should score <= 100, got {score}");
+    }
+
+    #[test]
     fn test_passed_computation_logic() {
         // diff_test_passed = None → requires score >= 80 (elevated threshold)
         let compiles = true;

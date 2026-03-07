@@ -282,4 +282,34 @@ fn uses_unsafe() {
         assert!(!result.success);
         assert!(!result.stderr.is_empty());
     }
+
+    #[test]
+    fn test_check_rust_compiles_empty() {
+        let result = check_rust_compiles("").unwrap();
+        assert!(result.success, "empty source should compile");
+    }
+
+    #[test]
+    fn test_count_unsafe_empty_source() {
+        assert_eq!(count_unsafe_blocks(""), 0);
+    }
+
+    #[test]
+    fn test_count_unsafe_unicode_source() {
+        let source = "fn héllo() -> i32 { 42 }";
+        assert_eq!(count_unsafe_blocks(source), 0);
+    }
+
+    #[test]
+    fn test_check_rust_compiles_unicode_identifiers() {
+        // Rust supports unicode identifiers
+        let result = check_rust_compiles("pub fn café() -> i32 { 42 }").unwrap();
+        assert!(result.success, "unicode identifiers should compile");
+    }
+
+    #[test]
+    fn test_check_rust_compiles_malformed() {
+        let result = check_rust_compiles("}{}{}{fn !!!! @@@@").unwrap();
+        assert!(!result.success, "malformed source should not compile");
+    }
 }

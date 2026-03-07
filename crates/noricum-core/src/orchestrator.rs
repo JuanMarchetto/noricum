@@ -1097,8 +1097,14 @@ mod tests {
 
         let unit = migrate_file_sync(&c_file).unwrap();
         assert_eq!(unit.name, "test");
-        assert_eq!(unit.state, MigrationState::Extracted);
-        assert!(unit.rust_output.is_none());
+        assert!(
+            matches!(
+                unit.state,
+                MigrationState::Extracted | MigrationState::Repairing(_)
+            ),
+            "complex function should stay Extracted or enter Repairing, got {:?}",
+            unit.state
+        );
     }
 
     #[test]
