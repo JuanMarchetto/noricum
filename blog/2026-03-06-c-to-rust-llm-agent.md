@@ -1,6 +1,6 @@
 # I Built an LLM Agent That Migrates C to Safe Rust — With 0 Unsafe Blocks
 
-**TL;DR:** Noricum is an open-source agent that takes C source code and produces idiomatic, safe Rust — verified by differential testing. It migrated a 520-LOC JSON parser (cJSON) to Rust with 0 unsafe blocks, passing byte-exact output comparison. Here's how it works and what I learned.
+**TL;DR:** Noricum is an open-source agent that takes C source code and produces idiomatic, safe Rust — verified by differential testing. It migrated a 1,441-LOC subset of cJSON (12.5k stars) to 1,098 lines of safe Rust with 0 unsafe blocks, passing 55 tests with byte-exact output comparison. Here's how it works and what I learned.
 
 ---
 
@@ -44,10 +44,25 @@ I tested Noricum against 14 C files, from trivial (13 LOC) to complex (1,686 LOC
 | `miniz_test.c` | 154 | 93/100 | 0 | PASS |
 | **`cjson_combined.c`** | **520** | **100/100** | **0** | **PASS** |
 | **`expr_eval.c`** | **1686** | **100/100** | **0** | **PASS** |
+| **`cjson_full_combined.c`** | **1441** | **est. 95+** | **0** | **PASS** |
 
-**14/14 files migrated successfully. 0 unsafe blocks across all outputs. 100% diff test pass rate.**
+**15/15 files migrated successfully. 0 unsafe blocks across all outputs. 100% diff test pass rate.**
 
-The expr_eval.c migration is the crown jewel — a full expression evaluator with:
+### Flagship: cJSON Full Migration
+
+The cjson_full migration is the crown jewel — a substantial subset of [DaveGamble/cJSON](https://github.com/DaveGamble/cJSON) (12,510 GitHub stars), one of the most popular C JSON parsers:
+
+- **1,441 LOC C → 1,098 LOC Rust** (0.76x — the Rust is *more compact* than the C)
+- Recursive descent parser, UTF-16 surrogate pair decoding, string escape handling
+- ~60 functions: type checkers, creators, array/object manipulation, compare, duplicate, minify
+- Linked list tree (`next/prev/child` pointers) → `enum JsonValue` with `Vec<JsonValue>` and `Vec<(String, JsonValue)>`
+- `malloc/free` → RAII, `char*` → `String`, type tags → enum variants, `goto fail` → `Option` + `?`
+- Custom `format_g()` to match C's `sprintf("%1.15g")` for byte-exact diff test
+- **55/55 tests PASS, 0 unsafe blocks, 0 raw pointers**
+
+### expr_eval.c: The Previous Record
+
+The expr_eval.c migration is a full expression evaluator with:
 - Recursive descent parser (lexer + parser + evaluator)
 - 74 functions including 25+ built-in math/string operations
 - Manual HashMap implementation with chaining
@@ -157,8 +172,8 @@ Noricum also has a REST API, MCP server for IDE integration, and Docker support.
 
 ## What's Next
 
-- **Larger migrations** — targeting 1000-2000 LOC files (stb_image, sqlite3 shell)
-- **CRUST-Bench evaluation** — running against the academic benchmark dataset
+- **Even larger migrations** — targeting 3000+ LOC single-file libraries
+- **CRUST-Bench full evaluation** — pilot run achieved 100% compile, 66.7% test pass on 3 projects (see [results](../docs/crust-bench-results.md))
 - **Incremental migration** — per-function migration instead of whole-file
 - **Published benchmarks** — reproducible comparisons vs C2Rust
 

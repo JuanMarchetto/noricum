@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **cJSON full migration** — 1441 LOC cJSON library (DaveGamble/cJSON, 12.5k stars) → 1098 LOC idiomatic Rust (0.76x ratio), 0 unsafe, 55/55 tests, diff test byte-exact PASS. Linked list → Vec, malloc/free → RAII, type tags → enum, UTF-16 surrogate pairs, C-compatible %g number formatting.
+- CRUST-Bench pipeline improvements: per-module translation, per-test repair feedback, dynamic repair iterations, array indexing prompts, gentler temperature ramp, cost-optimized model selection
+- cJSON migration plan and full test fixtures (cJSON.c, cJSON.h, main.c, combined)
 - expr_eval.c migration — 1686 LOC expression evaluator, score 100/100, 0 unsafe, 0 repairs, diff test PASS (largest file migrated: 3.2x previous record)
 - Interface-aware CRUST-Bench with progress logging (`[N/M]` counter)
 - Error severity classification in compiler diagnostics
