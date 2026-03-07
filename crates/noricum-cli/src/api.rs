@@ -2,6 +2,8 @@
 ///
 /// Provides HTTP endpoints that map to the core migration pipeline:
 /// health check, analysis, compilation check, scoring, diff testing, and migration.
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -17,6 +19,39 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 /// Maximum request body size: 10 MB.
 const MAX_SOURCE_SIZE: usize = 10 * 1024 * 1024;
 
+/// Default rate limit: 60 requests per minute per IP.
+pub const DEFAULT_RATE_LIMIT_RPM: usize = 60;
+
+/// Simple per-IP rate limiter using a sliding window (1 minute).
+pub struct IpRateLimiter {
+    max_rpm: usize,
+    requests: std::sync::Mutex<HashMap<IpAddr, Vec<std::time::Instant>>>,
+}
+
+impl IpRateLimiter {
+    /// Create a new rate limiter with the given max requests per minute.
+    pub fn new(max_rpm: usize) -> Self {
+        Self {
+            max_rpm,
+            requests: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Check if a request from the given IP should be allowed.
+    pub fn check(&self, ip: IpAddr) -> bool {
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(60);
+        let mut map = self.requests.lock().expect("rate limiter lock poisoned");
+        let timestamps = map.entry(ip).or_default();
+        timestamps.retain(|t| now.duration_since(*t) < window);
+        if timestamps.len() >= self.max_rpm {
+            return false;
+        }
+        timestamps.push(now);
+        true
+    }
+}
+
 /// Shared application state.
 pub struct AppState {
     pub config: MigrationConfig,
@@ -24,6 +59,8 @@ pub struct AppState {
     pub api_key: Option<String>,
     /// Whether the server is bound to a non-localhost address.
     pub is_public: bool,
+    /// Per-IP rate limiter.
+    pub rate_limiter: IpRateLimiter,
 }
 
 /// Build the API router with all endpoints.
@@ -57,6 +94,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // Security headers middleware
     let security_headers = axum::middleware::from_fn(add_security_headers);
 
+    // Per-IP rate limiting middleware
+    let rate_limit = axum::middleware::from_fn_with_state(state.clone(), rate_limit_middleware);
+
     Router::new()
         .route("/api/health", get(health))
         .route("/api/migrate", post(migrate))
@@ -64,6 +104,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/check", post(check))
         .route("/api/score", post(score))
         .route("/api/diff-test", post(diff_test))
+        .layer(rate_limit)
         .layer(security_headers)
         .layer(ConcurrencyLimitLayer::new(max_concurrent))
         .layer(cors)
@@ -102,6 +143,33 @@ async fn add_security_headers(
             .expect("valid header value literal"),
     );
     response
+}
+
+/// Per-IP rate limiting middleware.
+async fn rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // Extract client IP from X-Forwarded-For or fall back to 127.0.0.1
+    let ip: IpAddr = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
+    if !state.rate_limiter.check(ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: "rate limit exceeded — try again later".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 /// Validate API key if configured. Returns an error response if auth fails.
@@ -441,6 +509,7 @@ mod tests {
             config: MigrationConfig::default(),
             api_key: None,
             is_public: false,
+            rate_limiter: IpRateLimiter::new(DEFAULT_RATE_LIMIT_RPM),
         })
     }
 

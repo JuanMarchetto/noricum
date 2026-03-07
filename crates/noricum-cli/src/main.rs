@@ -135,7 +135,7 @@ struct MigrateOpts {
     /// Maximum number of LLM API calls per run (default: 20, use 0 for unlimited)
     #[arg(long)]
     max_llm_calls: Option<u32>,
-    /// Ollama model name (default: llama3.2)
+    /// Ollama model name (default: qwen2.5-coder:32b)
     #[arg(long)]
     ollama_model: Option<String>,
 }
