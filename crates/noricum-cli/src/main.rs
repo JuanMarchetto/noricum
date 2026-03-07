@@ -91,12 +91,12 @@ enum Commands {
         #[arg(long)]
         diff_test: bool,
     },
-    /// Run CRUST-Bench evaluation
+    /// Run CRUST-Bench evaluation (interface-aware mode)
     CrustBench {
-        /// Path to the CRUST-Bench dataset directory
+        /// Path to the CRUST-Bench dataset directory (must contain CBench/ and RBench/)
         #[arg(long)]
         dataset: PathBuf,
-        /// Filter projects by name prefix
+        /// Filter projects by name substring
         #[arg(long)]
         filter: Option<String>,
         /// Limit number of projects to evaluate
@@ -108,6 +108,9 @@ enum Commands {
         /// Write report to this path
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Ollama model name (forces Ollama provider instead of Anthropic)
+        #[arg(long)]
+        ollama_model: Option<String>,
     },
 }
 
@@ -243,7 +246,18 @@ async fn main() {
             limit,
             json,
             output,
-        } => cmd_crust_bench(&dataset, filter.as_deref(), limit, json, output.as_deref()).await,
+            ollama_model,
+        } => {
+            cmd_crust_bench(
+                &dataset,
+                filter.as_deref(),
+                limit,
+                json,
+                output.as_deref(),
+                ollama_model,
+            )
+            .await
+        }
     };
 
     if let Err(e) = result {
@@ -325,12 +339,19 @@ async fn cmd_crust_bench(
     limit: Option<usize>,
     json: bool,
     output: Option<&std::path::Path>,
+    ollama_model: Option<String>,
 ) -> Result<()> {
+    let mut migration_config = noricum_core::MigrationConfig::default();
+    if ollama_model.is_some() {
+        migration_config.anthropic_api_key = None;
+        migration_config.ollama_model = ollama_model;
+    }
+
     let config = crust_bench::CrustBenchConfig {
         dataset_path: dataset.to_path_buf(),
         filter: filter.map(|s| s.to_string()),
         limit,
-        migration_config: noricum_core::MigrationConfig::default(),
+        migration_config,
     };
     let report = crust_bench::run_crust_bench(&config).await?;
 
@@ -343,21 +364,38 @@ async fn cmd_crust_bench(
             println!("{json_str}");
         }
     } else {
-        println!("CRUST-Bench Report");
-        println!("==================");
-        println!("  Total projects:    {}", report.total_projects);
+        println!("CRUST-Bench Report (interface-aware)");
+        println!("====================================");
+        println!("  Total projects:     {}", report.total_projects);
         println!(
-            "  Compilation rate:  {:.1}%",
+            "  Compilation rate:   {:.1}%",
             report.compilation_rate * 100.0
         );
-        println!("  Test pass rate:    {:.1}%", report.test_pass_rate * 100.0);
-        println!("  Avg idiomatic:     {:.1}", report.avg_idiomatic_score);
+        println!(
+            "  Test pass rate:     {:.1}%",
+            report.test_pass_rate * 100.0
+        );
+        println!("  Avg idiomatic:      {:.1}", report.avg_idiomatic_score);
+        println!("  Total LLM calls:    {}", report.total_llm_calls);
+        println!("  Total repairs:      {}", report.total_repair_iterations);
         println!();
         for p in &report.projects {
-            let status = if p.compilation_success { "OK" } else { "FAIL" };
+            let status = if p.tests_passed {
+                "PASS    "
+            } else if p.compilation_success {
+                "BUILD_OK"
+            } else {
+                "FAIL    "
+            };
             println!(
-                "  {:<30} {} score={:.0} tests={}/{}",
-                p.name, status, p.idiomatic_score_avg, p.tests_passed, p.tests_total,
+                "  {:<30} {} score={:>3.0} unsafe={} repairs={} calls={} {}ms",
+                p.name,
+                status,
+                p.idiomatic_score_avg,
+                p.unsafe_count,
+                p.repair_iterations,
+                p.llm_calls,
+                p.total_ms,
             );
         }
     }

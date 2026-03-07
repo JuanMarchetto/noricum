@@ -1,13 +1,23 @@
 /// CRUST-Bench integration: evaluate Noricum against the CRUST-Bench dataset.
 ///
-/// Discovers C projects in the CRUST-Bench directory structure, migrates each,
-/// and produces an aggregate report for benchmarking against DARPA TRACTOR teams.
+/// Operates in **interface-aware mode**: reads C source from CBench/, reads Rust
+/// interface skeletons (with `unimplemented!()`) from RBench/, fills in
+/// implementations via LLM, and validates with `cargo test`.
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use noricum_agents::extract_rust_code;
+use noricum_agents::providers::{self, LlmClient, ProviderConfig};
 use noricum_core::MigrationConfig;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+/// System prompts loaded at compile time.
+const TRANSLATION_PREAMBLE: &str = include_str!("../../../prompts/crust_bench_translation.md");
+const REPAIR_PREAMBLE: &str = include_str!("../../../prompts/crust_bench_repair.md");
+
+/// Maximum repair iterations per project.
+const MAX_REPAIR_ITERATIONS: u32 = 5;
 
 /// Configuration for CRUST-Bench evaluation.
 pub struct CrustBenchConfig {
@@ -24,8 +34,8 @@ pub struct ProjectResult {
     pub c_loc: u32,
     pub rust_loc: u32,
     pub compilation_success: bool,
-    pub tests_total: u32,
-    pub tests_passed: u32,
+    pub tests_passed: bool,
+    pub test_output: Option<String>,
     pub idiomatic_score_avg: f64,
     pub unsafe_count: u32,
     pub repair_iterations: u32,
@@ -41,123 +51,597 @@ pub struct CrustBenchReport {
     pub compilation_rate: f64,
     pub test_pass_rate: f64,
     pub avg_idiomatic_score: f64,
+    pub total_llm_calls: u32,
+    pub total_repair_iterations: u32,
     pub projects: Vec<ProjectResult>,
 }
 
-/// Discover project directories in the CRUST-Bench dataset.
-pub fn discover_projects(dataset_path: &Path) -> Result<Vec<PathBuf>> {
-    let mut projects = Vec::new();
+/// A discovered CRUST-Bench project with both C and Rust paths.
+struct CrustProject {
+    name: String,
+    cbench_dir: PathBuf,
+    rbench_dir: PathBuf,
+}
 
-    if !dataset_path.is_dir() {
-        anyhow::bail!("CRUST-Bench dataset not found: {}", dataset_path.display());
+/// Discover matching projects in CBench/ and RBench/ directories.
+fn discover_projects(dataset_path: &Path) -> Result<Vec<CrustProject>> {
+    let cbench = dataset_path.join("CBench");
+    let rbench = dataset_path.join("RBench");
+
+    if !cbench.is_dir() {
+        anyhow::bail!(
+            "CBench directory not found at {}",
+            cbench.display()
+        );
+    }
+    if !rbench.is_dir() {
+        anyhow::bail!(
+            "RBench directory not found at {}",
+            rbench.display()
+        );
     }
 
-    for entry in std::fs::read_dir(dataset_path)? {
+    let mut rbench_names: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+    for entry in std::fs::read_dir(&rbench)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            // Check if directory contains C files
-            let has_c = std::fs::read_dir(&path)?.filter_map(|e| e.ok()).any(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "c" || ext == "h")
-            });
-            if has_c {
-                projects.push(path);
-            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            rbench_names.insert(name, path);
         }
     }
 
-    projects.sort();
+    let mut projects = Vec::new();
+    for entry in std::fs::read_dir(&cbench)? {
+        let entry = entry?;
+        let cb_path = entry.path();
+        if !cb_path.is_dir() {
+            continue;
+        }
+        let cb_name = entry.file_name().to_string_lossy().to_string();
+        let rb_name = cb_name.replace('-', "_");
+        if let Some(rb_path) = rbench_names
+            .get(&cb_name)
+            .or_else(|| rbench_names.get(&rb_name))
+        {
+            projects.push(CrustProject {
+                name: cb_name,
+                cbench_dir: cb_path,
+                rbench_dir: rb_path.clone(),
+            });
+        } else {
+            debug!(project = %cb_name, "no matching RBench project found, skipping");
+        }
+    }
+
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(projects)
 }
 
-/// Migrate a single CRUST-Bench project.
-pub(crate) async fn run_project(project_dir: &Path, config: &MigrationConfig) -> ProjectResult {
-    let name = project_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+fn read_c_sources(cbench_dir: &Path) -> Result<String> {
+    let mut sources = Vec::new();
+    collect_c_files(cbench_dir, &mut sources)?;
+    sources.sort();
 
-    info!(project = %name, "evaluating CRUST-Bench project");
+    let mut combined = String::new();
+    for path in &sources {
+        let name = path.strip_prefix(cbench_dir).unwrap_or(path);
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        combined.push_str(&format!("// === {} ===\n", name.display()));
+        combined.push_str(&content);
+        combined.push_str("\n\n");
+    }
+    Ok(combined)
+}
 
-    let start = std::time::Instant::now();
-
-    match noricum_core::orchestrator::migrate_directory(project_dir, config).await {
-        Ok(project) => {
-            let units = &project.units;
-            let c_loc: u32 = units.iter().map(|u| u.metrics.c_lines).sum();
-            let rust_loc: u32 = units.iter().map(|u| u.metrics.rust_lines).sum();
-            let compilation_success = units
-                .iter()
-                .all(|u| u.state == noricum_ir::MigrationState::Validated);
-            let tests_total = units.len() as u32;
-            let tests_passed = units
-                .iter()
-                .filter(|u| u.state == noricum_ir::MigrationState::Validated)
-                .count() as u32;
-            let scores: Vec<f64> = units
-                .iter()
-                .filter_map(|u| u.idiomatic_score.map(|s| s as f64))
-                .collect();
-            let avg_score = if scores.is_empty() {
-                0.0
-            } else {
-                scores.iter().sum::<f64>() / scores.len() as f64
-            };
-            let unsafe_count: u32 = units.iter().filter_map(|u| u.unsafe_count).sum();
-            let repair_iterations: u32 = units.iter().map(|u| u.metrics.repair_iterations).sum();
-            let llm_calls: u32 = units.iter().map(|u| u.metrics.llm_calls).sum();
-
-            ProjectResult {
-                name,
-                c_loc,
-                rust_loc,
-                compilation_success,
-                tests_total,
-                tests_passed,
-                idiomatic_score_avg: avg_score,
-                unsafe_count,
-                repair_iterations,
-                llm_calls,
-                total_ms: start.elapsed().as_millis() as u64,
-                error: None,
-            }
+fn collect_c_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_c_files(&path, out)?;
+        } else if let Some(ext) = path.extension()
+            && (ext == "c" || ext == "h")
+        {
+            out.push(path);
         }
-        Err(e) => {
-            warn!(project = %name, error = %e, "CRUST-Bench project failed");
-            ProjectResult {
-                name,
-                c_loc: 0,
-                rust_loc: 0,
-                compilation_success: false,
-                tests_total: 0,
-                tests_passed: 0,
-                idiomatic_score_avg: 0.0,
-                unsafe_count: 0,
-                repair_iterations: 0,
-                llm_calls: 0,
-                total_ms: start.elapsed().as_millis() as u64,
-                error: Some(e.to_string()),
-            }
+    }
+    Ok(())
+}
+
+fn read_interface_skeletons(rbench_dir: &Path) -> Result<Vec<(PathBuf, String)>> {
+    let interfaces_dir = rbench_dir.join("src").join("interfaces");
+    if !interfaces_dir.is_dir() {
+        anyhow::bail!(
+            "interfaces directory not found: {}",
+            interfaces_dir.display()
+        );
+    }
+
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&interfaces_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "rs") {
+            let content = std::fs::read_to_string(&path)?;
+            files.push((path, content));
         }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
+}
+
+fn copy_rbench_to_workdir(rbench_dir: &Path, workdir: &Path) -> Result<()> {
+    copy_dir_recursive(rbench_dir, workdir)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_cargo_test(project_dir: &Path) -> (bool, String) {
+    let result = std::process::Command::new("cargo")
+        .arg("test")
+        .arg("--")
+        .arg("--test-threads=1")
+        .current_dir(project_dir)
+        .env("CARGO_TERM_COLOR", "never")
+        .output();
+
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let combined = format!("{stderr}\n{stdout}");
+            (output.status.success(), combined)
+        }
+        Err(e) => (false, format!("Failed to run cargo test: {e}")),
     }
 }
 
-/// Run CRUST-Bench evaluation across all discovered projects.
+fn run_cargo_build(project_dir: &Path) -> (bool, String) {
+    let result = std::process::Command::new("cargo")
+        .arg("build")
+        .current_dir(project_dir)
+        .env("CARGO_TERM_COLOR", "never")
+        .output();
+
+    match result {
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            (output.status.success(), stderr)
+        }
+        Err(e) => (false, format!("Failed to run cargo build: {e}")),
+    }
+}
+
+fn count_lines(s: &str) -> u32 {
+    s.lines().count() as u32
+}
+
+fn count_unsafe(rust_source: &str) -> u32 {
+    rust_source.matches("unsafe").count() as u32
+}
+
+fn build_translation_prompt(c_source: &str, interface_skeletons: &[(PathBuf, String)]) -> String {
+    let mut prompt = String::new();
+
+    prompt.push_str("## C Source Code\n<c_source>\n");
+    prompt.push_str(c_source);
+    prompt.push_str("\n</c_source>\n\n");
+
+    prompt.push_str("## Rust Interface Skeletons\n");
+    prompt.push_str(
+        "Replace every `unimplemented!()` with a correct implementation. \
+         Do NOT change any function signatures, struct definitions, or field types.\n\n",
+    );
+
+    for (path, content) in interface_skeletons {
+        let filename = path.file_name().unwrap_or_default().to_string_lossy();
+        prompt.push_str(&format!(
+            "### File: {filename}\n<rust_interface>\n{content}\n</rust_interface>\n\n"
+        ));
+    }
+
+    prompt.push_str(
+        "Output the complete implementation for each interface file. \
+         If there are multiple files, separate them with `// === filename.rs ===` headers.\n\
+         Output ONLY Rust code.",
+    );
+
+    prompt
+}
+
+fn build_repair_prompt(
+    c_source: &str,
+    interface_skeletons: &[(PathBuf, String)],
+    current_impl: &str,
+    errors: &str,
+    iteration: u32,
+    max_iterations: u32,
+) -> String {
+    let mut prompt = String::new();
+
+    prompt.push_str(&format!(
+        "## Repair iteration {iteration}/{max_iterations}\n\n"
+    ));
+
+    prompt.push_str("## Error output\n```\n");
+    let truncated = if errors.len() > 8000 {
+        &errors[..8000]
+    } else {
+        errors
+    };
+    prompt.push_str(truncated);
+    prompt.push_str("\n```\n\n");
+
+    prompt.push_str("## Current Rust implementation\n```rust\n");
+    prompt.push_str(current_impl);
+    prompt.push_str("\n```\n\n");
+
+    prompt.push_str("## Original C source\n<c_source>\n");
+    prompt.push_str(c_source);
+    prompt.push_str("\n</c_source>\n\n");
+
+    prompt.push_str("## Interface contract (signatures MUST NOT change)\n");
+    for (path, content) in interface_skeletons {
+        let filename = path.file_name().unwrap_or_default().to_string_lossy();
+        prompt.push_str(&format!(
+            "<rust_interface>\n// {filename}\n{content}\n</rust_interface>\n\n"
+        ));
+    }
+
+    prompt.push_str("Fix ALL errors. Output the complete corrected Rust file. No explanations.");
+
+    prompt
+}
+
+fn parse_multi_file_output(
+    output: &str,
+    interface_files: &[(PathBuf, String)],
+) -> Vec<(PathBuf, String)> {
+    let code = extract_rust_code(output);
+
+    if interface_files.len() == 1 {
+        return vec![(interface_files[0].0.clone(), code)];
+    }
+
+    let mut results = Vec::new();
+    let mut current_file: Option<&Path> = None;
+    let mut current_content = String::new();
+
+    for line in code.lines() {
+        if line.starts_with("// === ") && line.ends_with(" ===") {
+            if let Some(path) = current_file {
+                results.push((path.to_path_buf(), current_content.trim().to_string()));
+                current_content.clear();
+            }
+            let filename = line
+                .trim_start_matches("// === ")
+                .trim_end_matches(" ===")
+                .trim();
+            current_file = interface_files
+                .iter()
+                .find(|(p, _)| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().as_ref() == filename)
+                        .unwrap_or(false)
+                })
+                .map(|(p, _)| p.as_path());
+        } else {
+            current_content.push_str(line);
+            current_content.push('\n');
+        }
+    }
+
+    if let Some(path) = current_file {
+        results.push((path.to_path_buf(), current_content.trim().to_string()));
+    }
+
+    if results.is_empty() && !interface_files.is_empty() {
+        results.push((interface_files[0].0.clone(), code));
+    }
+
+    results
+}
+
+/// Read all current implementation files from disk to rebuild current_impl.
+fn read_current_impls(workdir: &Path, interface_files: &[(PathBuf, String)]) -> String {
+    let mut combined = String::new();
+    for (iface_path, _) in interface_files {
+        let filename = iface_path.file_name().unwrap_or_default();
+        let src_path = workdir.join("src").join(filename);
+        if let Ok(content) = std::fs::read_to_string(&src_path) {
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
+            combined.push_str(&format!("// === {} ===\n", filename.to_string_lossy()));
+            combined.push_str(&content);
+        }
+    }
+    combined
+}
+
+fn select_model(c_loc: u32, config: &MigrationConfig) -> String {
+    if config.ollama_model.is_some() {
+        return config
+            .ollama_model
+            .as_deref()
+            .unwrap_or("qwen2.5-coder:32b")
+            .to_string();
+    }
+    match c_loc {
+        0..=300 => "claude-haiku-4-5-20251001".to_string(),
+        301..=1500 => "claude-sonnet-4-6".to_string(),
+        _ => "claude-opus-4-6".to_string(),
+    }
+}
+
+/// Write parsed files to workdir and return updated current_impl from disk.
+fn write_and_read_impls(
+    workdir: &Path,
+    parsed: &[(PathBuf, String)],
+    interface_files: &[(PathBuf, String)],
+) -> String {
+    for (orig_path, content) in parsed {
+        let filename = orig_path.file_name().unwrap_or_default();
+        let dest = workdir.join("src").join(filename);
+        let _ = std::fs::write(&dest, content);
+    }
+    read_current_impls(workdir, interface_files)
+}
+
+fn make_error_result(name: String, c_loc: u32, start: std::time::Instant, llm_calls: u32, error: String) -> ProjectResult {
+    ProjectResult {
+        name,
+        c_loc,
+        rust_loc: 0,
+        compilation_success: false,
+        tests_passed: false,
+        test_output: None,
+        idiomatic_score_avg: 0.0,
+        unsafe_count: 0,
+        repair_iterations: 0,
+        llm_calls,
+        total_ms: start.elapsed().as_millis() as u64,
+        error: Some(error),
+    }
+}
+
+async fn run_project(project: &CrustProject, config: &MigrationConfig) -> ProjectResult {
+    let start = std::time::Instant::now();
+    let name = project.name.clone();
+
+    info!(project = %name, "starting CRUST-Bench project");
+
+    // Step 1: Read C sources
+    let c_source = match read_c_sources(&project.cbench_dir) {
+        Ok(s) => s,
+        Err(e) => return make_error_result(name, 0, start, 0, e.to_string()),
+    };
+    let c_loc = count_lines(&c_source);
+
+    // Step 2: Read interface skeletons
+    let interface_files = match read_interface_skeletons(&project.rbench_dir) {
+        Ok(f) => f,
+        Err(e) => return make_error_result(name, c_loc, start, 0, e.to_string()),
+    };
+
+    // Step 3: Create working copy of RBench project
+    let workdir = std::env::temp_dir().join("noricum-crust-bench").join(&name);
+    if workdir.exists() {
+        let _ = std::fs::remove_dir_all(&workdir);
+    }
+    if let Err(e) = copy_rbench_to_workdir(&project.rbench_dir, &workdir) {
+        return make_error_result(name, c_loc, start, 0, format!("copy failed: {e}"));
+    }
+
+    // Step 4: Create LLM client
+    let client = match create_llm_client(config) {
+        Ok(c) => c,
+        Err(e) => return make_error_result(name, c_loc, start, 0, format!("no LLM: {e}")),
+    };
+
+    let model = select_model(c_loc, config);
+    let mut llm_calls = 0u32;
+    let mut repair_iterations = 0u32;
+
+    // Step 5: Translation
+    let user_prompt = build_translation_prompt(&c_source, &interface_files);
+    let max_tokens = ((c_source.len() as u64 / 4) * 3).clamp(8192, 65536);
+
+    info!(project = %name, model = %model, c_loc, interfaces = interface_files.len(), "translating");
+
+    let translation = match client
+        .run_prompt(&model, TRANSLATION_PREAMBLE, 0.3, max_tokens, &user_prompt)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return make_error_result(name, c_loc, start, 1, format!("translation failed: {e}"));
+        }
+    };
+    llm_calls += 1;
+
+    // Step 6: Write to src/<module>.rs (where lib.rs expects pub mod <module>;)
+    let parsed_files = parse_multi_file_output(&translation, &interface_files);
+    let mut current_impl = write_and_read_impls(&workdir, &parsed_files, &interface_files);
+
+    if parsed_files.is_empty() && !interface_files.is_empty() {
+        let code = extract_rust_code(&translation);
+        let filename = interface_files[0].0.file_name().unwrap_or_default();
+        let dest = workdir.join("src").join(filename);
+        let _ = std::fs::write(&dest, &code);
+        current_impl = read_current_impls(&workdir, &interface_files);
+    }
+
+    // Step 7: Build check
+    let (build_ok, build_errors) = run_cargo_build(&workdir);
+    if !build_ok {
+        info!(project = %name, "compilation failed, entering repair loop");
+    }
+
+    // Step 8: Build repair loop
+    let mut last_errors = build_errors;
+    let mut compilation_success = build_ok;
+
+    if !build_ok {
+        for iter in 1..=MAX_REPAIR_ITERATIONS {
+            repair_iterations = iter;
+            let temp = 0.3 + (iter as f64 - 1.0) * 0.15;
+
+            let repair_prompt = build_repair_prompt(
+                &c_source, &interface_files, &current_impl, &last_errors,
+                iter, MAX_REPAIR_ITERATIONS,
+            );
+
+            info!(project = %name, iteration = iter, temp, "repair attempt (build)");
+
+            match client.run_prompt(&model, REPAIR_PREAMBLE, temp, max_tokens, &repair_prompt).await {
+                Ok(response) => {
+                    llm_calls += 1;
+                    let repaired = parse_multi_file_output(&response, &interface_files);
+                    current_impl = write_and_read_impls(&workdir, &repaired, &interface_files);
+
+                    let (ok, errors) = run_cargo_build(&workdir);
+                    compilation_success = ok;
+                    last_errors = errors;
+                    if ok {
+                        info!(project = %name, iteration = iter, "compilation fixed");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    llm_calls += 1;
+                    warn!(project = %name, error = %e, "repair call failed");
+                    break;
+                }
+            }
+        }
+    }
+
+    // Step 9: Test phase
+    let mut tests_passed = false;
+    let mut test_output = None;
+
+    if compilation_success {
+        let (test_ok, test_out) = run_cargo_test(&workdir);
+        tests_passed = test_ok;
+
+        if !test_ok {
+            info!(project = %name, "tests failed, entering repair loop");
+            test_output = Some(test_out.clone());
+            last_errors = test_out;
+
+            for iter in (repair_iterations + 1)..=MAX_REPAIR_ITERATIONS {
+                repair_iterations = iter;
+                let temp = 0.3 + (iter as f64 - 1.0) * 0.15;
+
+                let repair_prompt = build_repair_prompt(
+                    &c_source, &interface_files, &current_impl, &last_errors,
+                    iter, MAX_REPAIR_ITERATIONS,
+                );
+
+                info!(project = %name, iteration = iter, temp, "repair attempt (tests)");
+
+                match client.run_prompt(&model, REPAIR_PREAMBLE, temp, max_tokens, &repair_prompt).await {
+                    Ok(response) => {
+                        llm_calls += 1;
+                        let repaired = parse_multi_file_output(&response, &interface_files);
+                        current_impl = write_and_read_impls(&workdir, &repaired, &interface_files);
+
+                        let (bld_ok, bld_err) = run_cargo_build(&workdir);
+                        if !bld_ok {
+                            last_errors = bld_err;
+                            compilation_success = false;
+                            info!(project = %name, iteration = iter, "repair broke compilation");
+                            continue;
+                        }
+                        compilation_success = true;
+
+                        let (t_ok, t_out) = run_cargo_test(&workdir);
+                        tests_passed = t_ok;
+                        test_output = Some(t_out.clone());
+                        if t_ok {
+                            info!(project = %name, iteration = iter, "tests fixed");
+                            break;
+                        }
+                        last_errors = t_out;
+                    }
+                    Err(e) => {
+                        llm_calls += 1;
+                        warn!(project = %name, error = %e, "repair call failed");
+                        break;
+                    }
+                }
+            }
+        } else {
+            test_output = Some(test_out);
+        }
+    }
+
+    // Step 10: Score
+    let rust_loc = count_lines(&current_impl);
+    let unsafe_count = count_unsafe(&current_impl);
+    let idiomatic_score = if compilation_success {
+        let base = 100.0_f64 - (unsafe_count as f64 * 10.0);
+        if tests_passed { base.max(0.0) } else { (base * 0.5).max(0.0) }
+    } else {
+        0.0
+    };
+
+    let elapsed = start.elapsed().as_millis() as u64;
+    let status = if tests_passed { "PASS" } else if compilation_success { "BUILD_OK" } else { "FAIL" };
+    info!(project = %name, status, c_loc, rust_loc, unsafe_count, repair_iterations, llm_calls, elapsed_ms = elapsed, "project complete");
+
+    ProjectResult {
+        name,
+        c_loc,
+        rust_loc,
+        compilation_success,
+        tests_passed,
+        test_output,
+        idiomatic_score_avg: idiomatic_score,
+        unsafe_count,
+        repair_iterations,
+        llm_calls,
+        total_ms: elapsed,
+        error: if compilation_success { None } else { Some(last_errors) },
+    }
+}
+
+fn create_llm_client(config: &MigrationConfig) -> Result<LlmClient> {
+    let provider_config = ProviderConfig {
+        anthropic_api_key: config.anthropic_api_key.clone(),
+        ollama_url: "http://localhost:11434".to_string(),
+        ollama_model: config
+            .ollama_model
+            .clone()
+            .unwrap_or_else(|| "qwen2.5-coder:32b".to_string()),
+    };
+    providers::create_llm_client(&provider_config)
+        .map_err(|e| anyhow::anyhow!("failed to create LLM client: {e}"))
+}
+
 pub async fn run_crust_bench(config: &CrustBenchConfig) -> Result<CrustBenchReport> {
     let mut projects = discover_projects(&config.dataset_path)?;
 
-    // Apply filter
     if let Some(ref filter) = config.filter {
-        projects.retain(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().contains(filter.as_str()))
-                .unwrap_or(false)
-        });
+        projects.retain(|p| p.name.contains(filter.as_str()));
     }
-
-    // Apply limit
     if let Some(limit) = config.limit {
         projects.truncate(limit);
     }
@@ -166,66 +650,38 @@ pub async fn run_crust_bench(config: &CrustBenchConfig) -> Result<CrustBenchRepo
         total = projects.len(),
         filter = ?config.filter,
         limit = ?config.limit,
-        "starting CRUST-Bench evaluation"
+        "starting CRUST-Bench evaluation (interface-aware mode)"
     );
 
     let mut results = Vec::new();
-    for (i, project_dir) in projects.iter().enumerate() {
-        info!(
-            project = %project_dir.file_name().unwrap_or_default().to_string_lossy(),
-            progress = format!("[{}/{}]", i + 1, projects.len()),
-            "starting project migration"
-        );
-        let result = run_project(project_dir, &config.migration_config).await;
-        info!(
-            project = %result.name,
-            compilation = result.compilation_success,
-            score = format!("{:.0}", result.idiomatic_score_avg),
-            time_ms = result.total_ms,
-            progress = format!("[{}/{}]", i + 1, projects.len()),
-            "completed project"
-        );
+    for (i, project) in projects.iter().enumerate() {
+        info!(project = %project.name, progress = format!("[{}/{}]", i + 1, projects.len()), "starting project");
+        let result = run_project(project, &config.migration_config).await;
+        let status = if result.tests_passed { "PASS" } else if result.compilation_success { "BUILD_OK" } else { "FAIL" };
+        info!(project = %result.name, status, score = format!("{:.0}", result.idiomatic_score_avg), llm_calls = result.llm_calls, time_ms = result.total_ms, progress = format!("[{}/{}]", i + 1, projects.len()), "completed project");
         results.push(result);
     }
 
     let total = results.len();
     let compiled = results.iter().filter(|r| r.compilation_success).count();
-    let passed = results.iter().filter(|r| r.tests_passed > 0).count();
-    let scores: Vec<f64> = results.iter().map(|r| r.idiomatic_score_avg).collect();
-    let avg_score = if scores.is_empty() {
-        0.0
+    let passed = results.iter().filter(|r| r.tests_passed).count();
+    let avg_score = if total > 0 {
+        results.iter().map(|r| r.idiomatic_score_avg).sum::<f64>() / total as f64
     } else {
-        scores.iter().sum::<f64>() / scores.len() as f64
+        0.0
     };
+    let total_llm_calls: u32 = results.iter().map(|r| r.llm_calls).sum();
+    let total_repair_iterations: u32 = results.iter().map(|r| r.repair_iterations).sum();
 
-    info!(
-        total,
-        compiled,
-        compilation_rate = format!(
-            "{:.1}%",
-            if total > 0 {
-                compiled as f64 / total as f64 * 100.0
-            } else {
-                0.0
-            }
-        ),
-        avg_score = format!("{:.1}", avg_score),
-        "CRUST-Bench evaluation complete"
-    );
+    info!(total, compiled, passed, total_llm_calls, "CRUST-Bench evaluation complete");
 
     Ok(CrustBenchReport {
         total_projects: total,
-        compilation_rate: if total > 0 {
-            compiled as f64 / total as f64
-        } else {
-            0.0
-        },
-        test_pass_rate: if total > 0 {
-            passed as f64 / total as f64
-        } else {
-            0.0
-        },
+        compilation_rate: if total > 0 { compiled as f64 / total as f64 } else { 0.0 },
+        test_pass_rate: if total > 0 { passed as f64 / total as f64 } else { 0.0 },
         avg_idiomatic_score: avg_score,
+        total_llm_calls,
+        total_repair_iterations,
         projects: results,
     })
 }
@@ -237,38 +693,52 @@ mod tests {
     #[test]
     fn test_discover_projects_empty() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("CBench")).unwrap();
+        std::fs::create_dir(tmp.path().join("RBench")).unwrap();
         let projects = discover_projects(tmp.path()).unwrap();
         assert!(projects.is_empty());
     }
 
     #[test]
-    fn test_discover_projects_with_c_files() {
+    fn test_discover_projects_matching() {
         let tmp = tempfile::tempdir().unwrap();
-        let proj = tmp.path().join("myproject");
-        std::fs::create_dir(&proj).unwrap();
-        std::fs::write(proj.join("main.c"), "int main() { return 0; }").unwrap();
-
+        let cb = tmp.path().join("CBench").join("my-project");
+        let rb = tmp.path().join("RBench").join("my_project");
+        std::fs::create_dir_all(&cb).unwrap();
+        std::fs::create_dir_all(&rb).unwrap();
+        std::fs::write(cb.join("main.c"), "int main() {}").unwrap();
         let projects = discover_projects(tmp.path()).unwrap();
         assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "my-project");
     }
 
-    #[tokio::test]
-    async fn test_run_project_simple() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("add.c"),
-            "int add(int a, int b) { return a + b; }",
-        )
-        .unwrap();
+    #[test]
+    fn test_parse_multi_file_single() {
+        let files = vec![(PathBuf::from("src/interfaces/foo.rs"), String::new())];
+        let output = "fn foo() -> i32 { 42 }";
+        let parsed = parse_multi_file_output(output, &files);
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].1.contains("fn foo()"));
+    }
 
-        let config = MigrationConfig {
-            anthropic_api_key: None,
-            generate_tests: false,
-            ..MigrationConfig::default()
-        };
-        let result = run_project(tmp.path(), &config).await;
-        assert!(!result.name.is_empty());
-        assert!(result.total_ms > 0);
+    #[test]
+    fn test_parse_multi_file_headers() {
+        let files = vec![
+            (PathBuf::from("src/interfaces/a.rs"), String::new()),
+            (PathBuf::from("src/interfaces/b.rs"), String::new()),
+        ];
+        let output = "// === a.rs ===\nfn a() {}\n// === b.rs ===\nfn b() {}";
+        let parsed = parse_multi_file_output(output, &files);
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[0].1.contains("fn a()"));
+        assert!(parsed[1].1.contains("fn b()"));
+    }
+
+    #[test]
+    fn test_count_unsafe() {
+        assert_eq!(count_unsafe("fn safe() {}"), 0);
+        assert_eq!(count_unsafe("unsafe fn foo() {}"), 1);
+        assert_eq!(count_unsafe("unsafe { ptr::read(x) } unsafe { }"), 2);
     }
 
     #[test]
@@ -278,13 +748,15 @@ mod tests {
             compilation_rate: 1.0,
             test_pass_rate: 1.0,
             avg_idiomatic_score: 90.0,
+            total_llm_calls: 3,
+            total_repair_iterations: 1,
             projects: vec![ProjectResult {
                 name: "test".to_string(),
                 c_loc: 100,
                 rust_loc: 80,
                 compilation_success: true,
-                tests_total: 5,
-                tests_passed: 5,
+                tests_passed: true,
+                test_output: None,
                 idiomatic_score_avg: 90.0,
                 unsafe_count: 0,
                 repair_iterations: 0,

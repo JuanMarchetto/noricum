@@ -195,10 +195,13 @@ fn check_api_key(state: &AppState, headers: &HeaderMap) -> Result<(), impl IntoR
             {
                 Ok(())
             }
-            _ => Err(error_response(
-                StatusCode::UNAUTHORIZED,
-                "invalid or missing API key",
-            )),
+            _ => {
+                tracing::warn!("failed authentication attempt (invalid or missing API key)");
+                Err(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid or missing API key",
+                ))
+            }
         }
     } else if state.is_public {
         // Require authentication when serving on non-localhost addresses

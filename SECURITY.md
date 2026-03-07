@@ -39,6 +39,7 @@
 | Large payload DoS | 10 MB input size limit on API and MCP servers |
 | Runaway migration process | 5-minute timeout on MCP async migration calls |
 | CORS abuse | Restrictive CORS (localhost-only default, env-configurable allowlist) |
+| X-Forwarded-For spoofing | Rate limiting uses `X-Forwarded-For` header to identify clients. When deployed behind a reverse proxy, configure the proxy to overwrite (not append to) this header with the true client IP. Without this, attackers can spoof the header to bypass per-IP rate limits. Mitigated by the localhost-only default binding. |
 | Source code exfiltration via LLM | Use `--no-llm` for sensitive code; review Anthropic data policies |
 
 ## Reporting Vulnerabilities
