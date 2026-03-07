@@ -57,6 +57,24 @@ enum Commands {
         /// Compare against a baseline and report regressions
         #[arg(long)]
         compare_baseline: Option<PathBuf>,
+        /// Ollama model name (forces Ollama provider instead of Anthropic)
+        #[arg(long)]
+        ollama_model: Option<String>,
+    },
+    /// Compare two baseline JSON files side-by-side
+    Compare {
+        /// Path to baseline A JSON file
+        #[arg(long)]
+        baseline_a: PathBuf,
+        /// Label for baseline A
+        #[arg(long, default_value = "A")]
+        label_a: String,
+        /// Path to baseline B JSON file
+        #[arg(long)]
+        baseline_b: PathBuf,
+        /// Label for baseline B
+        #[arg(long, default_value = "B")]
+        label_b: String,
     },
     /// Review behavioral equivalence between C source and Rust migration
     Review {
@@ -188,15 +206,23 @@ async fn main() {
             json,
             save_baseline,
             compare_baseline,
+            ollama_model,
         } => {
             commands::bench::cmd_bench(
                 &fixtures,
                 json,
                 save_baseline.as_deref(),
                 compare_baseline.as_deref(),
+                ollama_model,
             )
             .await
         }
+        Commands::Compare {
+            baseline_a,
+            baseline_b,
+            label_a,
+            label_b,
+        } => commands::compare::cmd_compare(&baseline_a, &label_a, &baseline_b, &label_b),
         Commands::Review {
             c_source,
             rust_source,
