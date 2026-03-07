@@ -143,8 +143,7 @@ pub async fn translate_chunked(
 ) -> Result<String, AgentError> {
     info!(
         chunks = chunks.len(),
-        model,
-        "starting chunked multi-pass translation"
+        model, "starting chunked multi-pass translation"
     );
 
     let mut accumulated_rust = Vec::new();
@@ -439,6 +438,9 @@ double baz(double x) {
     #[test]
     fn test_summary_empty() {
         let summary = build_structural_summary("");
-        assert!(summary.is_empty(), "empty source should produce empty summary");
+        assert!(
+            summary.is_empty(),
+            "empty source should produce empty summary"
+        );
     }
 }

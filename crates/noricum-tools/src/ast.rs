@@ -476,7 +476,10 @@ pub fn chunk_c_source(c_source: &str, target_chunk_lines: usize) -> Vec<CChunk> 
         // Add just the function signature (first line)
         let func_text = &c_source[func.start_byte..func.end_byte];
         if let Some(first_line) = func_text.lines().next() {
-            shared_lines.push(format!("{} // ...", first_line.trim().trim_end_matches('{')));
+            shared_lines.push(format!(
+                "{} // ...",
+                first_line.trim().trim_end_matches('{')
+            ));
         }
         pos = func.end_byte;
     }
@@ -543,8 +546,7 @@ pub fn extract_rust_signatures(rust_source: &str) -> Vec<String> {
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn "))
-                && trimmed.contains('(')
+            (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ")) && trimmed.contains('(')
         })
         .map(|line| {
             let trimmed = line.trim();
@@ -856,7 +858,12 @@ int f3(int x) {
 ";
         // Each function is 11 lines. With target=25, f1+f2 fit (22), f3 goes to chunk 2
         let chunks = chunk_c_source(source, 25);
-        assert_eq!(chunks.len(), 2, "should produce 2 chunks, got {}", chunks.len());
+        assert_eq!(
+            chunks.len(),
+            2,
+            "should produce 2 chunks, got {}",
+            chunks.len()
+        );
         assert_eq!(chunks[0].function_names.len(), 2);
         assert_eq!(chunks[1].function_names.len(), 1);
         // All chunks share the same context
