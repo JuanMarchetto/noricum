@@ -1,0 +1,28 @@
+[package]
+name = "noricum-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+noricum-tools = { path = "../crates/noricum-tools" }
+noricum-validation = { path = "../crates/noricum-validation" }
+
+[[bin]]
+name = "fuzz_classify_difficulty"
+path = "fuzz_targets/classify_difficulty.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_idiomatic_score"
+path = "fuzz_targets/idiomatic_score.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_rule_translate"
+path = "fuzz_targets/rule_translate.rs"
+doc = false

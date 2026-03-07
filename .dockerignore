@@ -1,0 +1,15 @@
+target/
+.git/
+.github/
+.noricum-cache/
+.env
+*.md
+!README.md
+docs/
+blog/
+reviews/
+patterns/
+tests/
+benches/
+scripts/
+lcov.info

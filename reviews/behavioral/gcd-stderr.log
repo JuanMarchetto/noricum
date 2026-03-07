@@ -1,0 +1,5 @@
+[2m2026-03-07T03:50:00.715029Z[0m [32m INFO[0m [2mnoricum::commands::review[0m[2m:[0m starting behavioral equivalence review [3mc_path[0m[2m=[0mtests/fixtures/simple/gcd.c [3mrust_path[0m[2m=[0moutput/simple/gcd.rs
+[2m2026-03-07T03:50:00.947316Z[0m [32m INFO[0m [2mnoricum_tools::diff_test[0m[2m:[0m differential test complete [3mpassed[0m[2m=[0mtrue [3mc_len[0m[2m=[0m13 [3mrust_len[0m[2m=[0m13 [3mc_exit[0m[2m=[0m0 [3mrust_exit[0m[2m=[0m0
+[2m2026-03-07T03:50:00.981428Z[0m [32m INFO[0m [2mnoricum_agents::providers[0m[2m:[0m selected model [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0mclaude-haiku-4-5-20251001 [3mdifficulty[0m[2m=[0mEasy
+[2m2026-03-07T03:50:00.981485Z[0m [32m INFO[0m [2mnoricum_agents::behavioral_review[0m[2m:[0m starting behavioral equivalence review [3mc_lines[0m[2m=[0m24 [3mrust_lines[0m[2m=[0m20 [3mmodel[0m[2m=[0m"claude-haiku-4-5-20251001"
+[2m2026-03-07T03:50:22.229417Z[0m [32m INFO[0m [2mnoricum_agents::behavioral_review[0m[2m:[0m behavioral review complete [3mverdict[0m[2m=[0mEQUIVALENT [3mconfidence[0m[2m=[0m98
