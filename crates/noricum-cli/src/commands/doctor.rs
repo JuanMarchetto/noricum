@@ -54,6 +54,44 @@ pub fn cmd_doctor() -> Result<()> {
         println!("NOT FOUND");
     }
 
+    // Check Ollama
+    print!("  Ollama: ");
+    match std::process::Command::new("ollama")
+        .arg("--version")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stderr);
+            let ver_str = version.trim();
+            let ver_display = if ver_str.is_empty() {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            } else {
+                ver_str.to_string()
+            };
+            println!("OK ({ver_display})");
+
+            // Check installed models
+            print!("  Ollama models: ");
+            match std::process::Command::new("ollama").arg("list").output() {
+                Ok(list_output) if list_output.status.success() => {
+                    let list_str = String::from_utf8_lossy(&list_output.stdout);
+                    let model_count = list_str
+                        .lines()
+                        .skip(1)
+                        .filter(|l| !l.trim().is_empty())
+                        .count();
+                    if model_count == 0 {
+                        println!("none (run: ollama pull qwen2.5-coder:32b)");
+                    } else {
+                        println!("{model_count} model(s) installed");
+                    }
+                }
+                _ => println!("could not list models"),
+            }
+        }
+        _ => println!("NOT FOUND (install from: https://ollama.ai)"),
+    }
+
     println!();
     println!(
         "  ANTHROPIC_API_KEY: {}",

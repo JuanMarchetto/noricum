@@ -34,7 +34,7 @@ pub struct MigrationConfig {
     pub anthropic_api_key: Option<String>,
     /// Ollama URL override. If `None`, uses the default `http://localhost:11434`.
     pub ollama_url: Option<String>,
-    /// Ollama model name override. Defaults to "llama3.2".
+    /// Ollama model name override. Defaults to "qwen2.5-coder:32b".
     pub ollama_model: Option<String>,
     /// Maximum number of repair iterations before falling back to unsafe.
     pub max_repair_iterations: u32,
@@ -106,7 +106,7 @@ impl From<&MigrationConfig> for ProviderConfig {
             ollama_model: config
                 .ollama_model
                 .clone()
-                .unwrap_or_else(|| "llama3.2".to_string()),
+                .unwrap_or_else(|| "qwen2.5-coder:32b".to_string()),
         }
     }
 }
@@ -203,6 +203,46 @@ fn effective_repair_iterations(configured_max: u32, c_lines: usize) -> u32 {
     } else {
         configured_max
     }
+}
+
+/// Derive pattern tags from C source for RAG indexing.
+///
+/// Scans for common C patterns (pointers, malloc, structs, etc.) and returns
+/// matching tag strings for `PatternStore` relevance scoring.
+fn derive_pattern_tags(c_source: &str) -> Vec<String> {
+    let keywords = [
+        ("malloc", "memory"),
+        ("free", "memory"),
+        ("calloc", "memory"),
+        ("realloc", "memory"),
+        ("struct ", "struct"),
+        ("enum ", "enum"),
+        ("typedef", "typedef"),
+        ("FILE", "file_io"),
+        ("fopen", "file_io"),
+        ("printf", "printf"),
+        ("strcmp", "string"),
+        ("strcpy", "string"),
+        ("strlen", "string"),
+        ("strdup", "string"),
+        ("NULL", "null"),
+        ("->", "pointer"),
+        ("*)", "pointer"),
+        ("void*", "pointer"),
+        ("for (", "loop"),
+        ("while (", "loop"),
+        ("switch (", "switch"),
+    ];
+
+    let mut tags: Vec<String> = keywords
+        .iter()
+        .filter(|(kw, _)| c_source.contains(kw))
+        .map(|(_, tag)| tag.to_string())
+        .collect();
+
+    tags.sort();
+    tags.dedup();
+    tags
 }
 
 /// Simple file-based translation cache.
@@ -818,11 +858,24 @@ pub async fn migrate_file(
         }
     }
 
-    // --- Cache successful translations ---
+    // --- Cache successful translations + auto-add to RAG store ---
     if unit.state == MigrationState::Validated
         && let Some(ref rust) = unit.rust_output
     {
         cache::put(&unit.c_source, rust);
+
+        // Auto-add successful migration as a RAG pattern for future context
+        let tags = derive_pattern_tags(&unit.c_source);
+        let pattern = noricum_ir::pattern_store::MigrationPattern {
+            name: name.clone(),
+            c_pattern: unit.c_source.clone(),
+            rust_pattern: rust.clone(),
+            tags,
+            usage_count: 0,
+        };
+        let mut store = PatternStore::load_seed_patterns();
+        store.add_pattern(pattern);
+        debug!(function = %name, "added successful migration to RAG pattern store");
     }
 
     // --- Fuzz testing (after validation passes) ---

@@ -1224,6 +1224,7 @@ dependencies = [
  "axum",
  "clap",
  "http-body-util",
+ "noricum-agents",
  "noricum-core",
  "noricum-ir",
  "noricum-tools",
@@ -1272,6 +1273,7 @@ dependencies = [
 name = "noricum-mcp"
 version = "0.1.0"
 dependencies = [
+ "noricum-agents",
  "noricum-core",
  "noricum-tools",
  "noricum-validation",
