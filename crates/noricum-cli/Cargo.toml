@@ -10,6 +10,7 @@ name = "noricum"
 path = "src/main.rs"
 
 [dependencies]
+noricum-agents = { workspace = true }
 noricum-core = { workspace = true }
 noricum-ir = { workspace = true }
 noricum-tools = { workspace = true }
