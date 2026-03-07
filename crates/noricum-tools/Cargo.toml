@@ -1,5 +1,6 @@
 [package]
 name = "noricum-tools"
+description = "Tool implementations for C compilation, testing, and validation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

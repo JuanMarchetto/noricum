@@ -427,6 +427,138 @@ where
     }
 }
 
+/// A chunk of C source for multi-pass translation.
+///
+/// Each chunk contains the shared context (types, globals, includes) plus a
+/// subset of function bodies. The shared context is the same across all chunks.
+#[derive(Debug, Clone)]
+pub struct CChunk {
+    /// Shared context: #includes, typedefs, struct/enum declarations, globals.
+    pub shared_context: String,
+    /// Concatenated function source code for this chunk.
+    pub functions_source: String,
+    /// Names of functions in this chunk.
+    pub function_names: Vec<String>,
+    /// Line count of functions_source.
+    pub line_count: usize,
+}
+
+/// Split a large C source file into chunks for multi-pass translation.
+///
+/// Each chunk carries the full shared context (includes, types, globals)
+/// and a subset of function bodies, grouped to stay near `target_chunk_lines`.
+pub fn chunk_c_source(c_source: &str, target_chunk_lines: usize) -> Vec<CChunk> {
+    let functions = extract_c_functions(c_source);
+
+    if functions.is_empty() {
+        return vec![CChunk {
+            shared_context: c_source.to_string(),
+            functions_source: String::new(),
+            function_names: Vec::new(),
+            line_count: c_source.lines().count(),
+        }];
+    }
+
+    // Build shared_context = everything NOT inside function bodies
+    let mut shared_lines = Vec::new();
+    let source_bytes = c_source.as_bytes();
+    let mut pos = 0;
+    for func in &functions {
+        if func.start_byte > pos {
+            let before = &c_source[pos..func.start_byte];
+            for line in before.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    shared_lines.push(line.to_string());
+                }
+            }
+        }
+        // Add just the function signature (first line)
+        let func_text = &c_source[func.start_byte..func.end_byte];
+        if let Some(first_line) = func_text.lines().next() {
+            shared_lines.push(format!(
+                "{} // ...",
+                first_line.trim().trim_end_matches('{')
+            ));
+        }
+        pos = func.end_byte;
+    }
+    // Anything after the last function
+    if pos < source_bytes.len() {
+        let after = &c_source[pos..];
+        for line in after.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                shared_lines.push(line.to_string());
+            }
+        }
+    }
+    let shared_context = shared_lines.join("\n");
+
+    // Group functions into chunks of ~target_chunk_lines
+    let mut chunks = Vec::new();
+    let mut current_source = String::new();
+    let mut current_names = Vec::new();
+    let mut current_lines = 0usize;
+
+    for func in &functions {
+        let func_text = &c_source[func.start_byte..func.end_byte];
+        let func_lines = func_text.lines().count();
+
+        if !current_names.is_empty() && current_lines + func_lines > target_chunk_lines {
+            chunks.push(CChunk {
+                shared_context: shared_context.clone(),
+                functions_source: current_source.clone(),
+                function_names: current_names.clone(),
+                line_count: current_lines,
+            });
+            current_source.clear();
+            current_names.clear();
+            current_lines = 0;
+        }
+
+        if !current_source.is_empty() {
+            current_source.push_str("\n\n");
+        }
+        current_source.push_str(func_text);
+        current_names.push(func.name.clone());
+        current_lines += func_lines;
+    }
+
+    if !current_names.is_empty() {
+        chunks.push(CChunk {
+            shared_context,
+            functions_source: current_source,
+            function_names: current_names,
+            line_count: current_lines,
+        });
+    }
+
+    chunks
+}
+
+/// Extract function signatures from Rust source code for dependency context.
+///
+/// Looks for `pub fn` and `fn` lines, returning them as context strings
+/// that can be injected into translation prompts for dependent files.
+pub fn extract_rust_signatures(rust_source: &str) -> Vec<String> {
+    rust_source
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ")) && trimmed.contains('(')
+        })
+        .map(|line| {
+            let trimmed = line.trim();
+            if let Some(brace) = trimmed.find('{') {
+                trimmed[..brace].trim().to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,5 +809,87 @@ int f() {
             Difficulty::Easy,
             "string content should not affect classification"
         );
+    }
+
+    #[test]
+    fn test_chunk_short_source_single_chunk() {
+        let source = "int add(int a, int b) { return a + b; }\n";
+        let chunks = chunk_c_source(source, 500);
+        assert_eq!(chunks.len(), 1, "short source should produce 1 chunk");
+        assert_eq!(chunks[0].function_names, vec!["add"]);
+    }
+
+    #[test]
+    fn test_chunk_multiple_functions() {
+        let source = "\
+int f1(int x) {
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    int d = 4;
+    int e = 5;
+    int ff = 6;
+    int g = 7;
+    int h = 8;
+    return x + a + b + c + d + e + ff + g + h;
+}
+int f2(int x) {
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    int d = 4;
+    int e = 5;
+    int ff = 6;
+    int g = 7;
+    int h = 8;
+    return x + a + b + c + d + e + ff + g + h;
+}
+int f3(int x) {
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    int d = 4;
+    int e = 5;
+    int ff = 6;
+    int g = 7;
+    int h = 8;
+    return x + a + b + c + d + e + ff + g + h;
+}
+";
+        // Each function is 11 lines. With target=25, f1+f2 fit (22), f3 goes to chunk 2
+        let chunks = chunk_c_source(source, 25);
+        assert_eq!(
+            chunks.len(),
+            2,
+            "should produce 2 chunks, got {}",
+            chunks.len()
+        );
+        assert_eq!(chunks[0].function_names.len(), 2);
+        assert_eq!(chunks[1].function_names.len(), 1);
+        // All chunks share the same context
+        assert_eq!(chunks[0].shared_context, chunks[1].shared_context);
+    }
+
+    #[test]
+    fn test_extract_rust_signatures_basic() {
+        let rust = "\
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn helper(x: i32) -> i32 {
+    x * 2
+}
+";
+        let sigs = extract_rust_signatures(rust);
+        assert_eq!(sigs.len(), 2);
+        assert!(sigs[0].contains("pub fn add"));
+        assert!(sigs[1].contains("fn helper"));
+    }
+
+    #[test]
+    fn test_extract_rust_signatures_empty() {
+        let sigs = extract_rust_signatures("let x = 5;\nstruct Foo { bar: i32 }");
+        assert!(sigs.is_empty());
     }
 }

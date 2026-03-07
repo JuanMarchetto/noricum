@@ -10,9 +10,10 @@
 
 use std::io::{self, BufRead, Write};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Maximum input source size for MCP tool calls: 10 MB.
 const MAX_MCP_SOURCE_SIZE: usize = 10 * 1024 * 1024;
@@ -20,9 +21,58 @@ const MAX_MCP_SOURCE_SIZE: usize = 10 * 1024 * 1024;
 /// Migration call timeout: 5 minutes.
 const MIGRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Maximum MCP tool calls per minute.
+const MAX_CALLS_PER_MINUTE: u64 = 60;
+
 /// Static Tokio runtime shared across MCP tool calls.
-static MCP_RUNTIME: LazyLock<tokio::runtime::Runtime> =
-    LazyLock::new(|| tokio::runtime::Runtime::new().expect("failed to create MCP tokio runtime"));
+///
+/// Uses `Option` so that a runtime creation failure is surfaced as an error
+/// to callers rather than panicking in library code.
+static MCP_RUNTIME: LazyLock<Option<tokio::runtime::Runtime>> =
+    LazyLock::new(|| match tokio::runtime::Runtime::new() {
+        Ok(rt) => Some(rt),
+        Err(e) => {
+            error!(error = %e, "failed to create MCP tokio runtime");
+            None
+        }
+    });
+
+/// Rate limit tracking: call count in the current window.
+static RATE_LIMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Rate limit tracking: start of the current 60-second window (unix secs).
+static RATE_LIMIT_WINDOW: AtomicU64 = AtomicU64::new(0);
+
+/// Get the shared Tokio runtime, returning an error instead of panicking.
+fn mcp_runtime() -> io::Result<&'static tokio::runtime::Runtime> {
+    MCP_RUNTIME
+        .as_ref()
+        .ok_or_else(|| io::Error::other("MCP tokio runtime unavailable"))
+}
+
+/// Check whether the current request exceeds the per-minute rate limit.
+fn check_rate_limit() -> Result<(), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let window = RATE_LIMIT_WINDOW.load(Ordering::Relaxed);
+    if now.saturating_sub(window) >= 60 {
+        RATE_LIMIT_WINDOW.store(now, Ordering::Relaxed);
+        RATE_LIMIT_COUNT.store(1, Ordering::Relaxed);
+        Ok(())
+    } else {
+        let count = RATE_LIMIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if count > MAX_CALLS_PER_MINUTE {
+            warn!(count, "MCP rate limit exceeded");
+            Err(format!(
+                "rate limit exceeded: max {MAX_CALLS_PER_MINUTE} tool calls per minute"
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 use crate::protocol::{
     INVALID_PARAMS, InitializeResult, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND,
@@ -228,6 +278,10 @@ fn handle_tools_list(id: serde_json::Value) -> JsonRpcResponse {
 
 /// Handle `tools/call` request: dispatch to the appropriate tool handler.
 fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRpcResponse {
+    if let Err(msg) = check_rate_limit() {
+        return JsonRpcResponse::error(id, -32000, msg);
+    }
+
     let call_params: ToolCallParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(e) => {
@@ -329,7 +383,11 @@ fn tool_migrate_function(source: Option<String>) -> ToolResult {
     // Try async LLM pipeline with timeout, fall back to sync
     let unit = if std::env::var("ANTHROPIC_API_KEY").is_ok() {
         let config = noricum_core::MigrationConfig::default();
-        match MCP_RUNTIME.block_on(async {
+        let runtime = match mcp_runtime() {
+            Ok(rt) => rt,
+            Err(e) => return ToolResult::error(format!("runtime initialization failed: {e}")),
+        };
+        match runtime.block_on(async {
             tokio::time::timeout(
                 MIGRATION_TIMEOUT,
                 noricum_core::orchestrator::migrate_file(&c_file, &config),
