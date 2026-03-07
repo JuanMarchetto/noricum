@@ -4,9 +4,9 @@
 
 [![CI](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-296%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
+[![Tests](https://img.shields.io/badge/tests-321%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
-[![LOC](https://img.shields.io/badge/LOC-~13%2C200-blue)](https://github.com/JuanMarchetto/noricum)
+[![LOC](https://img.shields.io/badge/LOC-~16%2C000-blue)](https://github.com/JuanMarchetto/noricum)
 
 <!-- Demo GIF: replace with actual recording -->
 <!-- ![Noricum Demo](demo.gif) -->
@@ -84,7 +84,7 @@ Real migration results on test fixtures (LLM-powered pipeline):
 | Metric | C2Rust Alone | Noricum |
 |--------|-------------|---------|
 | Translation | Mechanical AST lowering | LLM-powered idiomatic |
-| Unsafe blocks | Wraps everything in `unsafe` | 0 across 13+ files |
+| Unsafe blocks | Wraps everything in `unsafe` | 0 across 14 files |
 | Diff test verification | None | Byte-exact + exit code automated |
 | Repair loop | None | Up to 5 iterations with diff feedback |
 | Avg. idiomatic score | N/A | 89-100/100 |

@@ -67,14 +67,10 @@ pub async fn repair_function_with_temperature(
         return Ok(rust_source.to_string());
     }
 
-    // Increase temperature on later iterations to try different approaches
+    // Increase temperature on later iterations to try different approaches.
+    // Uses a gentler ramp (0.1 step) to avoid destabilizing repairs.
     let base = base_temperature.unwrap_or(0.2);
-    let temperature = match iteration {
-        1 => base,
-        2 => (base + 0.2).min(1.0),
-        3 => (base + 0.4).min(1.0),
-        _ => (base + 0.6).min(1.0),
-    };
+    let temperature = (base + (iteration.saturating_sub(1) as f64) * 0.1).min(1.0);
 
     let mut user_message = String::new();
 

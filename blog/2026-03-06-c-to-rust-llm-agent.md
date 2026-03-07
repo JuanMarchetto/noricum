@@ -34,7 +34,7 @@ If any step fails, the output goes back to the LLM with the error message for re
 
 ## The Results
 
-I tested Noricum against 13 C files, from trivial (13 LOC) to complex (520 LOC):
+I tested Noricum against 14 C files, from trivial (13 LOC) to complex (1,686 LOC):
 
 | Source | Lines | Score | Unsafe Blocks | Diff Test |
 |--------|-------|-------|---------------|-----------|
@@ -100,7 +100,7 @@ No `unsafe`, no raw pointers, no `libc` — just idiomatic Rust.
 
 ## The Architecture
 
-Noricum is a 7-crate Rust workspace (~13,200 LOC):
+Noricum is a 7-crate Rust workspace (~16,000 LOC):
 
 - **noricum-core** — Orchestrator with 9-stage state machine
 - **noricum-agents** — LLM agents (analysis, translation, repair, test gen) via rig-rs

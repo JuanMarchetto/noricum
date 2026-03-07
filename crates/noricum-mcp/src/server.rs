@@ -335,6 +335,21 @@ fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRp
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let tool_name = call_params.name.clone();
+    let input_size: usize = call_params
+        .arguments
+        .as_object()
+        .map(|m| {
+            m.values()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.len())
+                .sum()
+        })
+        .unwrap_or(0);
+
+    info!(tool = %tool_name, input_bytes = input_size, "MCP tool call started");
+
+    let start = std::time::Instant::now();
     let result = match call_params.name.as_str() {
         "migrate_function" => tool_migrate_function(source),
         "analyze_function" => tool_analyze_function(source),
@@ -345,6 +360,22 @@ fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRp
         "behavioral_review" => tool_behavioral_review(c_source, rust_source),
         other => ToolResult::error(format!("unknown tool: {other}")),
     };
+    let elapsed_ms = start.elapsed().as_millis();
+
+    if result.is_error {
+        warn!(
+            tool = %tool_name,
+            elapsed_ms = elapsed_ms,
+            "MCP tool call failed"
+        );
+    } else {
+        info!(
+            tool = %tool_name,
+            elapsed_ms = elapsed_ms,
+            output_bytes = result.content.first().map_or(0, |c| c.text.len()),
+            "MCP tool call completed"
+        );
+    }
 
     match serde_json::to_value(result) {
         Ok(val) => JsonRpcResponse::success(id, val),

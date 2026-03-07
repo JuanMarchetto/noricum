@@ -189,14 +189,29 @@ fn check_api_key(state: &AppState, headers: &HeaderMap) -> Result<(), impl IntoR
                     .and_then(|v| v.strip_prefix("Bearer "))
             });
         match provided {
-            Some(key)
-                if key.len() == expected.len()
-                    && bool::from(key.as_bytes().ct_eq(expected.as_bytes())) =>
-            {
-                Ok(())
+            Some(key) => {
+                // Pad both keys to the same length to avoid leaking key length via timing.
+                let max_len = key.len().max(expected.len());
+                let mut padded_key = vec![0u8; max_len];
+                let mut padded_expected = vec![0u8; max_len];
+                padded_key[..key.len()].copy_from_slice(key.as_bytes());
+                padded_expected[..expected.len()].copy_from_slice(expected.as_bytes());
+
+                // Length equality must also be checked in constant time.
+                let len_match = key.len() == expected.len();
+                let ct_match = bool::from(padded_key.ct_eq(&padded_expected));
+                if len_match && ct_match {
+                    Ok(())
+                } else {
+                    tracing::warn!("failed authentication attempt (invalid API key)");
+                    Err(error_response(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid or missing API key",
+                    ))
+                }
             }
             _ => {
-                tracing::warn!("failed authentication attempt (invalid or missing API key)");
+                tracing::warn!("failed authentication attempt (missing API key)");
                 Err(error_response(
                     StatusCode::UNAUTHORIZED,
                     "invalid or missing API key",

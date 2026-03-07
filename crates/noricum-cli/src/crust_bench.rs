@@ -16,8 +16,22 @@ use tracing::{debug, info, warn};
 const TRANSLATION_PREAMBLE: &str = include_str!("../../../prompts/crust_bench_translation.md");
 const REPAIR_PREAMBLE: &str = include_str!("../../../prompts/crust_bench_repair.md");
 
-/// Maximum repair iterations per project.
-const MAX_REPAIR_ITERATIONS: u32 = 5;
+/// Base repair iterations for simple (single-module) projects.
+const BASE_REPAIR_ITERATIONS: u32 = 5;
+
+/// Maximum repair iterations for complex multi-module projects.
+const MAX_REPAIR_ITERATIONS: u32 = 10;
+
+/// Temperature step per repair iteration (slower ramp = more stable repairs).
+const REPAIR_TEMP_STEP: f64 = 0.10;
+
+/// Compute the effective max repair iterations based on project complexity.
+/// Multi-module projects get more iterations since failures are often localized.
+fn effective_max_repairs(interface_count: usize, c_loc: u32) -> u32 {
+    let module_bonus = (interface_count / 3) as u32;
+    let size_bonus = if c_loc > 2000 { 2 } else if c_loc > 1000 { 1 } else { 0 };
+    (BASE_REPAIR_ITERATIONS + module_bonus + size_bonus).min(MAX_REPAIR_ITERATIONS)
+}
 
 /// Configuration for CRUST-Bench evaluation.
 pub struct CrustBenchConfig {
@@ -212,6 +226,101 @@ fn run_cargo_test(project_dir: &Path) -> (bool, String) {
     }
 }
 
+/// Run cargo test per test binary, collecting per-binary pass/fail info.
+/// Returns (all_pass, combined_output, per-binary failures).
+fn run_cargo_test_per_binary(project_dir: &Path) -> (bool, String, Vec<TestBinaryResult>) {
+    let result = std::process::Command::new("cargo")
+        .args(["test", "--no-run", "--message-format=json"])
+        .current_dir(project_dir)
+        .env("CARGO_TERM_COLOR", "never")
+        .output();
+
+    let test_binaries: Vec<String> = match &result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .filter_map(|line| {
+                    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+                    if v.get("reason")?.as_str()? == "compiler-artifact"
+                        && v.get("profile")?.get("test")?.as_bool()?
+                    {
+                        let exec = v.get("executable")?.as_str()?;
+                        Some(exec.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    };
+
+    // Fallback: if we can't discover individual binaries, run all at once
+    if test_binaries.is_empty() {
+        let (ok, output) = run_cargo_test(project_dir);
+        return (ok, output, Vec::new());
+    }
+
+    let mut all_pass = true;
+    let mut combined_output = String::new();
+    let mut binary_results = Vec::new();
+
+    for bin_path in &test_binaries {
+        let bin_name = Path::new(bin_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        let res = std::process::Command::new(bin_path)
+            .args(["--test-threads=1"])
+            .current_dir(project_dir)
+            .env("CARGO_TERM_COLOR", "never")
+            .output();
+
+        match res {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let bin_output = format!("--- {bin_name} ---\n{stderr}\n{stdout}\n");
+                let passed = output.status.success();
+
+                if !passed {
+                    all_pass = false;
+                }
+
+                binary_results.push(TestBinaryResult {
+                    name: bin_name,
+                    passed,
+                    output: bin_output.clone(),
+                });
+                combined_output.push_str(&bin_output);
+            }
+            Err(e) => {
+                all_pass = false;
+                let msg = format!("--- {bin_name} ---\nFailed to run: {e}\n");
+                binary_results.push(TestBinaryResult {
+                    name: bin_name,
+                    passed: false,
+                    output: msg.clone(),
+                });
+                combined_output.push_str(&msg);
+            }
+        }
+    }
+
+    (all_pass, combined_output, binary_results)
+}
+
+/// Result from running a single test binary.
+#[derive(Debug, Clone)]
+struct TestBinaryResult {
+    name: String,
+    passed: bool,
+    output: String,
+}
+
 fn run_cargo_build(project_dir: &Path) -> (bool, String) {
     let result = std::process::Command::new("cargo")
         .arg("build")
@@ -233,7 +342,50 @@ fn count_lines(s: &str) -> u32 {
 }
 
 fn count_unsafe(rust_source: &str) -> u32 {
-    rust_source.matches("unsafe").count() as u32
+    noricum_tools::compiler::count_unsafe_blocks(rust_source)
+}
+
+/// Build a translation prompt for a single module (per-module mode).
+/// `target` is the interface file to implement; `other_interfaces` provides
+/// the signatures of sibling modules as read-only context.
+fn build_single_module_prompt(
+    c_source: &str,
+    target: &(PathBuf, String),
+    other_interfaces: &[(PathBuf, String)],
+) -> String {
+    let mut prompt = String::new();
+
+    prompt.push_str("## C Source Code\n<c_source>\n");
+    prompt.push_str(c_source);
+    prompt.push_str("\n</c_source>\n\n");
+
+    let filename = target.0.file_name().unwrap_or_default().to_string_lossy();
+    prompt.push_str(&format!(
+        "## Target: implement {filename}\n\
+         Replace every `unimplemented!()` with a correct implementation. \
+         Do NOT change any function signatures, struct definitions, or field types.\n\n\
+         <rust_interface>\n{}\n</rust_interface>\n\n",
+        target.1
+    ));
+
+    if !other_interfaces.is_empty() {
+        prompt.push_str(
+            "## Other module interfaces (read-only context — do NOT implement these, \
+             but you may call their public functions):\n",
+        );
+        for (path, content) in other_interfaces {
+            let other_name = path.file_name().unwrap_or_default().to_string_lossy();
+            prompt.push_str(&format!(
+                "### {other_name}\n<rust_interface>\n{content}\n</rust_interface>\n\n"
+            ));
+        }
+    }
+
+    prompt.push_str(&format!(
+        "Output ONLY the complete Rust implementation for `{filename}`. No explanations."
+    ));
+
+    prompt
 }
 
 fn build_translation_prompt(c_source: &str, interface_skeletons: &[(PathBuf, String)]) -> String {
@@ -263,6 +415,24 @@ fn build_translation_prompt(c_source: &str, interface_skeletons: &[(PathBuf, Str
     );
 
     prompt
+}
+
+/// Select model for a single module based on its interface LOC,
+/// using a cheaper model when the module is small.
+fn select_module_model(interface_loc: u32, config: &MigrationConfig) -> String {
+    if config.ollama_model.is_some() {
+        return config
+            .ollama_model
+            .as_deref()
+            .unwrap_or("qwen2.5-coder:32b")
+            .to_string();
+    }
+    // Per-module: use Haiku for small modules, Sonnet for medium
+    match interface_loc {
+        0..=100 => "claude-haiku-4-5-20251001".to_string(),
+        101..=500 => "claude-sonnet-4-6".to_string(),
+        _ => "claude-opus-4-6".to_string(),
+    }
 }
 
 fn build_repair_prompt(
@@ -305,6 +475,65 @@ fn build_repair_prompt(
     }
 
     prompt.push_str("Fix ALL errors. Output the complete corrected Rust file. No explanations.");
+
+    prompt
+}
+
+/// Build a targeted repair prompt that focuses on specific failing test binaries.
+/// This gives the LLM more focused feedback instead of the full cargo test output.
+fn build_targeted_repair_prompt(
+    c_source: &str,
+    interface_skeletons: &[(PathBuf, String)],
+    current_impl: &str,
+    failed_tests: &[TestBinaryResult],
+    iteration: u32,
+    max_iterations: u32,
+) -> String {
+    let mut prompt = String::new();
+
+    prompt.push_str(&format!(
+        "## Repair iteration {iteration}/{max_iterations}\n\n"
+    ));
+
+    prompt.push_str(&format!(
+        "## Failing tests ({} of {} binaries failed)\n",
+        failed_tests.len(),
+        failed_tests.len() // We only pass the failed ones
+    ));
+
+    for fail in failed_tests {
+        let truncated = if fail.output.len() > 3000 {
+            &fail.output[..3000]
+        } else {
+            &fail.output
+        };
+        prompt.push_str(&format!(
+            "### Test binary: {}\n```\n{}\n```\n\n",
+            fail.name, truncated
+        ));
+    }
+
+    prompt.push_str("## Current Rust implementation\n```rust\n");
+    prompt.push_str(current_impl);
+    prompt.push_str("\n```\n\n");
+
+    prompt.push_str("## Original C source\n<c_source>\n");
+    prompt.push_str(c_source);
+    prompt.push_str("\n</c_source>\n\n");
+
+    prompt.push_str("## Interface contract (signatures MUST NOT change)\n");
+    for (path, content) in interface_skeletons {
+        let filename = path.file_name().unwrap_or_default().to_string_lossy();
+        prompt.push_str(&format!(
+            "<rust_interface>\n// {filename}\n{content}\n</rust_interface>\n\n"
+        ));
+    }
+
+    prompt.push_str(
+        "Focus on fixing the specific failing test binaries listed above. \
+         Analyze the test names and error messages to identify which module(s) need repair. \
+         Fix ALL errors. Output the complete corrected Rust file. No explanations.",
+    );
 
     prompt
 }
@@ -455,62 +684,114 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
         Err(e) => return make_error_result(name, c_loc, start, 0, format!("no LLM: {e}")),
     };
 
-    let model = select_model(c_loc, config);
+    let max_repairs = effective_max_repairs(interface_files.len(), c_loc);
+    let use_per_module = interface_files.len() > 1;
     let mut llm_calls = 0u32;
     let mut repair_iterations = 0u32;
 
-    // Step 5: Translation
-    let user_prompt = build_translation_prompt(&c_source, &interface_files);
-    let max_tokens = ((c_source.len() as u64 / 4) * 3).clamp(8192, 65536);
+    // Step 5: Translation — per-module for multi-file projects, single-shot for single-file
+    if use_per_module {
+        info!(
+            project = %name,
+            c_loc,
+            interfaces = interface_files.len(),
+            "translating per-module (cost-optimized)"
+        );
+        for (idx, target) in interface_files.iter().enumerate() {
+            let others: Vec<_> = interface_files
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != idx)
+                .map(|(_, f)| f.clone())
+                .collect();
 
-    info!(project = %name, model = %model, c_loc, interfaces = interface_files.len(), "translating");
+            let iface_loc = count_lines(&target.1);
+            let module_model = select_module_model(iface_loc, config);
+            let module_prompt = build_single_module_prompt(&c_source, target, &others);
+            let module_tokens = ((target.1.len() as u64 / 4) * 3).clamp(4096, 32768);
+            let module_name = target.0.file_name().unwrap_or_default().to_string_lossy();
 
-    let translation = match client
-        .run_prompt(&model, TRANSLATION_PREAMBLE, 0.3, max_tokens, &user_prompt)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return make_error_result(name, c_loc, start, 1, format!("translation failed: {e}"));
+            info!(
+                project = %name,
+                module = %module_name,
+                model = %module_model,
+                iface_loc,
+                progress = format!("[{}/{}]", idx + 1, interface_files.len()),
+                "translating module"
+            );
+
+            match client
+                .run_prompt(&module_model, TRANSLATION_PREAMBLE, 0.3, module_tokens, &module_prompt)
+                .await
+            {
+                Ok(response) => {
+                    llm_calls += 1;
+                    let code = extract_rust_code(&response);
+                    let dest = workdir.join("src").join(module_name.as_ref());
+                    let _ = std::fs::write(&dest, &code);
+                }
+                Err(e) => {
+                    llm_calls += 1;
+                    warn!(project = %name, module = %module_name, error = %e, "module translation failed");
+                }
+            }
         }
-    };
-    llm_calls += 1;
+    } else {
+        let model = select_model(c_loc, config);
+        let user_prompt = build_translation_prompt(&c_source, &interface_files);
+        let max_tokens = ((c_source.len() as u64 / 4) * 3).clamp(8192, 65536);
 
-    // Step 6: Write to src/<module>.rs (where lib.rs expects pub mod <module>;)
-    let parsed_files = parse_multi_file_output(&translation, &interface_files);
-    let mut current_impl = write_and_read_impls(&workdir, &parsed_files, &interface_files);
+        info!(project = %name, model = %model, c_loc, interfaces = interface_files.len(), "translating");
 
-    if parsed_files.is_empty() && !interface_files.is_empty() {
-        let code = extract_rust_code(&translation);
-        let filename = interface_files[0].0.file_name().unwrap_or_default();
-        let dest = workdir.join("src").join(filename);
-        let _ = std::fs::write(&dest, &code);
-        current_impl = read_current_impls(&workdir, &interface_files);
+        match client
+            .run_prompt(&model, TRANSLATION_PREAMBLE, 0.3, max_tokens, &user_prompt)
+            .await
+        {
+            Ok(translation) => {
+                llm_calls += 1;
+                let parsed_files = parse_multi_file_output(&translation, &interface_files);
+                write_and_read_impls(&workdir, &parsed_files, &interface_files);
+
+                if parsed_files.is_empty() && !interface_files.is_empty() {
+                    let code = extract_rust_code(&translation);
+                    let filename = interface_files[0].0.file_name().unwrap_or_default();
+                    let dest = workdir.join("src").join(filename);
+                    let _ = std::fs::write(&dest, &code);
+                }
+            }
+            Err(e) => {
+                return make_error_result(name, c_loc, start, 1, format!("translation failed: {e}"));
+            }
+        }
     }
 
-    // Step 7: Build check
+    let mut current_impl = read_current_impls(&workdir, &interface_files);
+    let repair_model = select_model(c_loc, config);
+    let max_tokens = ((c_source.len() as u64 / 4) * 3).clamp(8192, 65536);
+
+    // Step 6: Build check
     let (build_ok, build_errors) = run_cargo_build(&workdir);
     if !build_ok {
         info!(project = %name, "compilation failed, entering repair loop");
     }
 
-    // Step 8: Build repair loop
+    // Step 7: Build repair loop
     let mut last_errors = build_errors;
     let mut compilation_success = build_ok;
 
     if !build_ok {
-        for iter in 1..=MAX_REPAIR_ITERATIONS {
+        for iter in 1..=max_repairs {
             repair_iterations = iter;
-            let temp = 0.3 + (iter as f64 - 1.0) * 0.15;
+            let temp = 0.3 + (iter as f64 - 1.0) * REPAIR_TEMP_STEP;
 
             let repair_prompt = build_repair_prompt(
                 &c_source, &interface_files, &current_impl, &last_errors,
-                iter, MAX_REPAIR_ITERATIONS,
+                iter, max_repairs,
             );
 
-            info!(project = %name, iteration = iter, temp, "repair attempt (build)");
+            info!(project = %name, iteration = iter, max = max_repairs, temp, "repair attempt (build)");
 
-            match client.run_prompt(&model, REPAIR_PREAMBLE, temp, max_tokens, &repair_prompt).await {
+            match client.run_prompt(&repair_model, REPAIR_PREAMBLE, temp, max_tokens, &repair_prompt).await {
                 Ok(response) => {
                     llm_calls += 1;
                     let repaired = parse_multi_file_output(&response, &interface_files);
@@ -533,31 +814,46 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
         }
     }
 
-    // Step 9: Test phase
+    // Step 8: Test phase — with per-test-binary feedback
     let mut tests_passed = false;
     let mut test_output = None;
 
     if compilation_success {
-        let (test_ok, test_out) = run_cargo_test(&workdir);
+        let (test_ok, test_out, failed_binaries) = run_cargo_test_per_binary(&workdir);
         tests_passed = test_ok;
 
         if !test_ok {
-            info!(project = %name, "tests failed, entering repair loop");
+            let failed_count = failed_binaries.iter().filter(|b| !b.passed).count();
+            info!(
+                project = %name,
+                failed_binaries = failed_count,
+                "tests failed, entering targeted repair loop"
+            );
             test_output = Some(test_out.clone());
-            last_errors = test_out;
 
-            for iter in (repair_iterations + 1)..=MAX_REPAIR_ITERATIONS {
+            let remaining_iters = max_repairs.saturating_sub(repair_iterations);
+            for iter_offset in 1..=remaining_iters {
+                let iter = repair_iterations + iter_offset;
                 repair_iterations = iter;
-                let temp = 0.3 + (iter as f64 - 1.0) * 0.15;
+                let temp = 0.3 + (iter as f64 - 1.0) * REPAIR_TEMP_STEP;
 
-                let repair_prompt = build_repair_prompt(
-                    &c_source, &interface_files, &current_impl, &last_errors,
-                    iter, MAX_REPAIR_ITERATIONS,
-                );
+                // Use targeted repair if we have per-binary failure info
+                let failed_only: Vec<_> = failed_binaries.iter().filter(|b| !b.passed).cloned().collect();
+                let repair_prompt = if !failed_only.is_empty() {
+                    build_targeted_repair_prompt(
+                        &c_source, &interface_files, &current_impl,
+                        &failed_only, iter, max_repairs,
+                    )
+                } else {
+                    build_repair_prompt(
+                        &c_source, &interface_files, &current_impl,
+                        &test_out, iter, max_repairs,
+                    )
+                };
 
-                info!(project = %name, iteration = iter, temp, "repair attempt (tests)");
+                info!(project = %name, iteration = iter, max = max_repairs, temp, "repair attempt (tests)");
 
-                match client.run_prompt(&model, REPAIR_PREAMBLE, temp, max_tokens, &repair_prompt).await {
+                match client.run_prompt(&repair_model, REPAIR_PREAMBLE, temp, max_tokens, &repair_prompt).await {
                     Ok(response) => {
                         llm_calls += 1;
                         let repaired = parse_multi_file_output(&response, &interface_files);
@@ -572,7 +868,7 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
                         }
                         compilation_success = true;
 
-                        let (t_ok, t_out) = run_cargo_test(&workdir);
+                        let (t_ok, t_out, _new_failures) = run_cargo_test_per_binary(&workdir);
                         tests_passed = t_ok;
                         test_output = Some(t_out.clone());
                         if t_ok {
@@ -593,7 +889,7 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
         }
     }
 
-    // Step 10: Score
+    // Step 9: Score
     let rust_loc = count_lines(&current_impl);
     let unsafe_count = count_unsafe(&current_impl);
     let idiomatic_score = if compilation_success {
@@ -732,6 +1028,49 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert!(parsed[0].1.contains("fn a()"));
         assert!(parsed[1].1.contains("fn b()"));
+    }
+
+    #[test]
+    fn test_effective_max_repairs_single_module() {
+        assert_eq!(effective_max_repairs(1, 200), 5);
+    }
+
+    #[test]
+    fn test_effective_max_repairs_multi_module() {
+        // 6 interfaces -> bonus of 2, 2500 LOC -> bonus of 2 => 5+2+2=9
+        assert_eq!(effective_max_repairs(6, 2500), 9);
+    }
+
+    #[test]
+    fn test_effective_max_repairs_capped() {
+        // Very large project: should cap at MAX_REPAIR_ITERATIONS
+        assert_eq!(effective_max_repairs(30, 5000), MAX_REPAIR_ITERATIONS);
+    }
+
+    #[test]
+    fn test_build_single_module_prompt() {
+        let target = (PathBuf::from("src/interfaces/foo.rs"), "fn foo() { unimplemented!() }".to_string());
+        let others = vec![
+            (PathBuf::from("src/interfaces/bar.rs"), "fn bar() -> i32 { 42 }".to_string()),
+        ];
+        let prompt = build_single_module_prompt("int foo() { return 1; }", &target, &others);
+        assert!(prompt.contains("Target: implement foo.rs"));
+        assert!(prompt.contains("Other module interfaces"));
+        assert!(prompt.contains("bar.rs"));
+    }
+
+    #[test]
+    fn test_select_module_model_haiku() {
+        let config = MigrationConfig::default();
+        let model = select_module_model(50, &config);
+        assert!(model.contains("haiku"), "small module should use Haiku: {model}");
+    }
+
+    #[test]
+    fn test_select_module_model_sonnet() {
+        let config = MigrationConfig::default();
+        let model = select_module_model(200, &config);
+        assert!(model.contains("sonnet"), "medium module should use Sonnet: {model}");
     }
 
     #[test]
