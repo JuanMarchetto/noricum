@@ -46,6 +46,12 @@ pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
     }
 
     let config = MigrationConfig {
+        // Force Ollama when --ollama-model is explicitly provided
+        anthropic_api_key: if opts.ollama_model.is_some() {
+            None
+        } else {
+            MigrationConfig::default().anthropic_api_key
+        },
         fuzz_test: opts.fuzz,
         fuzz_iterations: opts.fuzz_iterations,
         audit_log: opts.audit_log.map(|p| p.to_path_buf()),

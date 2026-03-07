@@ -110,6 +110,10 @@ pub struct MigrationMetrics {
     pub output_tokens: u64,
     /// Estimated cost in USD based on token usage and model pricing
     pub estimated_cost_usd: f64,
+    /// LLM provider used (e.g. "Anthropic", "Ollama")
+    pub provider: Option<String>,
+    /// LLM model used (e.g. "claude-sonnet-4-20250514")
+    pub model: Option<String>,
 }
 
 impl MigrationMetrics {

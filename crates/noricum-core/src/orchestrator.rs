@@ -539,6 +539,9 @@ pub async fn migrate_file(
     // --- Stage 4: Analysis agent ---
     let analysis_start = Instant::now();
     let analysis_model_sel = select_model(&provider_config, difficulty, "analysis")?;
+    // Record provider/model in metrics (first model selection)
+    unit.metrics.provider = Some(format!("{:?}", analysis_model_sel.provider));
+    unit.metrics.model = Some(analysis_model_sel.model.clone());
     info!(
         function = %name,
         model = %analysis_model_sel.model,

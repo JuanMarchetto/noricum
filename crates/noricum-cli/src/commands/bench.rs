@@ -8,13 +8,23 @@ pub async fn cmd_bench(
     json: bool,
     save_baseline: Option<&Path>,
     compare_baseline: Option<&Path>,
+    ollama_model: Option<String>,
 ) -> Result<()> {
     let fixtures_dir = fixtures_dir
         .canonicalize()
         .with_context(|| format!("fixtures dir not found: {}", fixtures_dir.display()))?;
 
-    let config = MigrationConfig::default();
-    let use_llm = config.anthropic_api_key.is_some();
+    let config = MigrationConfig {
+        anthropic_api_key: if ollama_model.is_some() {
+            None
+        } else {
+            MigrationConfig::default().anthropic_api_key
+        },
+        ollama_model,
+        ..MigrationConfig::default()
+    };
+    let use_llm = config.anthropic_api_key.is_some()
+        || config.ollama_model.is_some();
 
     let mut c_files: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(&fixtures_dir)? {
@@ -115,6 +125,8 @@ pub async fn cmd_bench(
             "input_tokens": unit.metrics.input_tokens,
             "output_tokens": unit.metrics.output_tokens,
             "estimated_cost_usd": unit.metrics.estimated_cost_usd,
+            "provider": unit.metrics.provider,
+            "model": unit.metrics.model,
         }));
     }
 

@@ -47,7 +47,7 @@ pub fn generate_compile_commands(c_file: &Path, output_dir: &Path) -> Result<Pat
 
     let compile_commands = serde_json::json!([{
         "directory": output_dir.to_string_lossy(),
-        "command": format!("cc -std=c11 -c {}", c_file.display()),
+        "command": format!("cc -std=gnu11 -c {}", c_file.display()),
         "file": c_file.to_string_lossy()
     }]);
 
@@ -172,7 +172,7 @@ mod tests {
 
         let content = std::fs::read_to_string(cc_path).unwrap();
         assert!(content.contains("test.c"));
-        assert!(content.contains("cc -std=c11"));
+        assert!(content.contains("cc -std=gnu11"));
     }
 
     #[test]
