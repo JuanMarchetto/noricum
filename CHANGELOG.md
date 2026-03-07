@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - expr_eval.c migration — 1686 LOC expression evaluator, score 100/100, 0 unsafe, 0 repairs, diff test PASS (largest file migrated: 3.2x previous record)
 - Dynamic max_tokens scaling for translation/repair agents based on input size (fixes truncation on large files)
 - cJSON library migration — 520 LOC, score 100/100, 0 unsafe, diff test PASS (basic + 12 extended edge-case tests)
+- Context window mitigations for large file migrations (abbreviate_c_source, build_structural_summary, effective_repair_iterations)
+- Multi-pass chunked translation for files >2000 LOC
 
 ### Fixed
 - C compiler flags: `-std=c11` → `-std=gnu11` (fixes `strdup` implicit declaration causing segfaults)
@@ -17,8 +19,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Combined single-file C fixtures for standalone diff testing
 - Extended behavioral test harness with 12 edge cases (nested objects, arrays, escaping, unicode, nulls)
 - RAG seed pattern `cjson_to_serde` updated to hand-rolled idioms (no external crate dependency)
-
-### Fixed
 - RAG pattern `cjson_to_serde.md` headers (`Rust Pattern`/`Rust Example` → `Rust Equivalent`) — was never loading into PatternStore
 - Remove dead `interactive.rs` module from noricum-cli
 - Ollama provider stubs now return proper `Result` error instead of silent no-op

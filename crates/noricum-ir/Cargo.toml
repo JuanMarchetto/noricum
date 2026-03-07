@@ -1,5 +1,6 @@
 [package]
 name = "noricum-ir"
+description = "Intermediate representation for C-to-Rust migration metadata"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
