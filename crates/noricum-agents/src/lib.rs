@@ -6,7 +6,7 @@ pub mod repair;
 pub mod test_gen;
 pub mod translation;
 
-pub use providers::LlmClient;
+pub use providers::{LlmClient, TokenUsage};
 
 use thiserror::Error;
 
@@ -27,9 +27,10 @@ pub enum AgentError {
 
 /// Estimate token count from text content using a word/symbol-aware heuristic.
 ///
-/// rig-rs 0.31 does not expose usage metadata directly, so we estimate
-/// tokens by counting words and symbols separately. This is more accurate
-/// than a simple bytes/4 ratio because:
+/// For actual API token counts, use [`LlmClient::run_prompt_with_usage`] which
+/// captures real `input_tokens`/`output_tokens` from the provider response.
+/// This heuristic remains useful for pre-flight budget estimation where no API
+/// call has been made yet. It is more accurate than a simple bytes/4 ratio because:
 /// - Short identifiers and keywords tend to be single tokens
 /// - Punctuation and operators are often individual tokens
 /// - Whitespace is typically merged with adjacent tokens

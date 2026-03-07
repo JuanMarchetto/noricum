@@ -72,7 +72,7 @@ pub async fn review_behavioral_equivalence_with_temperature(
 
     let temp = temperature.unwrap_or(0.2);
     let max_tokens =
-        ((c_source.len() as u64 + rust_source.len() as u64) / 4 * 2).clamp(4096, 32768);
+        ((c_source.len() as u64 + rust_source.len() as u64) / 4 * 2).clamp(4096, 16384);
 
     let response = client
         .run_prompt(model, PREAMBLE, temp, max_tokens, &message)
@@ -128,6 +128,7 @@ fn extract_field(text: &str, label: &str) -> Option<String> {
         .trim()
         .trim_start_matches('[')
         .trim_end_matches(']')
+        .trim_matches('*')
         .trim();
     if value.is_empty() {
         // Try the next non-empty line
