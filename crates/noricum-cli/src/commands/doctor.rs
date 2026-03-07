@@ -75,7 +75,11 @@ pub fn cmd_doctor() -> Result<()> {
             match std::process::Command::new("ollama").arg("list").output() {
                 Ok(list_output) if list_output.status.success() => {
                     let list_str = String::from_utf8_lossy(&list_output.stdout);
-                    let model_count = list_str.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
+                    let model_count = list_str
+                        .lines()
+                        .skip(1)
+                        .filter(|l| !l.trim().is_empty())
+                        .count();
                     if model_count == 0 {
                         println!("none (run: ollama pull qwen2.5-coder:32b)");
                     } else {
