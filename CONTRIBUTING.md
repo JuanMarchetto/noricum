@@ -17,11 +17,41 @@ git clone https://github.com/YOUR_USERNAME/noricum
 cd noricum
 cargo build --workspace
 cargo test --workspace
+cargo clippy --workspace -- -D warnings
 ```
 
-For LLM-powered features, set your API key:
+### Prerequisites
+
+- **Rust 1.86+** (edition 2024): install via [rustup](https://rustup.rs/)
+- **GCC** (for compiling C test fixtures): `apt install gcc` / `brew install gcc`
+- **tree-sitter** is vendored — no system install needed
+
+### LLM-powered features
+
+Create a `.env` file in the project root (it is gitignored):
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+```
+
+Then export before running:
+```bash
+export $(cat .env | xargs)
+cargo run -p noricum-cli -- migrate tests/fixtures/simple/add.c
+```
+
+Without an API key, use `--no-llm` to run the rule-based pipeline:
+```bash
+cargo run -p noricum-cli -- migrate tests/fixtures/simple/add.c --no-llm
+```
+
+### Useful commands
+
+```bash
+cargo test --workspace              # Run all tests
+cargo clippy --workspace -- -D warnings  # Lint
+cargo fmt --all -- --check          # Check formatting
+cargo doc --no-deps --workspace     # Build docs
+cargo run -p noricum-cli -- doctor  # Check tool availability
 ```
 
 ## Coding Conventions

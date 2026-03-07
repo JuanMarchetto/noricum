@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - expr_eval.c migration — 1686 LOC expression evaluator, score 100/100, 0 unsafe, 0 repairs, diff test PASS (largest file migrated: 3.2x previous record)
+- Interface-aware CRUST-Bench with progress logging (`[N/M]` counter)
+- Error severity classification in compiler diagnostics
+- `--ollama-model` CLI flag for Ollama provider forcing
+- `compare` subcommand for side-by-side migration comparison
+- CI release workflow for automated GitHub releases
+- Fuzz targets for core parsing functions
+- 5th RAG seed pattern
+- Behavioral review infrastructure and launch readiness assessment system
 - Dynamic max_tokens scaling for translation/repair agents based on input size (fixes truncation on large files)
 - cJSON library migration — 520 LOC, score 100/100, 0 unsafe, diff test PASS (basic + 12 extended edge-case tests)
 - Context window mitigations for large file migrations (abbreviate_c_source, build_structural_summary, effective_repair_iterations)
