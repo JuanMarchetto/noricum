@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-321%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
+[![Tests](https://img.shields.io/badge/tests-321%2B%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
 [![LOC](https://img.shields.io/badge/LOC-~16%2C000-blue)](https://github.com/JuanMarchetto/noricum)
 
@@ -25,7 +25,7 @@ Existing C-to-Rust migration tools fall into two camps: **mechanical transpilers
 | | C2Rust | Manual Rewrite | Noricum |
 |---|--------|---------------|---------|
 | **Approach** | AST lowering | Human engineer | LLM agent + diff testing |
-| **Output safety** | Everything in `unsafe` | Depends on engineer | **0 unsafe blocks** (14/14 files) |
+| **Output safety** | Everything in `unsafe` | Depends on engineer | **0 unsafe blocks** (15/15 files) |
 | **Verification** | Compiles | Code review | Byte-exact differential testing |
 | **Auto-repair** | None | N/A | Up to 5 LLM-driven iterations |
 | **Speed** | Seconds | Days/weeks | Seconds per file |
@@ -76,20 +76,45 @@ Real migration results on test fixtures (LLM-powered pipeline):
 | **`miniz_test.c`** | **154** | **2** | **93/100** | **0** | **PASS** | **0** |
 | **`cjson_combined.c`** | **520** | **12** | **100/100** | **0** | **PASS** | **1** |
 | **`expr_eval.c`** | **1686** | **74** | **100/100** | **0** | **PASS** | **0** |
+| **`cjson_full_combined.c`** | **1441** | **~60** | **est. 95+** | **0** | **PASS** | **0** |
 
-**14/14 files validated, 0 unsafe blocks, 100% diff test pass rate.**
+**15/15 files validated, 0 unsafe blocks, 100% diff test pass rate.**
+
+### cJSON Full Migration (Flagship Result)
+
+The `cjson_full_combined.c` migration is the largest successful idiomatic migration — a substantial subset of [DaveGamble/cJSON](https://github.com/DaveGamble/cJSON) (12,510 stars):
+
+| Metric | Value |
+|--------|-------|
+| **C LOC** | 1,441 |
+| **Rust LOC** | 1,098 (0.76x — more compact than C) |
+| **Unsafe blocks** | **0** |
+| **Raw pointers** | **0** |
+| **Tests** | **55/55 PASS** |
+| **Diff test** | **PASS (byte-exact)** |
+
+Key transformations:
+- `struct cJSON` (linked list with next/prev/child pointers) → `enum JsonValue` with `Vec`
+- `malloc/free` → RAII (automatic `Drop`)
+- `char*` strings → `String`
+- Type tag integers → enum variants
+- `goto fail` error handling → `Option<T>` with `?`
+- `cJSON_IsReference` flag → `Clone`
+- UTF-16 surrogate pair decoding → `char::from_u32`
+- C `sprintf("%1.15g")` number formatting → custom `format_g()` for byte-exact match
 
 ### Noricum vs C2Rust
 
 | Metric | C2Rust Alone | Noricum |
 |--------|-------------|---------|
 | Translation | Mechanical AST lowering | LLM-powered idiomatic |
-| Unsafe blocks | Wraps everything in `unsafe` | 0 across 14 files |
+| Unsafe blocks | Wraps everything in `unsafe` | 0 across 15 files |
 | Diff test verification | None | Byte-exact + exit code automated |
 | Repair loop | None | Up to 5 iterations with diff feedback |
 | Avg. idiomatic score | N/A | 89-100/100 |
 | `hash_table.c` | ~250 LOC unsafe, raw ptrs | ~180 LOC safe, Vec/Box |
 | `cjson_combined.c` | ~520 LOC unsafe, manual alloc | ~400 LOC safe, enum JsonValue |
+| `cjson_full_combined.c` | ~1441 LOC unsafe, linked lists | ~1098 LOC safe, Vec/enum (0.76x) |
 | Float tolerance | N/A | Configurable epsilon comparison |
 | Multi-input testing | N/A | Multiple stdin/args per test |
 | REST API | None | 6 endpoints (`/api/health`, `/api/migrate`, ...) |

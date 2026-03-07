@@ -98,6 +98,10 @@ With more repair iterations or a smarter repair prompt that feeds individual tes
 
 6. **Cost optimization.** ✅ DONE. `select_module_model()` picks model per-module based on interface LOC (≤100 → Haiku, 101-500 → Sonnet, >500 → Opus). For the Genetic-neural-network case, this means 11 Haiku + 2 Sonnet calls instead of 6 Opus calls — estimated 5-10x cost reduction.
 
+### Related: cJSON Full Migration (non-CRUST-Bench)
+
+In parallel with CRUST-Bench, we completed a full idiomatic migration of DaveGamble/cJSON (12.5k stars): 1441 LOC C → 1098 LOC Rust, 0 unsafe, 55/55 tests, byte-exact diff test. This demonstrates the pipeline's capability on real-world, popular C libraries beyond the CRUST-Bench dataset. See `tests/fixtures/cjson_full/cjson_full_migrated.rs`.
+
 ### Estimated full-benchmark performance
 
 Based on this pilot and the published results:
