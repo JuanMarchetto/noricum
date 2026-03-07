@@ -271,6 +271,24 @@ fn handle_tools_list(id: serde_json::Value) -> JsonRpcResponse {
                 "required": ["source", "errors"]
             }),
         },
+        ToolDefinition {
+            name: "behavioral_review".to_string(),
+            description: "Review behavioral equivalence between original C and migrated Rust code. Uses LLM to analyze all possible inputs, not just diff test cases. Requires ANTHROPIC_API_KEY.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "c_source": {
+                        "type": "string",
+                        "description": "The original C source code"
+                    },
+                    "rust_source": {
+                        "type": "string",
+                        "description": "The migrated Rust source code"
+                    }
+                },
+                "required": ["c_source", "rust_source"]
+            }),
+        },
     ];
 
     JsonRpcResponse::success(id, json!({ "tools": tools }))
@@ -324,6 +342,7 @@ fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRp
         "get_idiomatic_score" => tool_get_idiomatic_score(source),
         "diff_test" => tool_diff_test(c_source, rust_source),
         "repair" => tool_repair(source, errors),
+        "behavioral_review" => tool_behavioral_review(c_source, rust_source),
         other => ToolResult::error(format!("unknown tool: {other}")),
     };
 
@@ -591,6 +610,101 @@ fn tool_repair(source: Option<String>, errors: Option<String>) -> ToolResult {
     json_to_tool_result(&result)
 }
 
+/// `behavioral_review`: Deep behavioral equivalence review using LLM.
+fn tool_behavioral_review(c_source: Option<String>, rust_source: Option<String>) -> ToolResult {
+    let c_source = match c_source {
+        Some(s) => s,
+        None => return ToolResult::error("missing 'c_source' parameter".to_string()),
+    };
+    let rust_source = match rust_source {
+        Some(s) => s,
+        None => return ToolResult::error("missing 'rust_source' parameter".to_string()),
+    };
+    if c_source.len() > MAX_MCP_SOURCE_SIZE {
+        return ToolResult::error(format!(
+            "c_source exceeds maximum size of {} bytes",
+            MAX_MCP_SOURCE_SIZE
+        ));
+    }
+    if rust_source.len() > MAX_MCP_SOURCE_SIZE {
+        return ToolResult::error(format!(
+            "rust_source exceeds maximum size of {} bytes",
+            MAX_MCP_SOURCE_SIZE
+        ));
+    }
+
+    if std::env::var("ANTHROPIC_API_KEY").is_err() {
+        return ToolResult::error(
+            "behavioral_review requires ANTHROPIC_API_KEY to be set".to_string(),
+        );
+    }
+
+    let runtime = match mcp_runtime() {
+        Ok(rt) => rt,
+        Err(e) => return ToolResult::error(format!("runtime initialization failed: {e}")),
+    };
+
+    let provider_config = noricum_agents::providers::ProviderConfig {
+        anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+        ollama_url: std::env::var("OLLAMA_URL")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+        ollama_model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".to_string()),
+    };
+
+    let client = match noricum_agents::providers::create_llm_client(&provider_config) {
+        Ok(c) => c,
+        Err(e) => return ToolResult::error(format!("failed to create LLM client: {e}")),
+    };
+
+    let difficulty = noricum_core::router::classify_difficulty(&c_source);
+    let selection = match noricum_agents::providers::select_model(
+        &provider_config,
+        difficulty,
+        "behavioral_review",
+    ) {
+        Ok(s) => s,
+        Err(e) => return ToolResult::error(format!("failed to select model: {e}")),
+    };
+
+    // Run diff test to provide context
+    let diff_context = match noricum_tools::diff_test::run_diff_test(&c_source, &rust_source) {
+        Ok(result) => {
+            let status = if result.passed { "PASS" } else { "FAIL" };
+            Some(format!(
+                "Status: {status}\nC output: {:?}\nRust output: {:?}",
+                result.c_output, result.rust_output
+            ))
+        }
+        Err(_) => None,
+    };
+
+    match runtime.block_on(async {
+        tokio::time::timeout(
+            MIGRATION_TIMEOUT,
+            noricum_agents::behavioral_review::review_behavioral_equivalence(
+                &client,
+                &selection.model,
+                &c_source,
+                &rust_source,
+                diff_context.as_deref(),
+            ),
+        )
+        .await
+    }) {
+        Ok(Ok(result)) => {
+            let res = json!({
+                "verdict": result.verdict,
+                "confidence": result.confidence,
+                "summary": result.summary,
+                "full_review": result.full_review,
+            });
+            json_to_tool_result(&res)
+        }
+        Ok(Err(e)) => ToolResult::error(format!("behavioral review failed: {e}")),
+        Err(_) => ToolResult::error("behavioral review timed out (5 minute limit)".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,7 +726,7 @@ mod tests {
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
 
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"migrate_function"));
@@ -621,6 +735,7 @@ mod tests {
         assert!(names.contains(&"get_idiomatic_score"));
         assert!(names.contains(&"diff_test"));
         assert!(names.contains(&"repair"));
+        assert!(names.contains(&"behavioral_review"));
     }
 
     #[test]

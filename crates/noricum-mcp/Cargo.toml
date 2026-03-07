@@ -10,6 +10,7 @@ name = "noricum-mcp-server"
 path = "src/main.rs"
 
 [dependencies]
+noricum-agents = { workspace = true }
 noricum-core = { workspace = true }
 noricum-tools = { workspace = true }
 noricum-validation = { workspace = true }

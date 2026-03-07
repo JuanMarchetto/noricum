@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod behavioral_review;
 pub mod mock_responses;
 pub mod providers;
 pub mod repair;

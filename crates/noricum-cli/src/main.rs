@@ -58,6 +58,21 @@ enum Commands {
         #[arg(long)]
         compare_baseline: Option<PathBuf>,
     },
+    /// Review behavioral equivalence between C source and Rust migration
+    Review {
+        /// Path to the original C source file
+        #[arg(long)]
+        c_source: PathBuf,
+        /// Path to the migrated Rust source file
+        #[arg(long)]
+        rust_source: PathBuf,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Also run diff test and include result in review context
+        #[arg(long)]
+        diff_test: bool,
+    },
     /// Run CRUST-Bench evaluation
     CrustBench {
         /// Path to the CRUST-Bench dataset directory
@@ -182,6 +197,20 @@ async fn main() {
             )
             .await
         }
+        Commands::Review {
+            c_source,
+            rust_source,
+            json,
+            diff_test,
+        } => {
+            commands::review::cmd_review(commands::review::ReviewParams {
+                c_path: c_source,
+                rust_path: rust_source,
+                json,
+                diff_test,
+            })
+            .await
+        }
         Commands::CrustBench {
             dataset,
             filter,
@@ -243,10 +272,15 @@ async fn cmd_serve(host: &str, port: u16) -> Result<()> {
         eprintln!("  All mutating endpoints will require authentication.");
         eprintln!("  Set NORICUM_API_KEY env var to enable access.");
     }
+    let rate_limit_rpm: usize = std::env::var("NORICUM_RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(api::DEFAULT_RATE_LIMIT_RPM);
     let state = Arc::new(api::AppState {
         config,
         api_key,
         is_public,
+        rate_limiter: api::IpRateLimiter::new(rate_limit_rpm),
     });
     let app = api::build_router(state);
     let addr = format!("{host}:{port}");
