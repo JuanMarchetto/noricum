@@ -574,7 +574,33 @@ pub async fn migrate_file(
             model = %translation_model_sel.model,
             "calling translation agent"
         );
-        let rust_code =
+        let c_lines_for_chunk = unit.c_source.lines().count();
+        let rust_code = if c_lines_for_chunk > VERY_LARGE_FILE_LOC {
+            let chunks = noricum_tools::ast::chunk_c_source(&unit.c_source, 500);
+            info!(
+                function = %name,
+                chunks = chunks.len(),
+                c_lines = c_lines_for_chunk,
+                "using multi-pass chunked translation"
+            );
+            match noricum_agents::translation::translate_chunked(
+                &client,
+                &translation_model_sel.model,
+                &chunks,
+                unit.c2rust_output.as_deref(),
+                &analysis,
+                &relevant_patterns,
+                config.translation_temperature,
+            )
+            .await
+            {
+                Ok(code) => code,
+                Err(e) => {
+                    warn!(function = %name, error = %e, "chunked translation failed, falling back to sync");
+                    return migrate_file_sync(c_file);
+                }
+            }
+        } else {
             match noricum_agents::translation::translate_function_with_patterns_and_temperature(
                 &client,
                 &translation_model_sel.model,
@@ -591,7 +617,8 @@ pub async fn migrate_file(
                     warn!(function = %name, error = %e, "translation agent failed, falling back to sync");
                     return migrate_file_sync(c_file);
                 }
-            };
+            }
+        };
         unit.rust_output = Some(rust_code);
         unit.state = MigrationState::Refined;
         unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
@@ -957,7 +984,7 @@ pub async fn migrate_directory(
         if unit.state == MigrationState::Validated
             && let Some(ref rust_output) = unit.rust_output
         {
-            let sigs = extract_rust_signatures(rust_output);
+            let sigs = noricum_tools::ast::extract_rust_signatures(rust_output);
             if !sigs.is_empty() {
                 info!(
                     file = %path.display(),
@@ -980,29 +1007,6 @@ pub async fn migrate_directory(
     );
 
     Ok(project)
-}
-
-/// Extract function signatures from Rust source code for dependency context.
-///
-/// Looks for `pub fn` and `fn` lines, returning them as context strings
-/// that can be injected into translation prompts for dependent files.
-fn extract_rust_signatures(rust_source: &str) -> Vec<String> {
-    rust_source
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ")) && trimmed.contains('(')
-        })
-        .map(|line| {
-            // Take up to the opening brace or end of line
-            let trimmed = line.trim();
-            if let Some(brace) = trimmed.find('{') {
-                trimmed[..brace].trim().to_string()
-            } else {
-                trimmed.to_string()
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -1151,7 +1155,7 @@ fn main() {
     println!("{}", add(1, 2));
 }
 "#;
-        let sigs = extract_rust_signatures(rust);
+        let sigs = noricum_tools::ast::extract_rust_signatures(rust);
         assert_eq!(sigs.len(), 3);
         assert!(sigs[0].contains("pub fn add(a: i32, b: i32) -> i32"));
         assert!(sigs[1].contains("fn helper(x: i32) -> i32"));
@@ -1161,7 +1165,7 @@ fn main() {
     #[test]
     fn test_extract_rust_signatures_no_functions() {
         let rust = "let x = 5;\nstruct Foo { bar: i32 }";
-        let sigs = extract_rust_signatures(rust);
+        let sigs = noricum_tools::ast::extract_rust_signatures(rust);
         assert!(sigs.is_empty());
     }
 

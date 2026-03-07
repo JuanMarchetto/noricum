@@ -127,6 +127,115 @@ pub async fn translate_function_with_patterns_and_temperature(
     Ok(crate::extract_rust_code(&response))
 }
 
+/// Translate a large C file in multiple passes (one per chunk).
+///
+/// Each chunk is translated independently with shared context (types, globals)
+/// and accumulated Rust signatures from previously translated chunks.
+/// The outputs are combined and `use` statements are deduplicated.
+pub async fn translate_chunked(
+    client: &LlmClient,
+    model: &str,
+    chunks: &[noricum_tools::ast::CChunk],
+    c2rust_output: Option<&str>,
+    analysis: &AnalysisResult,
+    patterns: &[&MigrationPattern],
+    temperature: Option<f64>,
+) -> Result<String, AgentError> {
+    info!(
+        chunks = chunks.len(),
+        model,
+        "starting chunked multi-pass translation"
+    );
+
+    let mut accumulated_rust = Vec::new();
+    let mut accumulated_sigs: Vec<String> = Vec::new();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        info!(
+            chunk = i + 1,
+            total = chunks.len(),
+            functions = chunk.function_names.len(),
+            lines = chunk.line_count,
+            "translating chunk"
+        );
+
+        // Build a synthetic C source: shared context + this chunk's functions
+        let mut chunk_source = chunk.shared_context.clone();
+        chunk_source.push_str("\n\n// === Functions to translate ===\n");
+        chunk_source.push_str(&chunk.functions_source);
+
+        // If we have previously translated signatures, add them as context
+        let mut chunk_c2rust = c2rust_output.map(|s| s.to_string());
+        if !accumulated_sigs.is_empty() {
+            let sig_context = format!(
+                "\n\n// === Already translated Rust signatures (for reference) ===\n{}",
+                accumulated_sigs.join("\n")
+            );
+            chunk_source.push_str(&sig_context);
+            // Don't pass c2rust for later chunks (it's for the whole file, not chunks)
+            if i > 0 {
+                chunk_c2rust = None;
+            }
+        }
+
+        let rust_code = translate_function_with_patterns_and_temperature(
+            client,
+            model,
+            &chunk_source,
+            chunk_c2rust.as_deref(),
+            analysis,
+            patterns,
+            temperature,
+        )
+        .await?;
+
+        // Extract signatures from this chunk's output for next chunk's context
+        let new_sigs = noricum_tools::ast::extract_rust_signatures(&rust_code);
+        accumulated_sigs.extend(new_sigs);
+
+        accumulated_rust.push(rust_code);
+    }
+
+    // Combine all chunks, deduplicating `use` statements
+    let mut use_statements = Vec::new();
+    let mut code_parts = Vec::new();
+
+    for part in &accumulated_rust {
+        let mut code_lines = Vec::new();
+        for line in part.lines() {
+            if line.trim().starts_with("use ") {
+                if !use_statements.contains(&line.trim().to_string()) {
+                    use_statements.push(line.trim().to_string());
+                }
+            } else {
+                code_lines.push(line);
+            }
+        }
+        let code = code_lines.join("\n").trim().to_string();
+        if !code.is_empty() {
+            code_parts.push(code);
+        }
+    }
+
+    let mut final_output = String::new();
+    for stmt in &use_statements {
+        final_output.push_str(stmt);
+        final_output.push('\n');
+    }
+    if !use_statements.is_empty() {
+        final_output.push('\n');
+    }
+    final_output.push_str(&code_parts.join("\n\n"));
+
+    info!(
+        total_len = final_output.len(),
+        chunks = chunks.len(),
+        "chunked translation complete"
+    );
+
+    Ok(final_output)
+}
+
 /// Build a condensed structural summary of a large C source file.
 ///
 /// Extracts struct/enum/union declarations, typedefs, function signatures,
