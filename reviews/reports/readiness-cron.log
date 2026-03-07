@@ -1,0 +1,18 @@
+=== Noricum Launch Readiness Assessment ===
+Date: 2026-03-07
+
+Metrics collected.
+
+Running readiness assessment with Claude Code...
+=== Assessment Complete ===
+Report: /home/marche/noricum/reviews/reports/readiness-2026-03-07.md
+
+WEIGHTED SCORE: 66/100
+VERDICT: ALMOST READY
+TOP 3 BLOCKERS:
+
+=== Updating Marketing Materials ===
+Marketing materials updated.
+Log: /home/marche/noricum/reviews/reports/readiness-2026-03-07-marketing.md
+
+Done.
