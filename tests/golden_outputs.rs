@@ -265,10 +265,7 @@ fn golden_expr_eval_fixture() {
         output.contains("=== Basic Arithmetic ==="),
         "should contain basic arithmetic header"
     );
-    assert!(
-        output.contains("2 + 3 = 5"),
-        "should contain 2 + 3 = 5"
-    );
+    assert!(output.contains("2 + 3 = 5"), "should contain 2 + 3 = 5");
     assert!(
         output.contains("All tests completed."),
         "should contain completion message"

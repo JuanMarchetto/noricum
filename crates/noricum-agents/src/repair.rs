@@ -302,8 +302,13 @@ int main() { return 0; }
 ";
         let result = abbreviate_c_source(source, 3);
         // The function body (with nested braces) should be collapsed to a single comment
-        let comment_count = result.matches("// ... (body abbreviated for context)").count();
-        assert_eq!(comment_count, 1, "should have exactly one abbreviation comment");
+        let comment_count = result
+            .matches("// ... (body abbreviated for context)")
+            .count();
+        assert_eq!(
+            comment_count, 1,
+            "should have exactly one abbreviation comment"
+        );
     }
 
     #[test]
