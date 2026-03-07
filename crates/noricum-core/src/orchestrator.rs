@@ -218,11 +218,9 @@ mod cache {
     }
 
     fn cache_key(c_source: &str) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        c_source.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(c_source.as_bytes());
+        format!("{:064x}", hash)
     }
 
     /// Look up a cached translation for the given C source.
@@ -387,7 +385,7 @@ pub async fn migrate_file(
     config: &MigrationConfig,
 ) -> Result<FunctionUnit, CoreError> {
     let source_path = c_file.to_string_lossy().to_string();
-    let c_source = std::fs::read_to_string(c_file)?;
+    let c_source = tokio::fs::read_to_string(c_file).await?;
 
     if c_source.len() > MAX_C_SOURCE_SIZE {
         return Err(CoreError::Orchestration(format!(
@@ -576,7 +574,33 @@ pub async fn migrate_file(
             model = %translation_model_sel.model,
             "calling translation agent"
         );
-        let rust_code =
+        let c_lines_for_chunk = unit.c_source.lines().count();
+        let rust_code = if c_lines_for_chunk > VERY_LARGE_FILE_LOC {
+            let chunks = noricum_tools::ast::chunk_c_source(&unit.c_source, 500);
+            info!(
+                function = %name,
+                chunks = chunks.len(),
+                c_lines = c_lines_for_chunk,
+                "using multi-pass chunked translation"
+            );
+            match noricum_agents::translation::translate_chunked(
+                &client,
+                &translation_model_sel.model,
+                &chunks,
+                unit.c2rust_output.as_deref(),
+                &analysis,
+                &relevant_patterns,
+                config.translation_temperature,
+            )
+            .await
+            {
+                Ok(code) => code,
+                Err(e) => {
+                    warn!(function = %name, error = %e, "chunked translation failed, falling back to sync");
+                    return migrate_file_sync(c_file);
+                }
+            }
+        } else {
             match noricum_agents::translation::translate_function_with_patterns_and_temperature(
                 &client,
                 &translation_model_sel.model,
@@ -593,7 +617,8 @@ pub async fn migrate_file(
                     warn!(function = %name, error = %e, "translation agent failed, falling back to sync");
                     return migrate_file_sync(c_file);
                 }
-            };
+            }
+        };
         unit.rust_output = Some(rust_code);
         unit.state = MigrationState::Refined;
         unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
@@ -959,7 +984,7 @@ pub async fn migrate_directory(
         if unit.state == MigrationState::Validated
             && let Some(ref rust_output) = unit.rust_output
         {
-            let sigs = extract_rust_signatures(rust_output);
+            let sigs = noricum_tools::ast::extract_rust_signatures(rust_output);
             if !sigs.is_empty() {
                 info!(
                     file = %path.display(),
@@ -982,29 +1007,6 @@ pub async fn migrate_directory(
     );
 
     Ok(project)
-}
-
-/// Extract function signatures from Rust source code for dependency context.
-///
-/// Looks for `pub fn` and `fn` lines, returning them as context strings
-/// that can be injected into translation prompts for dependent files.
-fn extract_rust_signatures(rust_source: &str) -> Vec<String> {
-    rust_source
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ")) && trimmed.contains('(')
-        })
-        .map(|line| {
-            // Take up to the opening brace or end of line
-            let trimmed = line.trim();
-            if let Some(brace) = trimmed.find('{') {
-                trimmed[..brace].trim().to_string()
-            } else {
-                trimmed.to_string()
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -1153,7 +1155,7 @@ fn main() {
     println!("{}", add(1, 2));
 }
 "#;
-        let sigs = extract_rust_signatures(rust);
+        let sigs = noricum_tools::ast::extract_rust_signatures(rust);
         assert_eq!(sigs.len(), 3);
         assert!(sigs[0].contains("pub fn add(a: i32, b: i32) -> i32"));
         assert!(sigs[1].contains("fn helper(x: i32) -> i32"));
@@ -1163,7 +1165,67 @@ fn main() {
     #[test]
     fn test_extract_rust_signatures_no_functions() {
         let rust = "let x = 5;\nstruct Foo { bar: i32 }";
-        let sigs = extract_rust_signatures(rust);
+        let sigs = noricum_tools::ast::extract_rust_signatures(rust);
         assert!(sigs.is_empty());
+    }
+
+    #[test]
+    fn test_effective_small() {
+        assert_eq!(effective_repair_iterations(5, 500), 5);
+    }
+
+    #[test]
+    fn test_effective_large() {
+        assert_eq!(effective_repair_iterations(5, 1500), 3);
+    }
+
+    #[test]
+    fn test_effective_very_large() {
+        assert_eq!(effective_repair_iterations(5, 3000), 2);
+    }
+
+    #[test]
+    fn test_effective_already_low() {
+        assert_eq!(effective_repair_iterations(1, 3000), 1);
+    }
+
+    #[test]
+    fn test_effective_boundary_1000() {
+        // 1000 is NOT > LARGE_FILE_LOC (1000), so no reduction
+        assert_eq!(effective_repair_iterations(5, 1000), 5);
+    }
+
+    #[test]
+    fn test_effective_boundary_2001() {
+        // 2001 > VERY_LARGE_FILE_LOC (2000), so min(5, 2) = 2
+        assert_eq!(effective_repair_iterations(5, 2001), 2);
+    }
+
+    #[test]
+    fn test_cache_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Run test in the temp directory so .noricum-cache is isolated
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let src = "int cache_test_unique_123() { return 42; }";
+
+        // Miss
+        assert!(cache::get(src).is_none(), "should miss on empty cache");
+
+        // Put + Hit
+        cache::put(src, "fn cache_test_unique_123() -> i32 { 42 }");
+        let hit = cache::get(src);
+        assert!(hit.is_some(), "should hit after put");
+        assert_eq!(hit.unwrap(), "fn cache_test_unique_123() -> i32 { 42 }");
+
+        // Different key = miss
+        assert!(cache::get("int other() { return 0; }").is_none());
+
+        // Empty value = miss (cache::get skips empty)
+        cache::put("int empty_val() {}", "");
+        assert!(cache::get("int empty_val() {}").is_none(), "empty = miss");
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 }

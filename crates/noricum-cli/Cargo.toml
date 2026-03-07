@@ -1,5 +1,6 @@
 [package]
 name = "noricum-cli"
+description = "CLI for autonomous C-to-Rust code migration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
