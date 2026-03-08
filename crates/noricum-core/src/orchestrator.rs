@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 /// Maximum input C source file size: 5 MB.
 /// Prevents OOM on extremely large C files.
-const MAX_C_SOURCE_SIZE: usize = 5 * 1024 * 1024;
+const MAX_C_SOURCE_SIZE: usize = 10 * 1024 * 1024;
 
 /// LOC threshold above which chunked translation is used.
 const MEDIUM_FILE_LOC: usize = 800;
@@ -25,6 +25,8 @@ const MEDIUM_FILE_LOC: usize = 800;
 const LARGE_FILE_LOC: usize = 1000;
 /// LOC threshold above which repair iterations are further reduced and larger chunk targets apply.
 const VERY_LARGE_FILE_LOC: usize = 2000;
+/// LOC threshold for very large files where we use aggressive chunking and P11 signature agreement.
+const MASSIVE_FILE_LOC: usize = 5000;
 
 use crate::CoreError;
 use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit};
@@ -94,8 +96,8 @@ impl Default for MigrationConfig {
             translation_temperature: None,
             repair_base_temperature: None,
             test_gen_temperature: None,
-            max_tokens_budget: Some(500_000),
-            max_llm_calls: Some(20),
+            max_tokens_budget: Some(2_000_000),
+            max_llm_calls: Some(50),
             skip_c2rust: false,
         }
     }
@@ -204,15 +206,28 @@ fn preflight_budget_check(config: &MigrationConfig, c_source: &str, name: &str) 
 /// Chunked translations get full iterations (minimum 8) since each chunk is small.
 fn effective_repair_iterations(configured_max: u32, c_lines: usize, was_chunked: bool) -> u32 {
     if was_chunked {
+        // Chunked files need more repair iterations since each iteration repairs
+        // the combined output of all chunks
         return configured_max.max(8);
     }
-    if c_lines > VERY_LARGE_FILE_LOC {
+    if c_lines > MASSIVE_FILE_LOC {
+        configured_max.min(3) // Still allow some repair for 5000+ LOC
+    } else if c_lines > VERY_LARGE_FILE_LOC {
         configured_max.min(2)
     } else if c_lines > LARGE_FILE_LOC {
         configured_max.min(3)
     } else {
         configured_max
     }
+}
+
+/// Check if Rust output has substance relative to C source (not empty stubs).
+fn has_substance(rust_source: &str, c_source: &str) -> bool {
+    let c_nl = c_source.lines().filter(|l| !l.trim().is_empty()).count();
+    let r_lines = rust_source.lines().filter(|l| !l.trim().is_empty()).count();
+    let efn = noricum_validation::count_empty_functions(rust_source);
+    let tfn = noricum_validation::count_total_functions(rust_source);
+    !(c_nl > 20 && r_lines < c_nl / 4 || tfn > 3 && efn as f32 / tfn as f32 > 0.3)
 }
 
 /// Number of consecutive stalled iterations before triggering re-translation.
@@ -652,7 +667,9 @@ pub async fn migrate_file(
         let c_lines_for_chunk = unit.c_source.lines().count();
         let use_chunked = c_lines_for_chunk > MEDIUM_FILE_LOC;
         let rust_code = if use_chunked {
-            let chunk_target = if c_lines_for_chunk > VERY_LARGE_FILE_LOC {
+            let chunk_target = if c_lines_for_chunk > MASSIVE_FILE_LOC {
+                600 // Larger chunks for massive files — fewer API calls, more context per chunk
+            } else if c_lines_for_chunk > VERY_LARGE_FILE_LOC {
                 500
             } else {
                 400
@@ -718,6 +735,64 @@ pub async fn migrate_file(
                     return migrate_file_sync(c_file);
                 }
             }
+        };
+
+        // P6: Substance gate — reject translations that are mostly empty stubs.
+        // This catches the case where the LLM returns function signatures with empty bodies.
+        let c_lines_nonempty = unit.c_source.lines().filter(|l| !l.trim().is_empty()).count();
+        let rust_lines_nonempty = rust_code.lines().filter(|l| !l.trim().is_empty()).count();
+        let empty_fn_count = noricum_validation::count_empty_functions(&rust_code);
+        let total_fn_count = noricum_validation::count_total_functions(&rust_code);
+        let is_stub = (c_lines_nonempty > 20 && rust_lines_nonempty < c_lines_nonempty / 4)
+            || (total_fn_count > 3 && empty_fn_count as f32 / total_fn_count as f32 > 0.3);
+
+        let rust_code = if is_stub {
+            warn!(
+                function = %name,
+                c_lines = c_lines_nonempty,
+                rust_lines = rust_lines_nonempty,
+                empty_fns = empty_fn_count,
+                total_fns = total_fn_count,
+                "P6: translation produced empty stubs, re-translating with temperature 0.5"
+            );
+            unit.metrics.llm_calls += 1;
+            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                &client,
+                &translation_model_sel.model,
+                &unit.c_source,
+                unit.c2rust_output.as_deref(),
+                &analysis,
+                &relevant_patterns,
+                Some(0.5),
+            )
+            .await
+            {
+                Ok(retranslated) => {
+                    let new_lines = retranslated.lines().filter(|l| !l.trim().is_empty()).count();
+                    let new_empty = noricum_validation::count_empty_functions(&retranslated);
+                    let new_total = noricum_validation::count_total_functions(&retranslated);
+                    let still_stub = (c_lines_nonempty > 20 && new_lines < c_lines_nonempty / 4)
+                        || (new_total > 3 && new_empty as f32 / new_total as f32 > 0.3);
+                    if !still_stub {
+                        info!(
+                            function = %name,
+                            old_lines = rust_lines_nonempty,
+                            new_lines,
+                            "P6: re-translation produced substantial code"
+                        );
+                        retranslated
+                    } else {
+                        warn!(function = %name, "P6: re-translation still produced stubs");
+                        rust_code
+                    }
+                }
+                Err(e) => {
+                    warn!(function = %name, error = %e, "P6: re-translation failed");
+                    rust_code
+                }
+            }
+        } else {
+            rust_code
         };
 
         // Quality gate: if initial translation has >5 unsafe blocks, re-translate
@@ -835,10 +910,18 @@ pub async fn migrate_file(
 
         // P1: Best-version tracking — keep the version with the highest score
         // that doesn't exceed the baseline unsafe count.
-        let mut best_version: Option<String> = unit.rust_output.clone();
-        let mut best_score: u32 = validation.idiomatic_score;
+        // P6b: Only seed best version if it has substance (not empty stubs).
+        let initial_has_substance = unit.rust_output.as_deref()
+            .is_some_and(|r| has_substance(r, &unit.c_source));
+        let mut best_version: Option<String> = if initial_has_substance {
+            unit.rust_output.clone()
+        } else {
+            warn!(function = %name, "P6b: initial translation is stub, not seeding as best version");
+            None
+        };
+        let mut best_score: u32 = if initial_has_substance { validation.idiomatic_score } else { 0 };
         let mut best_unsafe: u32 = baseline_unsafe;
-        let mut best_compiles: bool = validation.compiles;
+        let mut best_compiles: bool = if initial_has_substance { validation.compiles } else { false };
 
         let mut iteration = 1u32;
         let mut prev_error_count: Option<usize> = None;
@@ -951,8 +1034,11 @@ pub async fn migrate_file(
                         max_iters,
                     );
 
-                    // P1: Update best version if this re-translation is better
-                    if re_validation.unsafe_count <= baseline_unsafe
+                    // P1+P6b: Update best version if this re-translation is better and has substance
+                    let retrans_has_substance = unit.rust_output.as_deref()
+                        .is_some_and(|r| has_substance(r, &unit.c_source));
+                    if retrans_has_substance
+                        && re_validation.unsafe_count <= baseline_unsafe
                         && (re_validation.idiomatic_score > best_score
                             || (re_validation.compiles && !best_compiles))
                     {
@@ -1051,8 +1137,11 @@ pub async fn migrate_file(
                 "repair iteration result"
             );
 
-            // P1: Update best version if this repair is better
-            if re_validation.unsafe_count <= baseline_unsafe
+            // P1+P6b: Update best version if this repair is better AND has substance
+            let repair_has_substance = unit.rust_output.as_deref()
+                .is_some_and(|r| has_substance(r, &unit.c_source));
+            if repair_has_substance
+                && re_validation.unsafe_count <= baseline_unsafe
                 && (re_validation.idiomatic_score > best_score
                     || (re_validation.compiles && !best_compiles))
             {

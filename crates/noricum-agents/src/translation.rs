@@ -165,6 +165,73 @@ pub async fn translate_chunked(
 
     let mut accumulated_rust = Vec::new();
     let mut accumulated_sigs: Vec<String> = Vec::new();
+    // P9: Foundation context — chunk 0's output (types, data model) is passed to all
+    // subsequent chunks so they can reference the translated Rust types.
+    let mut foundation_rust: Option<String> = None;
+
+    // P11: Signature agreement pass — for files with many chunks, generate agreed-upon
+    // Rust signatures for all functions before translating bodies. This prevents
+    // signature mismatches between chunks (e.g., chunk 2 calls a function from chunk 1
+    // with the wrong parameter types).
+    let mut agreed_signatures: Option<String> = None;
+    if chunks.len() > 2 {
+        // Collect all function signatures from all chunks
+        let mut all_sigs = String::new();
+        for chunk in chunks {
+            if chunk.is_data_chunk {
+                continue;
+            }
+            for line in chunk.functions_source.lines() {
+                let trimmed = line.trim();
+                // Capture C function signatures (lines with parens that look like declarations)
+                if !trimmed.starts_with("//")
+                    && !trimmed.starts_with('#')
+                    && trimmed.contains('(')
+                    && (trimmed.ends_with('{') || trimmed.ends_with(')') || trimmed.ends_with(");"))
+                    && !trimmed.starts_with("if")
+                    && !trimmed.starts_with("while")
+                    && !trimmed.starts_with("for")
+                    && !trimmed.starts_with("return")
+                {
+                    let sig = trimmed.split('{').next().unwrap_or(trimmed).trim();
+                    if !sig.is_empty() && sig.contains('(') {
+                        all_sigs.push_str(sig);
+                        all_sigs.push('\n');
+                    }
+                }
+            }
+        }
+
+        if !all_sigs.is_empty() {
+            let sig_prompt = format!(
+                "{}\n\n## C function signatures\n```c\n{}\n```\n\n\
+                 Produce ONLY the Rust function signatures (fn declarations without bodies) for all functions above.\n\
+                 Use idiomatic Rust types: &str instead of *const char, Vec<T> instead of *T + length, \
+                 Option<T> for nullable pointers, &mut T for output pointers.\n\
+                 Output ONLY the Rust signatures, one per line, no bodies, no explanation.",
+                chunks[0].shared_context, all_sigs
+            );
+
+            match client
+                .run_prompt(model, TRANSLATION_PREAMBLE, 0.2, 4096, &sig_prompt)
+                .await
+            {
+                Ok(response) => {
+                    let sigs = crate::extract_rust_code(&response);
+                    if sigs.contains("fn ") {
+                        info!(
+                            sig_count = sigs.lines().filter(|l| l.contains("fn ")).count(),
+                            "P11: generated agreed Rust signatures"
+                        );
+                        agreed_signatures = Some(sigs);
+                    }
+                }
+                Err(e) => {
+                    debug!(error = %e, "P11: signature agreement pass failed, continuing without");
+                }
+            }
+        }
+    }
 
     for (i, chunk) in chunks.iter().enumerate() {
         info!(
@@ -172,8 +239,28 @@ pub async fn translate_chunked(
             total = chunks.len(),
             functions = chunk.function_names.len(),
             lines = chunk.line_count,
+            is_data = chunk.is_data_chunk,
             "translating chunk"
         );
+
+        // P8: Data chunks get specialized transcription instructions
+        if chunk.is_data_chunk {
+            let mut data_source = chunk.shared_context.clone();
+            data_source.push_str(
+                "\n\n// === INSTRUCTION: This chunk contains ONLY static data (arrays, lookup tables). ===\n\
+                 // Transcribe each C array to an equivalent Rust const array.\n\
+                 // Use `const NAME: [[type; N]; M] = [...]` syntax.\n\
+                 // Preserve all values exactly. Do NOT add functions.\n",
+            );
+            data_source.push_str("\n\n// === Data to transcribe ===\n");
+            data_source.push_str(&chunk.functions_source);
+
+            let rust_code = translate_function_with_patterns_and_temperature(
+                client, model, &data_source, None, analysis, patterns, temperature,
+            ).await?;
+            accumulated_rust.push(rust_code);
+            continue;
+        }
 
         // Build a synthetic C source: shared context + this chunk's functions
         let mut chunk_source = chunk.shared_context.clone();
@@ -188,6 +275,25 @@ pub async fn translate_chunked(
         chunk_source.push_str("\n\n// === Functions to translate ===\n");
         chunk_source.push_str(&chunk.functions_source);
 
+        // P9: Include foundation context (chunk 0's types) for all subsequent chunks
+        if i > 0 && let Some(ref foundation) = foundation_rust {
+            let type_lines: Vec<&str> = foundation.lines().filter(|l| {
+                let t = l.trim();
+                t.starts_with("pub struct ") || t.starts_with("struct ")
+                    || t.starts_with("pub enum ") || t.starts_with("enum ")
+                    || t.starts_with("pub type ") || t.starts_with("type ")
+                    || t.starts_with("pub const ") || t.starts_with("const ")
+                    || t.starts_with("impl ") || t.starts_with("pub fn new(")
+                    || t.starts_with("    pub ") || t == "}" || t == "{"
+            }).collect();
+            if !type_lines.is_empty() {
+                chunk_source.push_str(&format!(
+                    "\n\n// === P9: Rust types from data model (already translated) ===\n{}",
+                    type_lines.join("\n")
+                ));
+            }
+        }
+
         // If we have previously translated signatures, add them as context
         if !accumulated_sigs.is_empty() {
             let sig_context = format!(
@@ -195,6 +301,14 @@ pub async fn translate_chunked(
                 accumulated_sigs.join("\n")
             );
             chunk_source.push_str(&sig_context);
+        }
+
+        // P11: Include agreed-upon signatures so all chunks use consistent types
+        if let Some(ref sigs) = agreed_signatures {
+            chunk_source.push_str(&format!(
+                "\n\n// === P11: Agreed Rust function signatures (use these exact types) ===\n{}",
+                sigs
+            ));
         }
 
         // P2: Per-function C2Rust context — extract only the c2rust functions
@@ -220,11 +334,80 @@ pub async fn translate_chunked(
         )
         .await?;
 
+        // P3-fix: Per-chunk substance validation — detect empty stubs before accumulating.
+        // If a chunk produces mostly empty functions, retry once with higher temperature.
+        let chunk_c_lines = chunk.functions_source.lines().filter(|l| !l.trim().is_empty()).count();
+        let chunk_rust_lines = rust_code.lines().filter(|l| !l.trim().is_empty()).count();
+        let empty_fns = count_empty_fns_quick(&rust_code);
+        let total_fns = count_total_fns_quick(&rust_code);
+        let chunk_is_stub = (chunk_c_lines > 10 && chunk_rust_lines < chunk_c_lines / 4)
+            || (total_fns > 2 && empty_fns as f32 / total_fns as f32 > 0.3);
+
+        let rust_code = if chunk_is_stub {
+            tracing::warn!(
+                chunk = i + 1,
+                chunk_c_lines,
+                chunk_rust_lines,
+                empty_fns,
+                total_fns,
+                "chunk produced empty stubs, retrying with temperature 0.5"
+            );
+            let retry = translate_function_with_patterns_and_temperature(
+                client, model, &chunk_source, chunk_c2rust.as_deref(),
+                analysis, patterns, Some(0.5),
+            ).await?;
+            let retry_lines = retry.lines().filter(|l| !l.trim().is_empty()).count();
+            let retry_empty = count_empty_fns_quick(&retry);
+            let retry_total = count_total_fns_quick(&retry);
+            let still_stub = (chunk_c_lines > 10 && retry_lines < chunk_c_lines / 4)
+                || (retry_total > 2 && retry_empty as f32 / retry_total as f32 > 0.3);
+            if !still_stub {
+                info!(chunk = i + 1, "chunk retry produced substantial code");
+                retry
+            } else {
+                tracing::warn!(chunk = i + 1, "chunk retry still produced stubs, keeping original");
+                rust_code
+            }
+        } else {
+            rust_code
+        };
+
         // Extract signatures from this chunk's output for next chunk's context
         let new_sigs = noricum_tools::ast::extract_rust_signatures(&rust_code);
         accumulated_sigs.extend(new_sigs);
 
+        // P9: Save chunk 0's output as foundation context for subsequent chunks
+        if i == 0 && foundation_rust.is_none() {
+            foundation_rust = Some(rust_code.clone());
+        }
+
         accumulated_rust.push(rust_code);
+
+        // P10: Incremental compilation check — combine accumulated chunks and verify
+        // they compile together. This catches type mismatches early instead of at the end.
+        if chunks.len() > 2 && i < chunks.len() - 1 {
+            let partial = combine_accumulated_chunks(&accumulated_rust);
+            match noricum_tools::compiler::check_rust_compiles(&partial) {
+                Ok(result) if !result.success => {
+                    let error_count = result.stderr.lines()
+                        .filter(|l| l.contains("error"))
+                        .count();
+                    if error_count > 0 {
+                        info!(
+                            chunk = i + 1,
+                            errors = error_count,
+                            "P10: incremental compilation has errors (will resolve in later chunks or repair)"
+                        );
+                    }
+                }
+                Ok(_) => {
+                    info!(chunk = i + 1, "P10: incremental compilation OK");
+                }
+                Err(e) => {
+                    debug!(chunk = i + 1, error = %e, "P10: incremental compilation check failed");
+                }
+            }
+        }
     }
 
     // Combine all chunks, deduplicating `use` statements
@@ -524,6 +707,88 @@ fn to_snake_case(name: &str) -> String {
     result
 }
 
+/// Quick check for empty function bodies in Rust code (no external dependency).
+///
+/// Counts functions with bodies that are empty, contain only `todo!()`, or just `unimplemented!()`.
+fn count_empty_fns_quick(rust_source: &str) -> usize {
+    let mut count = 0;
+    let lines: Vec<&str> = rust_source.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn "))
+            && trimmed.contains('(')
+        {
+            // Look at the next few non-empty lines for empty body
+            let mut body_content = String::new();
+            for inner_line in lines.iter().skip(i + 1).take(4) {
+                let inner = inner_line.trim();
+                if inner == "{" || inner == "}" || inner.is_empty() {
+                    continue;
+                }
+                body_content.push_str(inner);
+                break;
+            }
+            if body_content.is_empty()
+                || body_content == "todo!()"
+                || body_content == "unimplemented!()"
+                || (trimmed.ends_with("{}") || trimmed.ends_with("{ }"))
+            {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Quick count of function definitions in Rust code (no external dependency).
+fn count_total_fns_quick(rust_source: &str) -> usize {
+    rust_source
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            (t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("pub(crate) fn "))
+                && t.contains('(')
+        })
+        .count()
+}
+
+/// P10: Combine accumulated chunk outputs into a single Rust source for incremental compilation.
+///
+/// Deduplicates `use` statements and joins code parts — same logic as the final combination
+/// but extracted for reuse during incremental checks.
+fn combine_accumulated_chunks(chunks: &[String]) -> String {
+    let mut use_statements = Vec::new();
+    let mut code_parts = Vec::new();
+
+    for part in chunks {
+        let mut code_lines = Vec::new();
+        for line in part.lines() {
+            if line.trim().starts_with("use ") {
+                if !use_statements.contains(&line.trim().to_string()) {
+                    use_statements.push(line.trim().to_string());
+                }
+            } else {
+                code_lines.push(line);
+            }
+        }
+        let code = code_lines.join("\n").trim().to_string();
+        if !code.is_empty() {
+            code_parts.push(code);
+        }
+    }
+
+    let mut output = String::new();
+    for stmt in &use_statements {
+        output.push_str(stmt);
+        output.push('\n');
+    }
+    if !use_statements.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&code_parts.join("\n\n"));
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,5 +927,39 @@ pub unsafe extern \"C\" fn add(a: i32, b: i32) -> i32 {\n\
         let result = extract_c2rust_for_chunk(c2rust, &names, false);
         // No matching functions, should return only header lines
         assert!(!result.contains("fn add("), "no names means no functions extracted");
+    }
+
+    #[test]
+    fn test_count_empty_fns_quick_detects_stubs() {
+        let source = "fn add(a: i32, b: i32) -> i32 {}\nfn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\nfn mul(a: i32, b: i32) -> i32 { }";
+        assert_eq!(count_empty_fns_quick(source), 2, "should detect 2 empty fns");
+    }
+
+    #[test]
+    fn test_count_empty_fns_quick_detects_todo() {
+        let source = "fn add(a: i32, b: i32) -> i32 {\n    todo!()\n}\nfn sub(a: i32, b: i32) -> i32 {\n    a - b\n}";
+        assert_eq!(count_empty_fns_quick(source), 1, "should detect todo!() as empty");
+    }
+
+    #[test]
+    fn test_count_total_fns_quick() {
+        let source = "fn add(a: i32) -> i32 { a }\npub fn sub(a: i32) -> i32 { a }\nstruct Foo {}";
+        assert_eq!(count_total_fns_quick(source), 2, "should count 2 fns");
+    }
+
+    #[test]
+    fn test_combine_accumulated_chunks_deduplicates_use() {
+        let chunks = vec![
+            "use std::collections::HashMap;\nfn a() {}".to_string(),
+            "use std::collections::HashMap;\nuse std::io;\nfn b() {}".to_string(),
+        ];
+        let result = combine_accumulated_chunks(&chunks);
+        assert_eq!(
+            result.matches("use std::collections::HashMap;").count(), 1,
+            "should deduplicate HashMap use"
+        );
+        assert!(result.contains("use std::io;"));
+        assert!(result.contains("fn a()"));
+        assert!(result.contains("fn b()"));
     }
 }
