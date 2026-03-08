@@ -23,6 +23,7 @@ pub struct MigrateParams {
     pub max_tokens: Option<u64>,
     pub max_llm_calls: Option<u32>,
     pub ollama_model: Option<String>,
+    pub skip_c2rust: bool,
 }
 
 pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
@@ -58,6 +59,7 @@ pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
         audit_level: level,
         generate_docs: opts.docs,
         ollama_model: opts.ollama_model,
+        skip_c2rust: opts.skip_c2rust,
         max_tokens_budget: match opts.max_tokens {
             Some(0) => None,
             Some(n) => Some(n),

@@ -683,6 +683,148 @@ pub fn chunk_c_source_structural(c_source: &str, target_chunk_lines: usize) -> V
     chunks
 }
 
+/// P3: A logical module extracted from a large C source file.
+///
+/// Groups related functions together for incremental per-module migration.
+#[derive(Debug, Clone)]
+pub struct CModule {
+    /// Module name (derived from common prefix or domain).
+    pub name: String,
+    /// The C source for this module (shared context + functions).
+    pub source: String,
+    /// Function names in this module.
+    pub function_names: Vec<String>,
+    /// Line count.
+    pub line_count: usize,
+}
+
+/// P3: Split a large C source into logical modules for incremental migration.
+///
+/// Groups functions by common prefix (e.g., `hash_` functions go in "hash" module,
+/// `parse_` functions go in "parse" module). Functions without a common prefix
+/// go into a "misc" module. Shared context (types, includes) is prepended to each.
+pub fn split_into_modules(c_source: &str) -> Vec<CModule> {
+    let functions = extract_c_functions(c_source);
+    if functions.len() < 4 {
+        // Too few functions to split into modules
+        return vec![CModule {
+            name: "main".to_string(),
+            source: c_source.to_string(),
+            function_names: functions.iter().map(|f| f.name.clone()).collect(),
+            line_count: c_source.lines().count(),
+        }];
+    }
+
+    // Extract shared context (everything outside function bodies)
+    let mut shared_lines = Vec::new();
+    let mut pos = 0;
+    for func in &functions {
+        if func.start_byte > pos {
+            let before = &c_source[pos..func.start_byte];
+            for line in before.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    shared_lines.push(line.to_string());
+                }
+            }
+        }
+        pos = func.end_byte;
+    }
+    if pos < c_source.len() {
+        let after = &c_source[pos..];
+        for line in after.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                shared_lines.push(line.to_string());
+            }
+        }
+    }
+    let shared_context = shared_lines.join("\n");
+
+    // Group functions by prefix (first word before '_' or common pattern)
+    let mut groups: std::collections::BTreeMap<String, Vec<&CFunction>> =
+        std::collections::BTreeMap::new();
+
+    for func in &functions {
+        let prefix = extract_function_prefix(&func.name);
+        groups.entry(prefix).or_default().push(func);
+    }
+
+    // Merge small groups (< 2 functions) into "misc"
+    let mut modules = Vec::new();
+    let mut misc_funcs: Vec<&CFunction> = Vec::new();
+
+    for (prefix, funcs) in &groups {
+        if funcs.len() < 2 || prefix == "main" {
+            misc_funcs.extend(funcs);
+        } else {
+            let mut source = shared_context.clone();
+            source.push_str("\n\n// === Module functions ===\n");
+            let mut names = Vec::new();
+            for func in funcs {
+                let func_text = &c_source[func.start_byte..func.end_byte];
+                source.push('\n');
+                source.push_str(func_text);
+                names.push(func.name.clone());
+            }
+            let line_count = source.lines().count();
+            modules.push(CModule {
+                name: prefix.clone(),
+                source,
+                function_names: names,
+                line_count,
+            });
+        }
+    }
+
+    if !misc_funcs.is_empty() {
+        let mut source = shared_context;
+        source.push_str("\n\n// === Miscellaneous functions ===\n");
+        let mut names = Vec::new();
+        for func in &misc_funcs {
+            let func_text = &c_source[func.start_byte..func.end_byte];
+            source.push('\n');
+            source.push_str(func_text);
+            names.push(func.name.clone());
+        }
+        let line_count = source.lines().count();
+        modules.push(CModule {
+            name: "misc".to_string(),
+            source,
+            function_names: names,
+            line_count,
+        });
+    }
+
+    modules
+}
+
+/// Extract the prefix of a function name for module grouping.
+///
+/// For `hash_insert` → "hash", `cJSON_Parse` → "cjson", `main` → "main".
+fn extract_function_prefix(name: &str) -> String {
+    // Try underscore-separated prefix
+    if let Some(idx) = name.find('_') {
+        let prefix = &name[..idx];
+        if !prefix.is_empty() && prefix.len() > 1 {
+            return prefix.to_lowercase();
+        }
+    }
+    // Try camelCase prefix (e.g., cJSON_Parse → cJSON → cjson)
+    let mut prefix_end = 0;
+    let chars: Vec<char> = name.chars().collect();
+    for i in 1..chars.len() {
+        if chars[i].is_uppercase() && chars[i - 1].is_lowercase() {
+            prefix_end = i;
+            break;
+        }
+    }
+    if prefix_end > 1 {
+        return name[..prefix_end].to_lowercase();
+    }
+    name.to_lowercase()
+}
+
 /// Extract function signatures from Rust source code for dependency context.
 ///
 /// Looks for `pub fn` and `fn` lines, returning them as context strings
@@ -1118,5 +1260,60 @@ int mul(int a, int b) { return a * b; }
             regular.len(),
             "no structs should produce same as regular chunking"
         );
+    }
+
+    #[test]
+    fn test_extract_function_prefix() {
+        assert_eq!(extract_function_prefix("hash_insert"), "hash");
+        assert_eq!(extract_function_prefix("hash_delete"), "hash");
+        assert_eq!(extract_function_prefix("parse_expr"), "parse");
+        assert_eq!(extract_function_prefix("main"), "main");
+        assert_eq!(extract_function_prefix("getValue"), "get");
+    }
+
+    #[test]
+    fn test_split_into_modules_groups_by_prefix() {
+        let source = "\
+void hash_insert(int k, int v) { }
+void hash_delete(int k) { }
+void hash_lookup(int k) { }
+void parse_expr(const char *s) { }
+void parse_stmt(const char *s) { }
+int main() { return 0; }
+";
+        let modules = split_into_modules(source);
+        let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"hash"), "should have hash module, got {:?}", names);
+        assert!(names.contains(&"parse"), "should have parse module, got {:?}", names);
+
+        let hash_mod = modules.iter().find(|m| m.name == "hash").unwrap();
+        assert_eq!(hash_mod.function_names.len(), 3);
+    }
+
+    #[test]
+    fn test_split_into_modules_few_functions() {
+        let source = "\
+int add(int a, int b) { return a + b; }
+int sub(int a, int b) { return a - b; }
+";
+        let modules = split_into_modules(source);
+        assert_eq!(modules.len(), 1, "too few functions should produce 1 module");
+        assert_eq!(modules[0].name, "main");
+    }
+
+    #[test]
+    fn test_split_into_modules_merges_small_groups() {
+        let source = "\
+void hash_insert(int k, int v) { }
+void hash_delete(int k) { }
+void parse_expr(const char *s) { }
+void parse_stmt(const char *s) { }
+void unique_function(int x) { }
+int main() { return 0; }
+";
+        let modules = split_into_modules(source);
+        // unique_function and main should be in misc
+        let misc = modules.iter().find(|m| m.name == "misc");
+        assert!(misc.is_some(), "should have misc module for singletons");
     }
 }

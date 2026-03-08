@@ -159,6 +159,9 @@ struct MigrateOpts {
     /// Ollama model name (default: qwen2.5-coder:32b)
     #[arg(long)]
     ollama_model: Option<String>,
+    /// Skip C2Rust transpilation (translate directly from C source)
+    #[arg(long)]
+    skip_c2rust: bool,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -198,6 +201,7 @@ async fn main() {
                 max_tokens: opts.max_tokens,
                 max_llm_calls: opts.max_llm_calls,
                 ollama_model: opts.ollama_model,
+                skip_c2rust: opts.skip_c2rust,
             })
             .await
         }

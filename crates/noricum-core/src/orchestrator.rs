@@ -70,6 +70,9 @@ pub struct MigrationConfig {
     /// Maximum number of LLM API calls per run. Prevents runaway loops.
     /// Defaults to 20. Set to `None` for unlimited.
     pub max_llm_calls: Option<u32>,
+    /// Skip C2Rust transpilation entirely. Useful when the LLM produces better
+    /// translations directly from C source, saving tokens and time.
+    pub skip_c2rust: bool,
 }
 
 impl Default for MigrationConfig {
@@ -93,6 +96,7 @@ impl Default for MigrationConfig {
             test_gen_temperature: None,
             max_tokens_budget: Some(500_000),
             max_llm_calls: Some(20),
+            skip_c2rust: false,
         }
     }
 }
@@ -545,16 +549,22 @@ pub async fn migrate_file(
     }
 
     // --- Stage 3: Try C2Rust transpilation ---
-    match noricum_tools::c2rust::transpile(c_file) {
-        Ok(output) => {
-            let rust_src = output.rust_source;
-            unit.c2rust_output = Some(rust_src.clone());
-            unit.rust_output = Some(rust_src);
-            unit.state = MigrationState::C2RustDone;
-            info!(function = %name, state = ?unit.state, "state -> C2RustDone");
-        }
-        Err(e) => {
-            debug!(function = %name, error = %e, "c2rust not available, will translate from scratch");
+    // P4: Skip c2rust when configured — the LLM often produces better translations
+    // directly from C source, and c2rust output wastes tokens for large files.
+    if config.skip_c2rust {
+        debug!(function = %name, "skipping c2rust (skip_c2rust=true)");
+    } else {
+        match noricum_tools::c2rust::transpile(c_file) {
+            Ok(output) => {
+                let rust_src = output.rust_source;
+                unit.c2rust_output = Some(rust_src.clone());
+                unit.rust_output = Some(rust_src);
+                unit.state = MigrationState::C2RustDone;
+                info!(function = %name, state = ?unit.state, "state -> C2RustDone");
+            }
+            Err(e) => {
+                debug!(function = %name, error = %e, "c2rust not available, will translate from scratch");
+            }
         }
     }
 
@@ -803,6 +813,8 @@ pub async fn migrate_file(
     }
 
     // --- Stage 7: Repair loop (token-aware iteration limit) ---
+    // P0: Track baseline unsafe count from translation to enforce quality floor.
+    // P1: Track best version (highest score with acceptable unsafe count).
     if !validation.passed {
         let repair_start = Instant::now();
         let repair_model_sel = select_model(&provider_config, difficulty, "repair")?;
@@ -816,6 +828,17 @@ pub async fn migrate_file(
                 "reducing repair iterations for large file"
             );
         }
+
+        // P0: Baseline unsafe count from the initial translation.
+        // Repair must NEVER produce more unsafe blocks than this.
+        let baseline_unsafe = validation.unsafe_count;
+
+        // P1: Best-version tracking — keep the version with the highest score
+        // that doesn't exceed the baseline unsafe count.
+        let mut best_version: Option<String> = unit.rust_output.clone();
+        let mut best_score: u32 = validation.idiomatic_score;
+        let mut best_unsafe: u32 = baseline_unsafe;
+        let mut best_compiles: bool = validation.compiles;
 
         let mut iteration = 1u32;
         let mut prev_error_count: Option<usize> = None;
@@ -900,6 +923,25 @@ pub async fn migrate_file(
                         &re_validation,
                         max_iters,
                     );
+
+                    // P1: Update best version if this re-translation is better
+                    if re_validation.unsafe_count <= baseline_unsafe
+                        && (re_validation.idiomatic_score > best_score
+                            || (re_validation.compiles && !best_compiles))
+                    {
+                        best_version = unit.rust_output.clone();
+                        best_score = re_validation.idiomatic_score;
+                        best_unsafe = re_validation.unsafe_count;
+                        best_compiles = re_validation.compiles;
+                        info!(
+                            function = %name,
+                            best_score,
+                            best_unsafe,
+                            best_compiles,
+                            "new best version from re-translation"
+                        );
+                    }
+
                     if re_validation.passed {
                         info!(function = %name, "re-translation passed validation directly");
                         break;
@@ -940,6 +982,23 @@ pub async fn migrate_file(
             )
             .await?;
 
+            // P0: Quality floor — reject repair if it introduces more unsafe blocks
+            let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
+            if repaired_unsafe > baseline_unsafe {
+                warn!(
+                    function = %name,
+                    iteration,
+                    repaired_unsafe,
+                    baseline_unsafe,
+                    "P0: repair rejected — introduces more unsafe blocks than translation baseline"
+                );
+                // Don't apply this repair; keep the current version and continue
+                unit.metrics.llm_calls += 1;
+                unit.metrics.repair_iterations = iteration;
+                iteration += 1;
+                continue;
+            }
+
             // Estimate token usage for repair call
             let input_token_est = noricum_agents::estimate_tokens(current_rust);
             let output_token_est = noricum_agents::estimate_tokens(&repaired);
@@ -965,6 +1024,25 @@ pub async fn migrate_file(
                 "repair iteration result"
             );
 
+            // P1: Update best version if this repair is better
+            if re_validation.unsafe_count <= baseline_unsafe
+                && (re_validation.idiomatic_score > best_score
+                    || (re_validation.compiles && !best_compiles))
+            {
+                best_version = unit.rust_output.clone();
+                best_score = re_validation.idiomatic_score;
+                best_unsafe = re_validation.unsafe_count;
+                best_compiles = re_validation.compiles;
+                info!(
+                    function = %name,
+                    iteration,
+                    best_score,
+                    best_unsafe,
+                    best_compiles,
+                    "new best version from repair"
+                );
+            }
+
             if re_validation.passed {
                 info!(function = %name, "repair succeeded, validated");
                 break;
@@ -976,16 +1054,28 @@ pub async fn migrate_file(
         unit.metrics.repair_ms = repair_start.elapsed().as_millis() as u64;
 
         // --- Stage 8: Fallback ---
+        // P1: Use best-tracked version instead of falling back to raw c2rust output.
+        // This preserves the highest-quality translation even if it didn't fully pass.
         if unit.state != MigrationState::Validated {
             unit.state = MigrationState::FallbackUnsafe;
-            // Prefer C2Rust output as fallback if available
-            if let Some(ref c2rust) = unit.c2rust_output {
+            if let Some(best) = best_version {
+                info!(
+                    function = %name,
+                    best_score,
+                    best_unsafe,
+                    best_compiles,
+                    "P1: using best-tracked version instead of c2rust fallback"
+                );
+                unit.rust_output = Some(best);
+                unit.idiomatic_score = Some(best_score);
+                unit.unsafe_count = Some(best_unsafe);
+            } else if let Some(ref c2rust) = unit.c2rust_output {
                 unit.rust_output = Some(c2rust.clone());
             }
             warn!(
                 function = %name,
                 state = ?unit.state,
-                "max repair iterations reached, falling back to unsafe"
+                "max repair iterations reached, falling back"
             );
         }
     }
@@ -1488,5 +1578,20 @@ fn main() {
         assert!(cache::get("int empty_val() {}").is_none(), "empty = miss");
 
         std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_migration_config_skip_c2rust_default() {
+        let config = MigrationConfig::default();
+        assert!(!config.skip_c2rust, "skip_c2rust should default to false");
+    }
+
+    #[test]
+    fn test_migration_config_skip_c2rust_set() {
+        let config = MigrationConfig {
+            skip_c2rust: true,
+            ..Default::default()
+        };
+        assert!(config.skip_c2rust);
     }
 }
