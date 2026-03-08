@@ -1,0 +1,11 @@
+GENANN TEST SUITE
+test_basic passed
+test_xor passed
+test_backprop passed
+test_train_and passed
+test_train_or passed
+test_train_xor passed
+test_persist passed
+test_copy passed
+test_sigmoid passed
+ALL TESTS PASSED (521556/521556)
