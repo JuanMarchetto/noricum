@@ -1,0 +1,104 @@
+=== test_fill ===
+fill_ck: 0xB82DF000
+fill_px00: 0xFF0000FF
+fill_px15: 0xFF0000FF
+=== test_rect ===
+rect_ck: 0xDBB5F000
+rect_in: 0xFF0000FF
+rect_out: 0xFF000000
+=== test_frame ===
+frame_ck: 0xA4AD8C00
+=== test_circle ===
+circle_ck: 0x0AE1F721
+circle_center: 0xFFFFFFFF
+=== test_ellipse ===
+ellipse_ck: 0xBCBBC000
+ellipse_center: 0xFF00FF00
+=== test_line ===
+line_ck: 0x2A678A01
+line_start: 0xFFFFFFFF
+line_end: 0xFFFFFFFF
+hline_ck: 0xBE000000
+=== test_triangle ===
+tri_ck: 0xDBFCF241
+=== test_triangle3c ===
+tri3c_ck: 0x68C54313
+=== test_triangle3z ===
+tri3z_ck: 0x59A95D02
+tri3z_px: 0x3F14E5E1
+=== test_triangle3uv ===
+tri3uv_ck: 0xB2E7B8E7
+=== test_triangle3uv_bilinear ===
+tri3uv_bi_ck: 0xA5F0B633
+=== test_blend_color ===
+blend_semi: 0xFF000080
+blend_opaque: 0xFF00FF00
+blend_trans: 0xFF646464
+=== test_mix_colors ===
+mix2_half: 0xFF7F007F
+mix2_full: 0xFF0000FF
+mix2_zero: 0xFFFF0000
+mix3_eq: 0xFF555555
+mix2_det0: 0x00000000
+mix3_det0: 0x00000000
+=== test_text ===
+text_ck: 0x5E1BB108
+text2_ck: 0xFACAB9C0
+=== test_sprite_blend ===
+spblend_ck: 0xB4B17F00
+spblend_px: 0xFF402A2A
+=== test_sprite_copy ===
+spcopy_ck: 0x995A7E00
+spcopy_px: 0xFF005555
+=== test_sprite_copy_bilinear ===
+spbilin_ck: 0x804C6108
+spbilin_px: 0xFF002A2A
+=== test_subcanvas ===
+sub_ck: 0x532DF000
+sub_px00: 0xFF000000
+sub_px88: 0xFF0000FF
+sub_px23: 0xFF0000FF
+sub_px24: 0xFF000000
+sub2_ck: 0xF65D25C0
+sub2_px1313: 0xFF00FF00
+=== test_normalize_rect ===
+nr_ok: 1
+nr_x1: 5
+nr_y1: 5
+nr_x2: 14
+nr_y2: 14
+nr2_ok: 1
+nr2_x1: 6
+nr2_y1: 6
+nr2_x2: 15
+nr2_y2: 15
+nr3_ok: 0
+nr4_ok: 0
+nr5_ok: 1
+nr5_x1: 0
+nr5_y1: 0
+nr5_x2: 14
+nr5_y2: 14
+=== test_in_bounds ===
+ib_00: 1
+ib_99: 1
+ib_neg: 0
+ib_oob: 0
+ib_edge: 0
+=== test_barycentric ===
+bary_in: 1
+bary_u1: 35
+bary_u2: 35
+bary_det: 100
+bary_out: 0
+=== test_normalize_triangle ===
+ntri_ok: 1
+ntri_lx: 5
+ntri_hx: 25
+ntri_ly: 5
+ntri_hy: 25
+ntri2_ok: 0
+=== test_edge_cases ===
+edge_ck: 0x06598E80
+edge_px44: 0xFF00FF00
+olive_done
