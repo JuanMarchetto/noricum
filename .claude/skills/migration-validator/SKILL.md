@@ -60,6 +60,7 @@ Enhanced formula with positive AND negative signals:
 - Stall detection: 2 unchanged error counts → re-translate at temp 0.7
 - Temperature ramp: base 0.2 + 0.1 per iteration (capped at 1.0)
 - Quality gate: if initial translation has >5 unsafe → re-translate at temp 0.5
+- **P5: Idiomatic hints** — when compiles + diff passes but score < threshold, repair agent gets refactoring hints instead of empty feedback (prevents wasted iterations)
 
 ## Validated Production Migrations
 These fixtures are regression-tested and represent known-good migrations:
@@ -71,4 +72,5 @@ These fixtures are regression-tested and represent known-good migrations:
 | expr_eval.c | 1686→1446 | 100 | 0 | 74 functions, recursive descent |
 | cjson_full_combined.c | 1696→1439 | 100* | 0 | Full cJSON library (49/78 fns) |
 | picohttpparser.c | 1102→1551 | 100 | 0 | HTTP parser, state machine |
+| genann_combined.c | 642→622 | 100 | 0 | Neural network, fn ptrs→enum, autonomous pipeline |
 | miniz_core_standalone.c | 4429 | N/A | N/A | FallbackUnsafe (ceiling case) |

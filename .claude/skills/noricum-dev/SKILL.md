@@ -42,12 +42,13 @@ Pending -> Extracted -> Characterized -> C2RustDone -> Analyzed -> Refined -> Va
 - Hard: `claude-opus-4-6` (translation, complex repair)
 - Fallback: Ollama `qwen2.5-coder:32b` when no API key
 
-## Pipeline Improvements (P0-P4, learned from miniz migration)
+## Pipeline Improvements (P0-P5, learned from miniz + genann migrations)
 - **P0: Quality floor** — repair rejected if unsafe count exceeds translation baseline
 - **P1: Best-version tracking** — keeps highest-score version, uses it for fallback instead of c2rust
 - **P2: Per-function C2Rust context** — extracts only matching c2rust functions per chunk
 - **P3: Incremental per-module** — `split_into_modules()` groups C functions by prefix
 - **P4: Skip C2Rust** — `--skip-c2rust` flag; LLM often translates better without c2rust noise
+- **P5: Idiomatic improvement hints** — when code compiles + diff passes but score < threshold, generates actionable refactoring hints (reduce `as` casts, use iterators) so repair agent improves style instead of returning unchanged
 
 ## Key Thresholds
 - Chunked translation: >800 LOC (MEDIUM_FILE_LOC)

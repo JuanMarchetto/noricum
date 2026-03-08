@@ -75,6 +75,26 @@ fn build() -> String { format!("hello {}", "world") }
 fn escape_string(s: &str) -> String { ... }
 ```
 
+## Function Pointer Migration (learned from genann)
+```rust
+// C function pointer typedef -> Rust enum dispatch
+// typedef double (*genann_actfun)(const struct genann *ann, double a);
+#[derive(Clone, Copy, PartialEq)]
+enum ActivationFn { Sigmoid, SigmoidCached, Threshold, Linear }
+
+impl ActivationFn {
+    fn apply(&self, ann: &Genann, a: f64) -> f64 {
+        match self {
+            ActivationFn::Sigmoid => sigmoid(a),
+            // ...
+        }
+    }
+}
+// Key: enum dispatch avoids Fn trait objects and self-referential closures
+// Key: use usize (not i32) for fields used as array indices — avoids `as usize` casts
+// Key: single-malloc with internal pointers → separate Vec<f64> fields
+```
+
 ## Pointer Patterns
 ```rust
 // const T* + len -> &[T]
@@ -136,3 +156,6 @@ fn format_g(val: f64) -> String {
 - Signed/unsigned: C implicit conversion; Rust requires explicit `as` casts
 - Recursive data structures: need `Box<T>` for indirection in Rust
 - Bit manipulation: same operators but explicit types needed (`u32`, `i32`)
+- **Use `usize` for array dimensions**: C uses `int` for sizes, but Rust indexing requires `usize`. Using `i32` forces `as usize` on every array access, which penalizes idiomatic score heavily. Prefer `usize` from the start.
+- **glibc `srand`/`rand` determinism**: C's `rand()` uses glibc TYPE_3 (degree-31) PRNG. For diff-test to pass, must reimplement the exact PRNG algorithm, not use Rust's `rand` crate.
+- **`a > 0` returns double in C**: This is an implicit bool-to-double cast. In Rust: `if a > 0.0 { 1.0 } else { 0.0 }`

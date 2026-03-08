@@ -48,12 +48,31 @@ C `printf("%.17g", num)` does NOT map to Rust `format!("{}", num)`.
 Rust adds ".0" for whole numbers. When C code uses `%g` formatting, implement a
 custom `format_g()` that strips trailing zeros to match C output exactly.
 
+## Function Pointers
+- C function pointer typedefs → Rust enum with `apply()` method (enum dispatch)
+- This avoids Fn trait objects and self-referential closures
+- Example: `typedef double (*actfun)(const T *self, double a)` → `enum ActivationFn { Sigmoid, ... }`
+- Single-malloc with internal pointer offsets → separate `Vec<T>` fields
+
+## Type Choice for Array Dimensions
+- C uses `int` for array sizes/indices, but Rust indexing requires `usize`
+- **ALWAYS use `usize`** for struct fields that will be used as array indices
+- This prevents `as usize` casts on every array access (heavily penalizes idiomatic score)
+- Only use `i32` when the value is printed as `%d` or used in signed arithmetic
+
+## glibc rand() Determinism
+- C `srand()/rand()` uses glibc TYPE_3 (degree-31) PRNG
+- For diff-test to pass, reimplement the exact PRNG algorithm
+- Do NOT use Rust's `rand` crate — it won't produce identical sequences
+
 ## Common Pitfalls to AVOID
 - Do NOT change `int` return types to `bool` — C prints 0/1, Rust prints true/false
 - Do NOT use `as` casts carelessly — they can silently truncate
 - Do NOT use `.unwrap()` — use `?` or pattern matching
 - Do NOT use raw pointers or transmute
 - Integer overflow: use `wrapping_*` methods when C code relies on overflow behavior
+- `a > 0` returning double in C → `if a > 0.0 { 1.0 } else { 0.0 }` (not Rust bool)
+- Prefer `.iter().zip()` over manual `[i]`/`[j]` indexing where possible
 
 ## Output
 Provide only the Rust function(s). No explanations unless there are unresolvable issues.
