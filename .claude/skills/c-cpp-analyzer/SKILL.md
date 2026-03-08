@@ -37,7 +37,7 @@ Uses tree-sitter AST analysis with regex fallback:
 | Global mutable state | Function parameters, `OnceLock` | Hard |
 | Bit manipulation | Same ops with explicit types | Medium |
 | `union` | `enum` with variants | Hard |
-| Function pointers / callbacks | `Fn` traits, generics | Hard |
+| Function pointers / callbacks | Enum dispatch (preferred) or `Fn` traits | Hard |
 | Linked lists (next/prev) | `Vec<T>` (flatten) | Medium |
 | Type tag + union (tagged union) | `enum` with data variants | Medium-Hard |
 | Recursive data structures | `enum` + `Box<T>` | Medium |
