@@ -90,9 +90,26 @@ pub async fn translate_function_with_patterns_and_temperature(
     ));
 
     if let Some(c2rust) = c2rust_output {
-        user_message.push_str(&format!(
-            "\n## C2Rust output (unsafe Rust)\n```rust\n{c2rust}\n```\n"
-        ));
+        // Cap c2rust context to avoid blowing the API token limit.
+        // First ~3000 lines contain type definitions and struct mappings (most useful).
+        const MAX_C2RUST_LINES: usize = 3000;
+        let lines: Vec<&str> = c2rust.lines().collect();
+        if lines.len() > MAX_C2RUST_LINES {
+            let truncated: String = lines[..MAX_C2RUST_LINES].join("\n");
+            info!(
+                original_lines = lines.len(),
+                kept_lines = MAX_C2RUST_LINES,
+                "truncating c2rust output to fit token budget"
+            );
+            user_message.push_str(&format!(
+                "\n## C2Rust output (unsafe Rust, truncated)\n```rust\n{truncated}\n// ... ({} more lines truncated)\n```\n",
+                lines.len() - MAX_C2RUST_LINES
+            ));
+        } else {
+            user_message.push_str(&format!(
+                "\n## C2Rust output (unsafe Rust)\n```rust\n{c2rust}\n```\n"
+            ));
+        }
     }
 
     if !patterns.is_empty() {
@@ -172,18 +189,41 @@ pub async fn translate_chunked(
         chunk_source.push_str(&chunk.functions_source);
 
         // If we have previously translated signatures, add them as context
-        let mut chunk_c2rust = c2rust_output.map(|s| s.to_string());
         if !accumulated_sigs.is_empty() {
             let sig_context = format!(
                 "\n\n// === Already translated Rust signatures (for reference) ===\n{}",
                 accumulated_sigs.join("\n")
             );
             chunk_source.push_str(&sig_context);
-            // Don't pass c2rust for later chunks (it's for the whole file, not chunks)
-            if i > 0 {
-                chunk_c2rust = None;
-            }
         }
+
+        // Only pass c2rust for chunk 0, and truncate if too large.
+        // For very large files, c2rust output can exceed the API token limit.
+        // Keep only the first portion (type definitions, struct mappings) which
+        // is the most useful context; drop function implementations.
+        let chunk_c2rust = if i == 0 {
+            c2rust_output.map(|s| {
+                let lines: Vec<&str> = s.lines().collect();
+                const MAX_C2RUST_LINES_CHUNKED: usize = 2000;
+                if lines.len() > MAX_C2RUST_LINES_CHUNKED {
+                    let truncated: String = lines[..MAX_C2RUST_LINES_CHUNKED].join("\n");
+                    info!(
+                        original_lines = lines.len(),
+                        kept_lines = MAX_C2RUST_LINES_CHUNKED,
+                        "truncating c2rust output for chunked translation token budget"
+                    );
+                    format!(
+                        "{}\n// ... ({} more lines truncated — see type definitions above for reference)",
+                        truncated,
+                        lines.len() - MAX_C2RUST_LINES_CHUNKED
+                    )
+                } else {
+                    s.to_string()
+                }
+            })
+        } else {
+            None
+        };
 
         let rust_code = translate_function_with_patterns_and_temperature(
             client,
