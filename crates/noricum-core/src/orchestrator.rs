@@ -858,15 +858,42 @@ pub async fn migrate_file(
             let errors = &unit.last_errors;
             let diff_feedback = &unit.last_diff_feedback;
 
-            if errors.is_empty()
+            // P5: When code compiles and diff passes but score is below threshold,
+            // generate idiomatic improvement hints so the repair agent has actionable feedback
+            // instead of returning the code unchanged.
+            let idiomatic_hints = if errors.is_empty()
                 && diff_feedback.is_empty()
+                && unit.idiomatic_score.unwrap_or(0) < config.min_idiomatic_score
+            {
+                let hints = noricum_validation::generate_idiomatic_hints(current_rust);
+                if !hints.is_empty() {
+                    info!(
+                        function = %name,
+                        score = unit.idiomatic_score.unwrap_or(0),
+                        target = config.min_idiomatic_score,
+                        hint_count = hints.len(),
+                        "P5: injecting idiomatic improvement hints"
+                    );
+                }
+                hints
+            } else {
+                Vec::new()
+            };
+            let effective_diff_feedback = if idiomatic_hints.is_empty() {
+                diff_feedback.clone()
+            } else {
+                idiomatic_hints
+            };
+
+            if errors.is_empty()
+                && effective_diff_feedback.is_empty()
                 && unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
             {
                 debug!(function = %name, "no errors or diff feedback remaining, re-validating");
             }
 
             // --- Stall detection ---
-            let current_error_count = errors.len() + diff_feedback.len();
+            let current_error_count = errors.len() + effective_diff_feedback.len();
             if let Some(prev) = prev_error_count {
                 if current_error_count == prev && current_error_count > 0 {
                     stall_count += 1;
@@ -961,7 +988,7 @@ pub async fn migrate_file(
                         iteration,
                         max_iterations: max_iters,
                         error_count: errors.len(),
-                        diff_feedback_count: diff_feedback.len(),
+                        diff_feedback_count: effective_diff_feedback.len(),
                     },
                 );
             }
@@ -973,7 +1000,7 @@ pub async fn migrate_file(
                 &repair_model_sel.model,
                 current_rust,
                 errors,
-                diff_feedback,
+                &effective_diff_feedback,
                 &unit.c_source,
                 iteration,
                 max_iters,

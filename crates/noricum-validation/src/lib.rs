@@ -249,6 +249,76 @@ pub fn compute_idiomatic_score_from_source(
     (base + bonus).clamp(0, 100) as u32
 }
 
+/// Generate actionable improvement hints when score is below threshold but code compiles
+/// and diff test passes. These hints tell the repair agent what to fix for a higher score.
+pub fn generate_idiomatic_hints(rust_source: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+
+    // Count `as` casts (not as_ method calls)
+    let as_cast_count = rust_source
+        .split_whitespace()
+        .filter(|w| *w == "as")
+        .count();
+    if as_cast_count > 5 {
+        // Detect specific cast patterns
+        let as_usize = rust_source.matches("as usize").count();
+        let as_i32 = rust_source.matches("as i32").count();
+        let as_f64 = rust_source.matches("as f64").count();
+        let mut detail = format!(
+            "Reduce `as` casts ({as_cast_count} found). "
+        );
+        if as_usize > 3 {
+            detail.push_str(&format!(
+                "{as_usize}x `as usize` — consider using `usize` for fields used as array indices. "
+            ));
+        }
+        if as_i32 > 3 {
+            detail.push_str(&format!(
+                "{as_i32}x `as i32` — consider using consistent integer types. "
+            ));
+        }
+        if as_f64 > 3 {
+            detail.push_str(&format!(
+                "{as_f64}x `as f64` — consider using `f64` for fields used in floating-point math. "
+            ));
+        }
+        hints.push(detail);
+    }
+
+    // Manual indexing
+    let idx_i = rust_source.matches("[i]").count();
+    let idx_j = rust_source.matches("[j]").count();
+    let idx_idx = rust_source.matches("[idx]").count();
+    let manual_index = idx_i + idx_j + idx_idx;
+    if manual_index > 5 {
+        hints.push(format!(
+            "Reduce manual array indexing ({manual_index} occurrences of [i]/[j]/[idx]). \
+             Use iterator methods (.iter(), .enumerate(), .zip(), chunks()) where possible. \
+             For neural network weight/output arrays, consider using split_at_mut() or chunks_exact_mut() \
+             to iterate over weight groups instead of manual index arithmetic."
+        ));
+    }
+
+    // .unwrap() calls
+    let unwrap_count = rust_source.matches(".unwrap()").count();
+    if unwrap_count > 2 {
+        hints.push(format!(
+            "Replace {unwrap_count} `.unwrap()` calls with `?` operator, `.unwrap_or()`, \
+             or `.expect()` with meaningful messages."
+        ));
+    }
+
+    if !hints.is_empty() {
+        hints.insert(0,
+            "IMPORTANT: The code compiles and produces correct output. \
+             Do NOT change any logic or behavior. Only refactor for idiomatic Rust style. \
+             The output must remain byte-exact identical.".to_string()
+        );
+    }
+
+    hints
+}
+
 /// Update a function unit's state based on validation results.
 ///
 /// Uses the default maximum of 5 repair iterations.
@@ -703,5 +773,37 @@ mod proptests {
             let high = compute_idiomatic_score_from_source(0, base_warnings, rust, c);
             prop_assert!(low <= high, "more warnings ({}) scored {low} > {high}", base_warnings + extra);
         }
+    }
+
+    #[test]
+    fn test_idiomatic_hints_many_as_casts() {
+        let rust = "fn f() { let a = x as usize; let b = y as usize; let c = z as usize; \
+                    let d = w as usize; let e = v as usize; let f = u as usize; }";
+        let hints = generate_idiomatic_hints(rust);
+        assert!(!hints.is_empty(), "should generate hints for 6 as casts");
+        assert!(hints.iter().any(|h| h.contains("as")), "should mention as casts");
+    }
+
+    #[test]
+    fn test_idiomatic_hints_many_manual_indices() {
+        let rust = "fn f() { a[i] = b[i]; c[j] = d[j]; e[i] = f[j]; }";
+        let hints = generate_idiomatic_hints(rust);
+        assert!(!hints.is_empty(), "should generate hints for manual indexing");
+        assert!(hints.iter().any(|h| h.contains("indexing")), "should mention indexing");
+    }
+
+    #[test]
+    fn test_idiomatic_hints_clean_code() {
+        let rust = "fn f(x: i32) -> i32 { x + 1 }";
+        let hints = generate_idiomatic_hints(rust);
+        assert!(hints.is_empty(), "clean code should produce no hints");
+    }
+
+    #[test]
+    fn test_idiomatic_hints_include_safety_prefix() {
+        let rust = "fn f() { let a = x as usize; let b = y as usize; let c = z as usize; \
+                    let d = w as usize; let e = v as usize; let f = u as usize; }";
+        let hints = generate_idiomatic_hints(rust);
+        assert!(hints[0].contains("Do NOT change any logic"), "first hint should be safety warning");
     }
 }
