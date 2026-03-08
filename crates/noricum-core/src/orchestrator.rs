@@ -335,9 +335,22 @@ pub fn migrate_file_sync(c_file: &Path) -> Result<FunctionUnit, CoreError> {
     match noricum_tools::c2rust::transpile(c_file) {
         Ok(output) => {
             unit.c2rust_output = Some(output.rust_source.clone());
-            unit.rust_output = Some(output.rust_source);
-            unit.state = MigrationState::C2RustDone;
-            info!(function = %unit.name, "c2rust transpilation succeeded");
+
+            // Prefer rule-based translation over c2rust when available, since
+            // rule_translate produces safe idiomatic Rust while c2rust wraps
+            // everything in unsafe.
+            match noricum_tools::rule_translate::try_translate(&unit.c_source, &unit.name) {
+                Some(rust_code) => {
+                    unit.rust_output = Some(rust_code);
+                    unit.state = MigrationState::Refined;
+                    info!(function = %unit.name, "rule-based translation preferred over c2rust");
+                }
+                None => {
+                    unit.rust_output = Some(output.rust_source);
+                    unit.state = MigrationState::C2RustDone;
+                    info!(function = %unit.name, "c2rust transpilation succeeded (rule-based not applicable)");
+                }
+            }
         }
         Err(e) => {
             debug!(function = %unit.name, error = %e, "c2rust not available, trying rule-based translation");

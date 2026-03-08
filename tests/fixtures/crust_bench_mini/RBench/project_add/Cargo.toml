@@ -1,0 +1,4 @@
+[package]
+name = "project_add"
+version = "0.1.0"
+edition = "2021"
