@@ -74,10 +74,10 @@ pub async fn translate_function_with_patterns_and_temperature(
 
     let mut user_message = String::new();
 
-    // For very large files (>2000 LOC), prepend a structural summary
+    // For medium+ files (>800 LOC), prepend a structural summary
     // to help the LLM understand the codebase before translating.
     let c_lines = c_source.lines().count();
-    if c_lines > 2000 {
+    if c_lines > 800 {
         let summary = build_structural_summary(c_source);
         user_message.push_str(&format!(
             "## Structural summary ({c_lines} lines)\n{summary}\n\n"
@@ -160,6 +160,14 @@ pub async fn translate_chunked(
 
         // Build a synthetic C source: shared context + this chunk's functions
         let mut chunk_source = chunk.shared_context.clone();
+        // For chunk 0 with type definitions, add data model translation guidance
+        if i == 0 && chunk.shared_context.contains("struct ") {
+            chunk_source.push_str(
+                "\n\n// === INSTRUCTION: Translate data model to idiomatic Rust types FIRST. ===\n\
+                 // Use enum variants instead of type tags. Convert linked-lists to Vec.\n\
+                 // Use String instead of *char. Replace malloc/free with RAII.\n"
+            );
+        }
         chunk_source.push_str("\n\n// === Functions to translate ===\n");
         chunk_source.push_str(&chunk.functions_source);
 

@@ -45,7 +45,7 @@ pub async fn repair_function(
     .await
 }
 
-/// Repair with an optional base temperature override.
+/// Repair with an optional base temperature override and configurable abbreviation limit.
 #[allow(clippy::too_many_arguments)]
 pub async fn repair_function_with_temperature(
     client: &LlmClient,
@@ -57,6 +57,35 @@ pub async fn repair_function_with_temperature(
     iteration: u32,
     max_iterations: u32,
     base_temperature: Option<f64>,
+) -> Result<String, AgentError> {
+    repair_function_full(
+        client,
+        model,
+        rust_source,
+        compiler_errors,
+        diff_feedback,
+        c_source,
+        iteration,
+        max_iterations,
+        base_temperature,
+        None,
+    )
+    .await
+}
+
+/// Repair with full configuration: temperature and C source abbreviation limit.
+#[allow(clippy::too_many_arguments)]
+pub async fn repair_function_full(
+    client: &LlmClient,
+    model: &str,
+    rust_source: &str,
+    compiler_errors: &[String],
+    diff_feedback: &[String],
+    c_source: &str,
+    iteration: u32,
+    max_iterations: u32,
+    base_temperature: Option<f64>,
+    c_abbreviation_limit: Option<usize>,
 ) -> Result<String, AgentError> {
     let error_count = compiler_errors.len();
     let diff_count = diff_feedback.len();
@@ -119,7 +148,8 @@ pub async fn repair_function_with_temperature(
 
     // For large C sources, abbreviate to save context tokens.
     // The repair agent primarily needs the Rust code + errors; the C source is just reference.
-    let c_context = abbreviate_c_source(c_source, 300);
+    let abbrev_limit = c_abbreviation_limit.unwrap_or(300);
+    let c_context = abbreviate_c_source(c_source, abbrev_limit);
 
     user_message.push_str(&format!(
         "## Original C source (for reference)\n<c_source>\n{c_context}\n</c_source>\n\n\
