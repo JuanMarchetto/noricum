@@ -1,0 +1,427 @@
+    # Subtest: request
+    # simple
+    ok 1 - check
+    ok 2 - check
+    ok 3 - check
+    ok 4 - check
+    ok 5 - check
+    # partial
+    ok 6 - check
+    # parse headers
+    ok 7 - check
+    ok 8 - check
+    ok 9 - check
+    ok 10 - check
+    ok 11 - check
+    ok 12 - check
+    ok 13 - check
+    ok 14 - check
+    ok 15 - check
+    # multibyte included
+    ok 16 - check
+    ok 17 - check
+    ok 18 - check
+    ok 19 - check
+    ok 20 - check
+    ok 21 - check
+    ok 22 - check
+    ok 23 - check
+    ok 24 - check
+    # parse multiline
+    ok 25 - check
+    ok 26 - check
+    ok 27 - check
+    ok 28 - check
+    ok 29 - check
+    ok 30 - check
+    ok 31 - check
+    ok 32 - check
+    ok 33 - check
+    ok 34 - check
+    ok 35 - check
+    # parse header name with trailing space
+    ok 36 - check
+    # incomplete 1
+    ok 37 - check
+    ok 38 - check
+    # incomplete 2
+    ok 39 - check
+    ok 40 - check
+    # incomplete 3
+    ok 41 - check
+    ok 42 - check
+    # incomplete 4
+    ok 43 - check
+    ok 44 - check
+    # incomplete 5
+    ok 45 - check
+    # incomplete 6
+    ok 46 - check
+    # incomplete 7
+    ok 47 - check
+    ok 48 - check
+    # incomplete 8
+    ok 49 - check
+    ok 50 - check
+    # slowloris (incomplete)
+    ok 51 - check
+    # slowloris (complete)
+    ok 52 - check
+    # empty method
+    ok 53 - check
+    # empty request-target
+    ok 54 - check
+    # empty header name
+    ok 55 - check
+    # header name (space only)
+    ok 56 - check
+    # NUL in method
+    ok 57 - check
+    # tab in method
+    ok 58 - check
+    # invalid method
+    ok 59 - check
+    # DEL in uri-path
+    ok 60 - check
+    # NUL in header name
+    ok 61 - check
+    # NUL in header value
+    ok 62 - check
+    # CTL in header name
+    ok 63 - check
+    # CTL in header value
+    ok 64 - check
+    # invalid char in header value
+    ok 65 - check
+    # accept MSB chars
+    ok 66 - check
+    ok 67 - check
+    ok 68 - check
+    ok 69 - check
+    ok 70 - check
+    ok 71 - check
+    ok 72 - check
+    # accept |~ (though forbidden by SSE)
+    ok 73 - check
+    ok 74 - check
+    ok 75 - check
+    ok 76 - check
+    # disallow {
+    ok 77 - check
+    # exclude leading and trailing spaces in header value
+    ok 78 - check
+    ok 79 - check
+    # accept multiple spaces between tokens
+    ok 80 - check
+    1..80
+ok 1 - request
+    # Subtest: response
+    # simple
+    ok 1 - check
+    ok 2 - check
+    ok 3 - check
+    ok 4 - check
+    ok 5 - check
+    # partial
+    ok 6 - check
+    # parse headers
+    ok 7 - check
+    ok 8 - check
+    ok 9 - check
+    ok 10 - check
+    ok 11 - check
+    ok 12 - check
+    ok 13 - check
+    ok 14 - check
+    ok 15 - check
+    # parse multiline
+    ok 16 - check
+    ok 17 - check
+    ok 18 - check
+    ok 19 - check
+    ok 20 - check
+    ok 21 - check
+    ok 22 - check
+    ok 23 - check
+    ok 24 - check
+    ok 25 - check
+    ok 26 - check
+    # internal server error
+    ok 27 - check
+    ok 28 - check
+    ok 29 - check
+    ok 30 - check
+    ok 31 - check
+    ok 32 - check
+    # incomplete 1
+    ok 33 - check
+    # incomplete 2
+    ok 34 - check
+    # incomplete 3
+    ok 35 - check
+    ok 36 - check
+    # incomplete 4
+    ok 37 - check
+    ok 38 - check
+    # incomplete 5
+    ok 39 - check
+    # incomplete 6
+    ok 40 - check
+    ok 41 - check
+    # incomplete 7
+    ok 42 - check
+    ok 43 - check
+    # incomplete 8
+    ok 44 - check
+    # incomplete 9
+    ok 45 - check
+    ok 46 - check
+    # incomplete 10
+    ok 47 - check
+    ok 48 - check
+    # incomplete 11
+    ok 49 - check
+    ok 50 - check
+    # incomplete 11
+    ok 51 - check
+    ok 52 - check
+    # incomplete 12
+    ok 53 - check
+    ok 54 - check
+    ok 55 - check
+    ok 56 - check
+    # slowloris (incomplete)
+    ok 57 - check
+    # slowloris (complete)
+    ok 58 - check
+    # invalid http version
+    ok 59 - check
+    # invalid http version 2
+    ok 60 - check
+    # no status code
+    ok 61 - check
+    # accept missing trailing whitespace in status-line
+    ok 62 - check
+    ok 63 - check
+    # garbage after status 1
+    ok 64 - check
+    # garbage after status 2
+    ok 65 - check
+    # garbage after status 3
+    ok 66 - check
+    # exclude leading and trailing spaces in header value
+    ok 67 - check
+    ok 68 - check
+    # accept multiple spaces between tokens
+    ok 69 - check
+    1..69
+ok 2 - response
+    # Subtest: headers
+    # simple
+    ok 1 - check
+    ok 2 - check
+    ok 3 - check
+    ok 4 - check
+    ok 5 - check
+    ok 6 - check
+    # slowloris
+    ok 7 - check
+    ok 8 - check
+    ok 9 - check
+    ok 10 - check
+    ok 11 - check
+    ok 12 - check
+    # partial
+    ok 13 - check
+    # error
+    ok 14 - check
+    1..14
+ok 3 - headers
+    # Subtest: chunked
+    # testing at-once
+    ok 1 - check
+    ok 2 - check
+    ok 3 - check
+    ok 4 - check
+    # testing at-once
+    ok 5 - check
+    ok 6 - check
+    ok 7 - check
+    ok 8 - check
+    # testing at-once
+    ok 9 - check
+    ok 10 - check
+    ok 11 - check
+    ok 12 - check
+    # testing at-once
+    ok 13 - check
+    ok 14 - check
+    ok 15 - check
+    ok 16 - check
+    # testing at-once
+    ok 17 - check
+    ok 18 - check
+    ok 19 - check
+    ok 20 - check
+    # testing at-once
+    ok 21 - check
+    ok 22 - check
+    ok 23 - check
+    ok 24 - check
+    # testing per-byte
+    ok 25 - check
+    ok 26 - check
+    ok 27 - check
+    ok 28 - check
+    # testing per-byte
+    ok 29 - check
+    ok 30 - check
+    ok 31 - check
+    ok 32 - check
+    # testing per-byte
+    ok 33 - check
+    ok 34 - check
+    ok 35 - check
+    ok 36 - check
+    # testing per-byte
+    ok 37 - check
+    ok 38 - check
+    ok 39 - check
+    ok 40 - check
+    # testing per-byte
+    ok 41 - check
+    ok 42 - check
+    ok 43 - check
+    ok 44 - check
+    # testing per-byte
+    ok 45 - check
+    ok 46 - check
+    ok 47 - check
+    ok 48 - check
+    # failures
+    # testing failure at-once
+    ok 49 - check
+    # testing failure per-byte
+    ok 50 - check
+    # testing failure at-once
+    ok 51 - check
+    # testing failure per-byte
+    ok 52 - check
+    # testing failure at-once
+    ok 53 - check
+    # testing failure per-byte
+    ok 54 - check
+    # testing failure at-once
+    ok 55 - check
+    # testing failure per-byte
+    ok 56 - check
+    # testing failure at-once
+    ok 57 - check
+    # testing failure per-byte
+    ok 58 - check
+    # testing failure at-once
+    ok 59 - check
+    # testing failure per-byte
+    ok 60 - check
+    # testing failure at-once
+    ok 61 - check
+    # testing failure per-byte
+    ok 62 - check
+    # testing failure at-once
+    ok 63 - check
+    # testing failure per-byte
+    ok 64 - check
+    # testing failure at-once
+    ok 65 - check
+    # testing failure per-byte
+    ok 66 - check
+    # testing failure at-once
+    ok 67 - check
+    # testing failure per-byte
+    ok 68 - check
+    1..68
+ok 4 - chunked
+    # Subtest: chunked-consume-trailer
+    # testing at-once
+    ok 1 - check
+    ok 2 - check
+    ok 3 - check
+    # testing at-once
+    ok 4 - check
+    ok 5 - check
+    ok 6 - check
+    # testing at-once
+    ok 7 - check
+    ok 8 - check
+    ok 9 - check
+    # testing at-once
+    ok 10 - check
+    ok 11 - check
+    ok 12 - check
+    ok 13 - check
+    # testing at-once
+    ok 14 - check
+    ok 15 - check
+    ok 16 - check
+    ok 17 - check
+    # testing at-once
+    ok 18 - check
+    ok 19 - check
+    ok 20 - check
+    ok 21 - check
+    # testing at-once
+    ok 22 - check
+    ok 23 - check
+    ok 24 - check
+    ok 25 - check
+    # testing per-byte
+    ok 26 - check
+    ok 27 - check
+    ok 28 - check
+    # testing per-byte
+    ok 29 - check
+    ok 30 - check
+    ok 31 - check
+    # testing per-byte
+    ok 32 - check
+    ok 33 - check
+    ok 34 - check
+    # testing per-byte
+    ok 35 - check
+    ok 36 - check
+    ok 37 - check
+    ok 38 - check
+    # testing per-byte
+    ok 39 - check
+    ok 40 - check
+    ok 41 - check
+    ok 42 - check
+    # testing per-byte
+    ok 43 - check
+    ok 44 - check
+    ok 45 - check
+    ok 46 - check
+    # testing per-byte
+    ok 47 - check
+    ok 48 - check
+    ok 49 - check
+    ok 50 - check
+    1..50
+ok 5 - chunked-consume-trailer
+    # Subtest: chunked-leftdata
+    ok 1 - check
+    ok 2 - check
+    ok 3 - check
+    ok 4 - check
+    ok 5 - check
+    1..5
+ok 6 - chunked-leftdata
+    # Subtest: chunked-overhead
+    ok 1 - check
+    ok 2 - check
+    ok 3 - check
+    ok 4 - check
+    ok 5 - check
+    1..5
+ok 7 - chunked-overhead
+1..7
