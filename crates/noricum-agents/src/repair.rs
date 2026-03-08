@@ -138,12 +138,24 @@ pub async fn repair_function_full(
     }
 
     if !diff_feedback.is_empty() {
-        let diff_text = diff_feedback.join("\n");
-        user_message.push_str(&format!(
-            "## Behavioral mismatch (diff test failed)\n\
-             The code compiles but produces different output than the original C program.\n\
-             ```\n{diff_text}\n```\n\n"
-        ));
+        // Detect if this is idiomatic improvement hints (P5) vs actual diff failure
+        let is_idiomatic_hints = diff_feedback.iter().any(|f| f.contains("Do NOT change any logic"));
+        if is_idiomatic_hints {
+            let hints_text = diff_feedback.join("\n");
+            user_message.push_str(&format!(
+                "## Idiomatic improvement required\n\
+                 The code compiles and produces correct output, but the idiomatic score is too low.\n\
+                 Refactor ONLY for style — do NOT change any logic or behavior.\n\
+                 {hints_text}\n\n"
+            ));
+        } else {
+            let diff_text = diff_feedback.join("\n");
+            user_message.push_str(&format!(
+                "## Behavioral mismatch (diff test failed)\n\
+                 The code compiles but produces different output than the original C program.\n\
+                 ```\n{diff_text}\n```\n\n"
+            ));
+        }
     }
 
     // For large C sources, abbreviate to save context tokens.
