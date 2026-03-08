@@ -29,7 +29,13 @@ const REPAIR_TEMP_STEP: f64 = 0.10;
 /// Multi-module projects get more iterations since failures are often localized.
 fn effective_max_repairs(interface_count: usize, c_loc: u32) -> u32 {
     let module_bonus = (interface_count / 3) as u32;
-    let size_bonus = if c_loc > 2000 { 2 } else if c_loc > 1000 { 1 } else { 0 };
+    let size_bonus = if c_loc > 2000 {
+        2
+    } else if c_loc > 1000 {
+        1
+    } else {
+        0
+    };
     (BASE_REPAIR_ITERATIONS + module_bonus + size_bonus).min(MAX_REPAIR_ITERATIONS)
 }
 
@@ -83,16 +89,10 @@ fn discover_projects(dataset_path: &Path) -> Result<Vec<CrustProject>> {
     let rbench = dataset_path.join("RBench");
 
     if !cbench.is_dir() {
-        anyhow::bail!(
-            "CBench directory not found at {}",
-            cbench.display()
-        );
+        anyhow::bail!("CBench directory not found at {}", cbench.display());
     }
     if !rbench.is_dir() {
-        anyhow::bail!(
-            "RBench directory not found at {}",
-            rbench.display()
-        );
+        anyhow::bail!("RBench directory not found at {}", rbench.display());
     }
 
     let mut rbench_names: std::collections::HashMap<String, PathBuf> =
@@ -141,8 +141,8 @@ fn read_c_sources(cbench_dir: &Path) -> Result<String> {
     let mut combined = String::new();
     for path in &sources {
         let name = path.strip_prefix(cbench_dir).unwrap_or(path);
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let content =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         combined.push_str(&format!("// === {} ===\n", name.display()));
         combined.push_str(&content);
         combined.push_str("\n\n");
@@ -633,7 +633,13 @@ fn write_and_read_impls(
     read_current_impls(workdir, interface_files)
 }
 
-fn make_error_result(name: String, c_loc: u32, start: std::time::Instant, llm_calls: u32, error: String) -> ProjectResult {
+fn make_error_result(
+    name: String,
+    c_loc: u32,
+    start: std::time::Instant,
+    llm_calls: u32,
+    error: String,
+) -> ProjectResult {
     ProjectResult {
         name,
         c_loc,
@@ -721,7 +727,13 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
             );
 
             match client
-                .run_prompt(&module_model, TRANSLATION_PREAMBLE, 0.3, module_tokens, &module_prompt)
+                .run_prompt(
+                    &module_model,
+                    TRANSLATION_PREAMBLE,
+                    0.3,
+                    module_tokens,
+                    &module_prompt,
+                )
                 .await
             {
                 Ok(response) => {
@@ -760,7 +772,13 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
                 }
             }
             Err(e) => {
-                return make_error_result(name, c_loc, start, 1, format!("translation failed: {e}"));
+                return make_error_result(
+                    name,
+                    c_loc,
+                    start,
+                    1,
+                    format!("translation failed: {e}"),
+                );
             }
         }
     }
@@ -785,13 +803,26 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
             let temp = 0.3 + (iter as f64 - 1.0) * REPAIR_TEMP_STEP;
 
             let repair_prompt = build_repair_prompt(
-                &c_source, &interface_files, &current_impl, &last_errors,
-                iter, max_repairs,
+                &c_source,
+                &interface_files,
+                &current_impl,
+                &last_errors,
+                iter,
+                max_repairs,
             );
 
             info!(project = %name, iteration = iter, max = max_repairs, temp, "repair attempt (build)");
 
-            match client.run_prompt(&repair_model, REPAIR_PREAMBLE, temp, max_tokens, &repair_prompt).await {
+            match client
+                .run_prompt(
+                    &repair_model,
+                    REPAIR_PREAMBLE,
+                    temp,
+                    max_tokens,
+                    &repair_prompt,
+                )
+                .await
+            {
                 Ok(response) => {
                     llm_calls += 1;
                     let repaired = parse_multi_file_output(&response, &interface_files);
@@ -838,22 +869,43 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
                 let temp = 0.3 + (iter as f64 - 1.0) * REPAIR_TEMP_STEP;
 
                 // Use targeted repair if we have per-binary failure info
-                let failed_only: Vec<_> = failed_binaries.iter().filter(|b| !b.passed).cloned().collect();
+                let failed_only: Vec<_> = failed_binaries
+                    .iter()
+                    .filter(|b| !b.passed)
+                    .cloned()
+                    .collect();
                 let repair_prompt = if !failed_only.is_empty() {
                     build_targeted_repair_prompt(
-                        &c_source, &interface_files, &current_impl,
-                        &failed_only, iter, max_repairs,
+                        &c_source,
+                        &interface_files,
+                        &current_impl,
+                        &failed_only,
+                        iter,
+                        max_repairs,
                     )
                 } else {
                     build_repair_prompt(
-                        &c_source, &interface_files, &current_impl,
-                        &test_out, iter, max_repairs,
+                        &c_source,
+                        &interface_files,
+                        &current_impl,
+                        &test_out,
+                        iter,
+                        max_repairs,
                     )
                 };
 
                 info!(project = %name, iteration = iter, max = max_repairs, temp, "repair attempt (tests)");
 
-                match client.run_prompt(&repair_model, REPAIR_PREAMBLE, temp, max_tokens, &repair_prompt).await {
+                match client
+                    .run_prompt(
+                        &repair_model,
+                        REPAIR_PREAMBLE,
+                        temp,
+                        max_tokens,
+                        &repair_prompt,
+                    )
+                    .await
+                {
                     Ok(response) => {
                         llm_calls += 1;
                         let repaired = parse_multi_file_output(&response, &interface_files);
@@ -894,13 +946,23 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
     let unsafe_count = count_unsafe(&current_impl);
     let idiomatic_score = if compilation_success {
         let base = 100.0_f64 - (unsafe_count as f64 * 10.0);
-        if tests_passed { base.max(0.0) } else { (base * 0.5).max(0.0) }
+        if tests_passed {
+            base.max(0.0)
+        } else {
+            (base * 0.5).max(0.0)
+        }
     } else {
         0.0
     };
 
     let elapsed = start.elapsed().as_millis() as u64;
-    let status = if tests_passed { "PASS" } else if compilation_success { "BUILD_OK" } else { "FAIL" };
+    let status = if tests_passed {
+        "PASS"
+    } else if compilation_success {
+        "BUILD_OK"
+    } else {
+        "FAIL"
+    };
     info!(project = %name, status, c_loc, rust_loc, unsafe_count, repair_iterations, llm_calls, elapsed_ms = elapsed, "project complete");
 
     ProjectResult {
@@ -915,7 +977,11 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
         repair_iterations,
         llm_calls,
         total_ms: elapsed,
-        error: if compilation_success { None } else { Some(last_errors) },
+        error: if compilation_success {
+            None
+        } else {
+            Some(last_errors)
+        },
     }
 }
 
@@ -953,7 +1019,13 @@ pub async fn run_crust_bench(config: &CrustBenchConfig) -> Result<CrustBenchRepo
     for (i, project) in projects.iter().enumerate() {
         info!(project = %project.name, progress = format!("[{}/{}]", i + 1, projects.len()), "starting project");
         let result = run_project(project, &config.migration_config).await;
-        let status = if result.tests_passed { "PASS" } else if result.compilation_success { "BUILD_OK" } else { "FAIL" };
+        let status = if result.tests_passed {
+            "PASS"
+        } else if result.compilation_success {
+            "BUILD_OK"
+        } else {
+            "FAIL"
+        };
         info!(project = %result.name, status, score = format!("{:.0}", result.idiomatic_score_avg), llm_calls = result.llm_calls, time_ms = result.total_ms, progress = format!("[{}/{}]", i + 1, projects.len()), "completed project");
         results.push(result);
     }
@@ -969,12 +1041,23 @@ pub async fn run_crust_bench(config: &CrustBenchConfig) -> Result<CrustBenchRepo
     let total_llm_calls: u32 = results.iter().map(|r| r.llm_calls).sum();
     let total_repair_iterations: u32 = results.iter().map(|r| r.repair_iterations).sum();
 
-    info!(total, compiled, passed, total_llm_calls, "CRUST-Bench evaluation complete");
+    info!(
+        total,
+        compiled, passed, total_llm_calls, "CRUST-Bench evaluation complete"
+    );
 
     Ok(CrustBenchReport {
         total_projects: total,
-        compilation_rate: if total > 0 { compiled as f64 / total as f64 } else { 0.0 },
-        test_pass_rate: if total > 0 { passed as f64 / total as f64 } else { 0.0 },
+        compilation_rate: if total > 0 {
+            compiled as f64 / total as f64
+        } else {
+            0.0
+        },
+        test_pass_rate: if total > 0 {
+            passed as f64 / total as f64
+        } else {
+            0.0
+        },
         avg_idiomatic_score: avg_score,
         total_llm_calls,
         total_repair_iterations,
@@ -1049,10 +1132,14 @@ mod tests {
 
     #[test]
     fn test_build_single_module_prompt() {
-        let target = (PathBuf::from("src/interfaces/foo.rs"), "fn foo() { unimplemented!() }".to_string());
-        let others = vec![
-            (PathBuf::from("src/interfaces/bar.rs"), "fn bar() -> i32 { 42 }".to_string()),
-        ];
+        let target = (
+            PathBuf::from("src/interfaces/foo.rs"),
+            "fn foo() { unimplemented!() }".to_string(),
+        );
+        let others = vec![(
+            PathBuf::from("src/interfaces/bar.rs"),
+            "fn bar() -> i32 { 42 }".to_string(),
+        )];
         let prompt = build_single_module_prompt("int foo() { return 1; }", &target, &others);
         assert!(prompt.contains("Target: implement foo.rs"));
         assert!(prompt.contains("Other module interfaces"));
@@ -1063,14 +1150,20 @@ mod tests {
     fn test_select_module_model_haiku() {
         let config = MigrationConfig::default();
         let model = select_module_model(50, &config);
-        assert!(model.contains("haiku"), "small module should use Haiku: {model}");
+        assert!(
+            model.contains("haiku"),
+            "small module should use Haiku: {model}"
+        );
     }
 
     #[test]
     fn test_select_module_model_sonnet() {
         let config = MigrationConfig::default();
         let model = select_module_model(200, &config);
-        assert!(model.contains("sonnet"), "medium module should use Sonnet: {model}");
+        assert!(
+            model.contains("sonnet"),
+            "medium module should use Sonnet: {model}"
+        );
     }
 
     #[test]

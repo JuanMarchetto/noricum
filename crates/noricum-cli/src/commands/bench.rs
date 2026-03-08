@@ -23,8 +23,7 @@ pub async fn cmd_bench(
         ollama_model,
         ..MigrationConfig::default()
     };
-    let use_llm = config.anthropic_api_key.is_some()
-        || config.ollama_model.is_some();
+    let use_llm = config.anthropic_api_key.is_some() || config.ollama_model.is_some();
 
     let mut c_files: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(&fixtures_dir)? {

@@ -165,7 +165,7 @@ pub async fn translate_chunked(
             chunk_source.push_str(
                 "\n\n// === INSTRUCTION: Translate data model to idiomatic Rust types FIRST. ===\n\
                  // Use enum variants instead of type tags. Convert linked-lists to Vec.\n\
-                 // Use String instead of *char. Replace malloc/free with RAII.\n"
+                 // Use String instead of *char. Replace malloc/free with RAII.\n",
             );
         }
         chunk_source.push_str("\n\n// === Functions to translate ===\n");
