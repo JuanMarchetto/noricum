@@ -76,27 +76,46 @@ pub fn estimate_tokens(text: &str) -> u64 {
 /// Extract Rust code from an LLM response, stripping markdown fences if present.
 ///
 /// Shared by translation and repair agents to avoid duplication.
+/// Logs a warning if the extracted output looks like prose or empty stubs.
 pub fn extract_rust_code(response: &str) -> String {
     // Try to extract code from ```rust ... ``` fences
-    if let Some(start) = response.find("```rust") {
+    let code = if let Some(start) = response.find("```rust") {
         let after_fence = &response[start + 7..];
         if let Some(end) = after_fence.find("```") {
-            return after_fence[..end].trim().to_string();
+            after_fence[..end].trim().to_string()
+        } else {
+            extract_from_generic_fence(response)
+        }
+    } else {
+        extract_from_generic_fence(response)
+    };
+
+    // P4: Validate extracted output has code substance
+    if !code.is_empty() {
+        let has_fn = code.contains("fn ");
+        let has_struct = code.contains("struct ") || code.contains("enum ");
+        let has_code_chars = code.contains('{') && code.contains('}');
+        if !has_fn && !has_struct && !has_code_chars {
+            tracing::warn!(
+                len = code.len(),
+                "extract_rust_code: output looks like prose, not Rust code"
+            );
         }
     }
 
-    // Try generic code fences
+    code
+}
+
+/// Try to extract code from generic ``` fences, or return as-is.
+fn extract_from_generic_fence(response: &str) -> String {
     if let Some(start) = response.find("```") {
         let after_fence = &response[start + 3..];
-        // Skip the language tag line if any
         let code_start = after_fence.find('\n').map(|i| i + 1).unwrap_or(0);
         let after_lang = &after_fence[code_start..];
         if let Some(end) = after_lang.find("```") {
             return after_lang[..end].trim().to_string();
         }
     }
-
-    // No fences found, return as-is
     response.trim().to_string()
 }
 

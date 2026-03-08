@@ -441,6 +441,9 @@ pub struct CChunk {
     pub function_names: Vec<String>,
     /// Line count of functions_source.
     pub line_count: usize,
+    /// P8: Whether this chunk is a data-only chunk (static arrays, lookup tables).
+    /// Data chunks get specialized transcription instructions instead of translation prompts.
+    pub is_data_chunk: bool,
 }
 
 /// Split a large C source file into chunks for multi-pass translation.
@@ -456,6 +459,7 @@ pub fn chunk_c_source(c_source: &str, target_chunk_lines: usize) -> Vec<CChunk> 
             functions_source: String::new(),
             function_names: Vec::new(),
             line_count: c_source.lines().count(),
+            is_data_chunk: false,
         }];
     }
 
@@ -511,6 +515,7 @@ pub fn chunk_c_source(c_source: &str, target_chunk_lines: usize) -> Vec<CChunk> 
                 functions_source: current_source.clone(),
                 function_names: current_names.clone(),
                 line_count: current_lines,
+                is_data_chunk: false,
             });
             current_source.clear();
             current_names.clear();
@@ -531,6 +536,7 @@ pub fn chunk_c_source(c_source: &str, target_chunk_lines: usize) -> Vec<CChunk> 
             functions_source: current_source,
             function_names: current_names,
             line_count: current_lines,
+            is_data_chunk: false,
         });
     }
 
@@ -561,11 +567,82 @@ fn is_data_model_function(func: &CFunction, known_types: &[String]) -> bool {
     is_short && (has_model_prefix || has_cstyle_prefix)
 }
 
+/// P8: Detect large static data blocks (arrays, lookup tables) in C source.
+///
+/// Returns the byte ranges `(start, end)` of blocks that are large static const arrays
+/// (e.g., glyph tables, sine lookup tables, CRC tables). These should be extracted
+/// into their own data chunk with transcription-only instructions.
+pub fn detect_static_data_blocks(c_source: &str) -> Vec<(usize, usize, String)> {
+    let mut blocks = Vec::new();
+    let lines: Vec<&str> = c_source.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        // Match patterns like: static TYPE name[...] = {
+        // or: const TYPE name[...] = {
+        // or: static const TYPE name[...][...] = {
+        let is_static_array = (trimmed.starts_with("static ") || trimmed.starts_with("const "))
+            && trimmed.contains('[')
+            && (trimmed.contains("= {") || trimmed.ends_with("= {"));
+
+        if is_static_array {
+            let start_line = i;
+            // Find the name for labeling
+            let name = trimmed
+                .split('[')
+                .next()
+                .and_then(|s| s.split_whitespace().last())
+                .unwrap_or("data")
+                .to_string();
+
+            // Count through to matching closing brace
+            let mut brace_depth: i32 = 0;
+            let mut end_line = i;
+            for (j, line) in lines.iter().enumerate().skip(i) {
+                let opens = line.chars().filter(|&c| c == '{').count() as i32;
+                let closes = line.chars().filter(|&c| c == '}').count() as i32;
+                brace_depth += opens - closes;
+                end_line = j;
+                if brace_depth <= 0 && opens + closes > 0 {
+                    break;
+                }
+            }
+
+            let block_lines = end_line - start_line + 1;
+            // Only flag as data block if it's substantial (>30 lines)
+            if block_lines > 30 {
+                let start_byte = c_source
+                    .lines()
+                    .take(start_line)
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>();
+                let end_byte = c_source
+                    .lines()
+                    .take(end_line + 1)
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>();
+                blocks.push((start_byte.min(c_source.len()), end_byte.min(c_source.len()), name));
+                debug!(
+                    name = %blocks.last().unwrap().2,
+                    lines = block_lines,
+                    "P8: detected static data block"
+                );
+            }
+            i = end_line + 1;
+        } else {
+            i += 1;
+        }
+    }
+    blocks
+}
+
 /// Split C source into chunks with data model (structs/enums + constructors/getters) in chunk 0.
 ///
 /// Puts struct/enum/typedef definitions and their associated constructor/getter functions
 /// into the first chunk, then groups remaining functions into subsequent chunks.
 /// Falls back to regular `chunk_c_source` when no structs are detected.
+/// P8: Also detects large static data blocks and puts them in separate data chunks.
 pub fn chunk_c_source_structural(c_source: &str, target_chunk_lines: usize) -> Vec<CChunk> {
     let functions = extract_c_functions(c_source);
     let types = extract_c_types(c_source);
@@ -642,7 +719,39 @@ pub fn chunk_c_source_structural(c_source: &str, target_chunk_lines: usize) -> V
         functions_source: model_source,
         function_names: model_names,
         line_count: model_lines,
+        is_data_chunk: false,
     });
+
+    // P8: Detect large static data blocks and add as separate data chunk
+    let data_blocks = detect_static_data_blocks(c_source);
+    if !data_blocks.is_empty() {
+        let mut data_source = String::new();
+        let mut data_names = Vec::new();
+        let mut data_lines = 0;
+        for (start, end, name) in &data_blocks {
+            let block_text = &c_source[*start..*end];
+            if !data_source.is_empty() {
+                data_source.push_str("\n\n");
+            }
+            data_source.push_str(block_text);
+            data_names.push(name.clone());
+            data_lines += block_text.lines().count();
+        }
+        if data_lines > 0 {
+            debug!(
+                blocks = data_blocks.len(),
+                data_lines,
+                "P8: adding data-only chunk"
+            );
+            chunks.push(CChunk {
+                shared_context: shared_context.clone(),
+                functions_source: data_source,
+                function_names: data_names,
+                line_count: data_lines,
+                is_data_chunk: true,
+            });
+        }
+    }
 
     // Remaining chunks: logic functions grouped by target size
     let mut current_source = String::new();
@@ -658,6 +767,7 @@ pub fn chunk_c_source_structural(c_source: &str, target_chunk_lines: usize) -> V
                 functions_source: current_source.clone(),
                 function_names: current_names.clone(),
                 line_count: current_lines,
+                is_data_chunk: false,
             });
             current_source.clear();
             current_names.clear();
@@ -677,6 +787,7 @@ pub fn chunk_c_source_structural(c_source: &str, target_chunk_lines: usize) -> V
             functions_source: current_source,
             function_names: current_names,
             line_count: current_lines,
+            is_data_chunk: false,
         });
     }
 
@@ -1315,5 +1426,32 @@ int main() { return 0; }
         // unique_function and main should be in misc
         let misc = modules.iter().find(|m| m.name == "misc");
         assert!(misc.is_some(), "should have misc module for singletons");
+    }
+
+    #[test]
+    fn test_detect_static_data_blocks_finds_large_array() {
+        let mut source = String::from("static const int lookup[100] = {\n");
+        for i in 0..50 {
+            source.push_str(&format!("    {i}, {i},\n")); // 50 lines of data
+        }
+        source.push_str("};\n");
+        let blocks = detect_static_data_blocks(&source);
+        assert_eq!(blocks.len(), 1, "should detect one data block");
+        assert_eq!(blocks[0].2, "lookup");
+    }
+
+    #[test]
+    fn test_detect_static_data_blocks_ignores_small_array() {
+        let source = "static const int small[3] = {\n    1, 2, 3\n};\n";
+        let blocks = detect_static_data_blocks(source);
+        assert!(blocks.is_empty(), "small arrays should be ignored");
+    }
+
+    #[test]
+    fn test_chunk_has_is_data_chunk_field() {
+        let source = "int add(int a, int b) { return a + b; }\n";
+        let chunks = chunk_c_source(source, 400);
+        assert!(!chunks.is_empty());
+        assert!(!chunks[0].is_data_chunk, "normal chunk should not be data");
     }
 }

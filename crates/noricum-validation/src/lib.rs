@@ -186,6 +186,7 @@ pub fn compute_idiomatic_score(unsafe_count: u32, clippy_warning_count: u32) -> 
 /// - **Positive signals** (+2 each): `Result<`, `Option<`, `.iter()`, `impl`, `From`/`Into`, `enum`
 /// - **Negative signals** (-3 each): `.unwrap()`, raw `as` casts, manual index loops (`[i]`)
 /// - **LOC ratio bonus** (+5): if Rust code is significantly shorter than C source
+/// - **Substance penalty**: caps score at 15 for empty/stub code (P6)
 pub fn compute_idiomatic_score_from_source(
     unsafe_count: u32,
     clippy_warning_count: u32,
@@ -195,6 +196,32 @@ pub fn compute_idiomatic_score_from_source(
     let base = compute_idiomatic_score(unsafe_count, clippy_warning_count) as i32;
 
     let mut bonus: i32 = 0;
+
+    // P6: Substance check — penalize empty/stub code that has no real logic.
+    // Count non-empty, non-trivial lines (not just `{`, `}`, `fn name() {}`, etc.)
+    let c_lines_nonempty = c_source.lines().filter(|l| !l.trim().is_empty()).count();
+    let rust_lines_nonempty = rust_source.lines().filter(|l| !l.trim().is_empty()).count();
+    let has_substance = if c_lines_nonempty > 20 {
+        // For substantial C code, Rust output should be at least 25% of the input
+        rust_lines_nonempty >= c_lines_nonempty / 4
+    } else {
+        // For small C code, any output at all is fine — a valid translation
+        // of a 5-line C function can be a single Rust line
+        rust_lines_nonempty >= 1
+    };
+
+    if !has_substance {
+        // Empty stubs or trivially small output → cap score very low
+        return (base + bonus).clamp(0, 15) as u32;
+    }
+
+    // P6 part 2: detect high ratio of empty function bodies
+    let empty_fn_count = count_empty_functions(rust_source);
+    let total_fn_count = count_total_functions(rust_source);
+    if total_fn_count > 3 && empty_fn_count as f32 / total_fn_count as f32 > 0.3 {
+        // >30% empty functions → cap score low
+        return (base + bonus).clamp(0, 20) as u32;
+    }
 
     // Positive signals: idiomatic Rust patterns
     let positive_patterns: &[&str] = &[
@@ -240,13 +267,63 @@ pub fn compute_idiomatic_score_from_source(
     bonus -= manual_index * 2;
 
     // LOC ratio bonus: Rust shorter than C is a good sign
-    let c_lines = c_source.lines().filter(|l| !l.trim().is_empty()).count() as i32;
-    let rust_lines = rust_source.lines().filter(|l| !l.trim().is_empty()).count() as i32;
+    let c_lines = c_lines_nonempty as i32;
+    let rust_lines = rust_lines_nonempty as i32;
     if c_lines > 5 && rust_lines > 0 && rust_lines < c_lines {
         bonus += 5;
     }
 
     (base + bonus).clamp(0, 100) as u32
+}
+
+/// Count functions with empty bodies (just `{}` or `{ }`) in Rust source.
+pub fn count_empty_functions(rust_source: &str) -> usize {
+    let mut count = 0;
+    let mut chars = rust_source.chars().peekable();
+    let mut in_fn = false;
+
+    // Simple heuristic: find `fn ` then look for `{` followed closely by `}`
+    while let Some(c) = chars.next() {
+        if c == 'f' && chars.peek() == Some(&'n') {
+            chars.next(); // consume 'n'
+            if chars.peek() == Some(&' ') || chars.peek() == Some(&'(') {
+                in_fn = true;
+            }
+        }
+        if in_fn && c == '{' {
+            // Scan forward for matching `}`, checking if body is only whitespace
+            let mut body = String::new();
+            let mut depth = 1;
+            for inner in chars.by_ref() {
+                if inner == '{' {
+                    depth += 1;
+                } else if inner == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                body.push(inner);
+            }
+            if body.trim().is_empty() || body.trim() == "todo!()" {
+                count += 1;
+            }
+            in_fn = false;
+        }
+    }
+    count
+}
+
+/// Count total function definitions in Rust source.
+pub fn count_total_functions(rust_source: &str) -> usize {
+    rust_source
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            (t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("pub(crate) fn "))
+                && t.contains('(')
+        })
+        .count()
 }
 
 /// Generate actionable improvement hints when score is below threshold but code compiles
@@ -739,10 +816,10 @@ mod proptests {
         fn clean_code_scores_well(
             positive in proptest::collection::vec(
                 prop_oneof!["Result<", "Option<", ".iter()", "Vec<", "String"],
-                0..5,
+                1..5,
             ),
         ) {
-            let rust_source = positive.join("\n");
+            let rust_source = format!("fn f() -> i32 {{ 42 }}\n{}", positive.join("\n"));
             let c_source = "int f() { return 0; }";
             let score = compute_idiomatic_score_from_source(0, 0, &rust_source, c_source);
             prop_assert!(score >= 80, "clean code scored only {score}");
