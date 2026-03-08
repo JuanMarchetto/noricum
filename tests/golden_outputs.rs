@@ -327,6 +327,24 @@ fn golden_picohttpparser() {
 }
 
 #[test]
+fn golden_genann() {
+    let c_output = compile_and_run("tests/fixtures/genann/genann_combined.c");
+    let expected = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/genann/expected_output.txt"),
+    )
+    .expect("failed to read expected output");
+    assert_eq!(c_output, expected, "genann C output must match expected_output.txt");
+
+    // Verify the migrated Rust version produces identical output
+    let rust_output = compile_and_run_rust("tests/fixtures/genann/genann_migrated.rs");
+    assert_eq!(
+        c_output, rust_output,
+        "genann Rust migration must match C output byte-for-byte"
+    );
+}
+
+#[test]
 fn golden_cjson_combined_extended() {
     let c_output = compile_and_run("tests/fixtures/cjson/cjson_combined_extended.c");
     assert_eq!(
