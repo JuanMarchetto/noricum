@@ -345,6 +345,24 @@ fn golden_genann() {
 }
 
 #[test]
+fn golden_olive() {
+    let c_output = compile_and_run("tests/fixtures/olive/olive_combined.c");
+    let expected = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/olive/expected_output.txt"),
+    )
+    .expect("failed to read expected output");
+    assert_eq!(c_output, expected, "olive C output must match expected_output.txt");
+
+    // Verify the migrated Rust version produces identical output
+    let rust_output = compile_and_run_rust("tests/fixtures/olive/olive_migrated.rs");
+    assert_eq!(
+        c_output, rust_output,
+        "olive Rust migration must match C output byte-for-byte"
+    );
+}
+
+#[test]
 fn golden_cjson_combined_extended() {
     let c_output = compile_and_run("tests/fixtures/cjson/cjson_combined_extended.c");
     assert_eq!(
