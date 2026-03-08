@@ -341,9 +341,7 @@ pub fn generate_idiomatic_hints(rust_source: &str) -> Vec<String> {
         let as_usize = rust_source.matches("as usize").count();
         let as_i32 = rust_source.matches("as i32").count();
         let as_f64 = rust_source.matches("as f64").count();
-        let mut detail = format!(
-            "Reduce `as` casts ({as_cast_count} found). "
-        );
+        let mut detail = format!("Reduce `as` casts ({as_cast_count} found). ");
         if as_usize > 3 {
             detail.push_str(&format!(
                 "{as_usize}x `as usize` — consider using `usize` for fields used as array indices. "
@@ -386,10 +384,12 @@ pub fn generate_idiomatic_hints(rust_source: &str) -> Vec<String> {
     }
 
     if !hints.is_empty() {
-        hints.insert(0,
+        hints.insert(
+            0,
             "IMPORTANT: The code compiles and produces correct output. \
              Do NOT change any logic or behavior. Only refactor for idiomatic Rust style. \
-             The output must remain byte-exact identical.".to_string()
+             The output must remain byte-exact identical."
+                .to_string(),
         );
     }
 
@@ -858,15 +858,24 @@ mod proptests {
                     let d = w as usize; let e = v as usize; let f = u as usize; }";
         let hints = generate_idiomatic_hints(rust);
         assert!(!hints.is_empty(), "should generate hints for 6 as casts");
-        assert!(hints.iter().any(|h| h.contains("as")), "should mention as casts");
+        assert!(
+            hints.iter().any(|h| h.contains("as")),
+            "should mention as casts"
+        );
     }
 
     #[test]
     fn test_idiomatic_hints_many_manual_indices() {
         let rust = "fn f() { a[i] = b[i]; c[j] = d[j]; e[i] = f[j]; }";
         let hints = generate_idiomatic_hints(rust);
-        assert!(!hints.is_empty(), "should generate hints for manual indexing");
-        assert!(hints.iter().any(|h| h.contains("indexing")), "should mention indexing");
+        assert!(
+            !hints.is_empty(),
+            "should generate hints for manual indexing"
+        );
+        assert!(
+            hints.iter().any(|h| h.contains("indexing")),
+            "should mention indexing"
+        );
     }
 
     #[test]
@@ -881,6 +890,9 @@ mod proptests {
         let rust = "fn f() { let a = x as usize; let b = y as usize; let c = z as usize; \
                     let d = w as usize; let e = v as usize; let f = u as usize; }";
         let hints = generate_idiomatic_hints(rust);
-        assert!(hints[0].contains("Do NOT change any logic"), "first hint should be safety warning");
+        assert!(
+            hints[0].contains("Do NOT change any logic"),
+            "first hint should be safety warning"
+        );
     }
 }

@@ -139,7 +139,9 @@ pub async fn repair_function_full(
 
     if !diff_feedback.is_empty() {
         // Detect if this is idiomatic improvement hints (P5) vs actual diff failure
-        let is_idiomatic_hints = diff_feedback.iter().any(|f| f.contains("Do NOT change any logic"));
+        let is_idiomatic_hints = diff_feedback
+            .iter()
+            .any(|f| f.contains("Do NOT change any logic"));
         if is_idiomatic_hints {
             let hints_text = diff_feedback.join("\n");
             user_message.push_str(&format!(

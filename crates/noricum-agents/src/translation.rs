@@ -256,8 +256,15 @@ pub async fn translate_chunked(
             data_source.push_str(&chunk.functions_source);
 
             let rust_code = translate_function_with_patterns_and_temperature(
-                client, model, &data_source, None, analysis, patterns, temperature,
-            ).await?;
+                client,
+                model,
+                &data_source,
+                None,
+                analysis,
+                patterns,
+                temperature,
+            )
+            .await?;
             accumulated_rust.push(rust_code);
             continue;
         }
@@ -276,16 +283,28 @@ pub async fn translate_chunked(
         chunk_source.push_str(&chunk.functions_source);
 
         // P9: Include foundation context (chunk 0's types) for all subsequent chunks
-        if i > 0 && let Some(ref foundation) = foundation_rust {
-            let type_lines: Vec<&str> = foundation.lines().filter(|l| {
-                let t = l.trim();
-                t.starts_with("pub struct ") || t.starts_with("struct ")
-                    || t.starts_with("pub enum ") || t.starts_with("enum ")
-                    || t.starts_with("pub type ") || t.starts_with("type ")
-                    || t.starts_with("pub const ") || t.starts_with("const ")
-                    || t.starts_with("impl ") || t.starts_with("pub fn new(")
-                    || t.starts_with("    pub ") || t == "}" || t == "{"
-            }).collect();
+        if i > 0
+            && let Some(ref foundation) = foundation_rust
+        {
+            let type_lines: Vec<&str> = foundation
+                .lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    t.starts_with("pub struct ")
+                        || t.starts_with("struct ")
+                        || t.starts_with("pub enum ")
+                        || t.starts_with("enum ")
+                        || t.starts_with("pub type ")
+                        || t.starts_with("type ")
+                        || t.starts_with("pub const ")
+                        || t.starts_with("const ")
+                        || t.starts_with("impl ")
+                        || t.starts_with("pub fn new(")
+                        || t.starts_with("    pub ")
+                        || t == "}"
+                        || t == "{"
+                })
+                .collect();
             if !type_lines.is_empty() {
                 chunk_source.push_str(&format!(
                     "\n\n// === P9: Rust types from data model (already translated) ===\n{}",
@@ -336,7 +355,11 @@ pub async fn translate_chunked(
 
         // P3-fix: Per-chunk substance validation — detect empty stubs before accumulating.
         // If a chunk produces mostly empty functions, retry once with higher temperature.
-        let chunk_c_lines = chunk.functions_source.lines().filter(|l| !l.trim().is_empty()).count();
+        let chunk_c_lines = chunk
+            .functions_source
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
         let chunk_rust_lines = rust_code.lines().filter(|l| !l.trim().is_empty()).count();
         let empty_fns = count_empty_fns_quick(&rust_code);
         let total_fns = count_total_fns_quick(&rust_code);
@@ -353,9 +376,15 @@ pub async fn translate_chunked(
                 "chunk produced empty stubs, retrying with temperature 0.5"
             );
             let retry = translate_function_with_patterns_and_temperature(
-                client, model, &chunk_source, chunk_c2rust.as_deref(),
-                analysis, patterns, Some(0.5),
-            ).await?;
+                client,
+                model,
+                &chunk_source,
+                chunk_c2rust.as_deref(),
+                analysis,
+                patterns,
+                Some(0.5),
+            )
+            .await?;
             let retry_lines = retry.lines().filter(|l| !l.trim().is_empty()).count();
             let retry_empty = count_empty_fns_quick(&retry);
             let retry_total = count_total_fns_quick(&retry);
@@ -365,7 +394,10 @@ pub async fn translate_chunked(
                 info!(chunk = i + 1, "chunk retry produced substantial code");
                 retry
             } else {
-                tracing::warn!(chunk = i + 1, "chunk retry still produced stubs, keeping original");
+                tracing::warn!(
+                    chunk = i + 1,
+                    "chunk retry still produced stubs, keeping original"
+                );
                 rust_code
             }
         } else {
@@ -389,7 +421,9 @@ pub async fn translate_chunked(
             let partial = combine_accumulated_chunks(&accumulated_rust);
             match noricum_tools::compiler::check_rust_compiles(&partial) {
                 Ok(result) if !result.success => {
-                    let error_count = result.stderr.lines()
+                    let error_count = result
+                        .stderr
+                        .lines()
                         .filter(|l| l.contains("error"))
                         .count();
                     if error_count > 0 {
@@ -585,7 +619,11 @@ fn build_structural_summary(c_source: &str) -> String {
 /// For chunk 0 (`include_types=true`), also includes struct/enum/type definitions.
 /// Keeps the output under a reasonable size by extracting only relevant functions
 /// instead of the entire c2rust output. Falls back to truncation for very large output.
-fn extract_c2rust_for_chunk(c2rust_output: &str, function_names: &[String], include_types: bool) -> String {
+fn extract_c2rust_for_chunk(
+    c2rust_output: &str,
+    function_names: &[String],
+    include_types: bool,
+) -> String {
     let lines: Vec<&str> = c2rust_output.lines().collect();
     let mut result = Vec::new();
 
@@ -632,7 +670,8 @@ fn extract_c2rust_for_chunk(c2rust_output: &str, function_names: &[String], incl
     }
 
     // Extract functions matching this chunk's names
-    let name_set: std::collections::HashSet<&str> = function_names.iter().map(|s| s.as_str()).collect();
+    let name_set: std::collections::HashSet<&str> =
+        function_names.iter().map(|s| s.as_str()).collect();
     let mut in_function = false;
     let mut brace_depth: i32 = 0;
     let mut current_fn_lines: Vec<&str> = Vec::new();
@@ -715,9 +754,7 @@ fn count_empty_fns_quick(rust_source: &str) -> usize {
     let lines: Vec<&str> = rust_source.lines().collect();
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn "))
-            && trimmed.contains('(')
-        {
+        if (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ")) && trimmed.contains('(') {
             // Look at the next few non-empty lines for empty body
             let mut body_content = String::new();
             for inner_line in lines.iter().skip(i + 1).take(4) {
@@ -897,8 +934,14 @@ pub unsafe extern \"C\" fn sub(a: i32, b: i32) -> i32 {\n\
 }\n";
         let names = vec!["add".to_string(), "sub".to_string()];
         let result = extract_c2rust_for_chunk(c2rust, &names, false);
-        assert!(result.contains("fn add("), "should contain add, got: {result}");
-        assert!(result.contains("fn sub("), "should contain sub, got: {result}");
+        assert!(
+            result.contains("fn add("),
+            "should contain add, got: {result}"
+        );
+        assert!(
+            result.contains("fn sub("),
+            "should contain sub, got: {result}"
+        );
         assert!(!result.contains("fn mul("), "should NOT contain mul");
     }
 
@@ -916,8 +959,14 @@ pub unsafe extern \"C\" fn add(a: i32, b: i32) -> i32 {\n\
 }\n";
         let names = vec!["add".to_string()];
         let result = extract_c2rust_for_chunk(c2rust, &names, true);
-        assert!(result.contains("struct Foo"), "chunk 0 should include types");
-        assert!(result.contains("fn add("), "should contain matching function");
+        assert!(
+            result.contains("struct Foo"),
+            "chunk 0 should include types"
+        );
+        assert!(
+            result.contains("fn add("),
+            "should contain matching function"
+        );
     }
 
     #[test]
@@ -926,19 +975,30 @@ pub unsafe extern \"C\" fn add(a: i32, b: i32) -> i32 {\n\
         let names: Vec<String> = vec![];
         let result = extract_c2rust_for_chunk(c2rust, &names, false);
         // No matching functions, should return only header lines
-        assert!(!result.contains("fn add("), "no names means no functions extracted");
+        assert!(
+            !result.contains("fn add("),
+            "no names means no functions extracted"
+        );
     }
 
     #[test]
     fn test_count_empty_fns_quick_detects_stubs() {
         let source = "fn add(a: i32, b: i32) -> i32 {}\nfn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\nfn mul(a: i32, b: i32) -> i32 { }";
-        assert_eq!(count_empty_fns_quick(source), 2, "should detect 2 empty fns");
+        assert_eq!(
+            count_empty_fns_quick(source),
+            2,
+            "should detect 2 empty fns"
+        );
     }
 
     #[test]
     fn test_count_empty_fns_quick_detects_todo() {
         let source = "fn add(a: i32, b: i32) -> i32 {\n    todo!()\n}\nfn sub(a: i32, b: i32) -> i32 {\n    a - b\n}";
-        assert_eq!(count_empty_fns_quick(source), 1, "should detect todo!() as empty");
+        assert_eq!(
+            count_empty_fns_quick(source),
+            1,
+            "should detect todo!() as empty"
+        );
     }
 
     #[test]
@@ -955,7 +1015,8 @@ pub unsafe extern \"C\" fn add(a: i32, b: i32) -> i32 {\n\
         ];
         let result = combine_accumulated_chunks(&chunks);
         assert_eq!(
-            result.matches("use std::collections::HashMap;").count(), 1,
+            result.matches("use std::collections::HashMap;").count(),
+            1,
             "should deduplicate HashMap use"
         );
         assert!(result.contains("use std::io;"));

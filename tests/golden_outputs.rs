@@ -315,7 +315,10 @@ fn golden_picohttpparser() {
             .join("tests/fixtures/picohttpparser/expected_output.txt"),
     )
     .expect("failed to read expected output");
-    assert_eq!(c_output, expected, "C output must match expected_output.txt");
+    assert_eq!(
+        c_output, expected,
+        "C output must match expected_output.txt"
+    );
 
     // Verify the migrated Rust version produces identical output
     let rust_output =
@@ -330,11 +333,13 @@ fn golden_picohttpparser() {
 fn golden_genann() {
     let c_output = compile_and_run("tests/fixtures/genann/genann_combined.c");
     let expected = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/genann/expected_output.txt"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/genann/expected_output.txt"),
     )
     .expect("failed to read expected output");
-    assert_eq!(c_output, expected, "genann C output must match expected_output.txt");
+    assert_eq!(
+        c_output, expected,
+        "genann C output must match expected_output.txt"
+    );
 
     // Verify the migrated Rust version produces identical output
     let rust_output = compile_and_run_rust("tests/fixtures/genann/genann_migrated.rs");
@@ -348,11 +353,13 @@ fn golden_genann() {
 fn golden_olive() {
     let c_output = compile_and_run("tests/fixtures/olive/olive_combined.c");
     let expected = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/olive/expected_output.txt"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/olive/expected_output.txt"),
     )
     .expect("failed to read expected output");
-    assert_eq!(c_output, expected, "olive C output must match expected_output.txt");
+    assert_eq!(
+        c_output, expected,
+        "olive C output must match expected_output.txt"
+    );
 
     // Verify the migrated Rust version produces identical output
     let rust_output = compile_and_run_rust("tests/fixtures/olive/olive_migrated.rs");
