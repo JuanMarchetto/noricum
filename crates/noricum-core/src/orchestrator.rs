@@ -197,10 +197,10 @@ fn preflight_budget_check(config: &MigrationConfig, c_source: &str, name: &str) 
 ///
 /// Large files use fewer iterations to conserve tokens — each repair
 /// iteration sends the full Rust + C source, which is expensive.
-/// Chunked translations get full iterations since each chunk is small.
+/// Chunked translations get full iterations (minimum 8) since each chunk is small.
 fn effective_repair_iterations(configured_max: u32, c_lines: usize, was_chunked: bool) -> u32 {
     if was_chunked {
-        return configured_max;
+        return configured_max.max(8);
     }
     if c_lines > VERY_LARGE_FILE_LOC {
         configured_max.min(2)
@@ -210,6 +210,9 @@ fn effective_repair_iterations(configured_max: u32, c_lines: usize, was_chunked:
         configured_max
     }
 }
+
+/// Number of consecutive stalled iterations before triggering re-translation.
+const STALL_THRESHOLD: u32 = 2;
 
 /// Derive pattern tags from C source for RAG indexing.
 ///
@@ -815,6 +818,10 @@ pub async fn migrate_file(
         }
 
         let mut iteration = 1u32;
+        let mut prev_error_count: Option<usize> = None;
+        let mut stall_count: u32 = 0;
+        let mut retranslated_on_stall = false;
+
         while iteration <= max_iters {
             info!(
                 function = %name,
@@ -835,6 +842,75 @@ pub async fn migrate_file(
                 debug!(function = %name, "no errors or diff feedback remaining, re-validating");
             }
 
+            // --- Stall detection ---
+            let current_error_count = errors.len() + diff_feedback.len();
+            if let Some(prev) = prev_error_count {
+                if current_error_count == prev && current_error_count > 0 {
+                    stall_count += 1;
+                    warn!(
+                        function = %name,
+                        stall_count,
+                        error_count = current_error_count,
+                        "repair stalled — error count unchanged"
+                    );
+                } else {
+                    stall_count = 0;
+                }
+            }
+            prev_error_count = Some(current_error_count);
+
+            // --- Re-translate on stall ---
+            // If repair is stuck for STALL_THRESHOLD iterations, try a fresh translation
+            // with higher temperature instead of continuing to patch the same broken code.
+            if stall_count >= STALL_THRESHOLD && !retranslated_on_stall {
+                retranslated_on_stall = true;
+                warn!(
+                    function = %name,
+                    stall_count,
+                    "repair stalled — attempting re-translation with temperature 0.7"
+                );
+
+                let stall_patterns = PatternStore::load_seed_patterns();
+                let stall_relevant = stall_patterns.find_relevant(&unit.c_source, 3);
+                let retranslate_result =
+                    noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                        &client,
+                        &repair_model_sel.model,
+                        &unit.c_source,
+                        unit.c2rust_output.as_deref(),
+                        &analysis,
+                        &stall_relevant,
+                        Some(0.7),
+                    )
+                    .await;
+
+                if let Ok(retranslated) = retranslate_result {
+                    unit.rust_output = Some(retranslated);
+                    unit.metrics.llm_calls += 1;
+                    stall_count = 0;
+                    prev_error_count = None;
+                    info!(function = %name, "re-translation complete, resetting repair loop");
+                    // Re-validate with the new translation
+                    let re_validation = noricum_validation::validate_with_threshold(
+                        &unit,
+                        config.min_idiomatic_score,
+                    )?;
+                    noricum_validation::apply_validation_with_max(
+                        &mut unit,
+                        &re_validation,
+                        max_iters,
+                    );
+                    if re_validation.passed {
+                        info!(function = %name, "re-translation passed validation directly");
+                        break;
+                    }
+                    iteration += 1;
+                    continue;
+                } else {
+                    warn!(function = %name, "re-translation failed, continuing repair");
+                }
+            }
+
             if let Some(ref trail) = audit {
                 audit_log(
                     trail,
@@ -848,7 +924,8 @@ pub async fn migrate_file(
                 );
             }
 
-            let c_abbrev_limit = if c_lines > 500 { Some(500) } else { None };
+            // Pass full C source for files <1500 LOC, abbreviated for larger ones
+            let c_abbrev_limit = if c_lines < 1500 { None } else { Some(500) };
             let repaired = noricum_agents::repair::repair_function_full(
                 &client,
                 &repair_model_sel.model,
@@ -1359,11 +1436,13 @@ fn main() {
     }
 
     #[test]
-    fn test_effective_chunked_gets_full_iterations() {
-        // Chunked translations always get full configured iterations
-        assert_eq!(effective_repair_iterations(5, 1500, true), 5);
-        assert_eq!(effective_repair_iterations(5, 3000, true), 5);
-        assert_eq!(effective_repair_iterations(3, 5000, true), 3);
+    fn test_effective_chunked_gets_minimum_8() {
+        // Chunked translations get at least 8 iterations (max of configured, 8)
+        assert_eq!(effective_repair_iterations(5, 1500, true), 8);
+        assert_eq!(effective_repair_iterations(5, 3000, true), 8);
+        assert_eq!(effective_repair_iterations(3, 5000, true), 8);
+        // If configured is higher than 8, use configured
+        assert_eq!(effective_repair_iterations(10, 1500, true), 10);
     }
 
     #[test]
@@ -1374,8 +1453,13 @@ fn main() {
         // 900 LOC > MEDIUM_FILE_LOC, so chunking is used
         let c_lines = 900;
         assert!(c_lines > MEDIUM_FILE_LOC);
-        // But with was_chunked=true, full iterations are restored
-        assert_eq!(effective_repair_iterations(5, c_lines, true), 5);
+        // With was_chunked=true, minimum 8 iterations
+        assert_eq!(effective_repair_iterations(5, c_lines, true), 8);
+    }
+
+    #[test]
+    fn test_stall_threshold_constant() {
+        assert_eq!(STALL_THRESHOLD, 2, "stall triggers after 2 unchanged iterations");
     }
 
     #[test]
