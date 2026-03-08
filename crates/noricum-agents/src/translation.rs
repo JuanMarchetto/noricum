@@ -197,33 +197,17 @@ pub async fn translate_chunked(
             chunk_source.push_str(&sig_context);
         }
 
-        // Only pass c2rust for chunk 0, and truncate if too large.
-        // For very large files, c2rust output can exceed the API token limit.
-        // Keep only the first portion (type definitions, struct mappings) which
-        // is the most useful context; drop function implementations.
-        let chunk_c2rust = if i == 0 {
-            c2rust_output.map(|s| {
-                let lines: Vec<&str> = s.lines().collect();
-                const MAX_C2RUST_LINES_CHUNKED: usize = 2000;
-                if lines.len() > MAX_C2RUST_LINES_CHUNKED {
-                    let truncated: String = lines[..MAX_C2RUST_LINES_CHUNKED].join("\n");
-                    info!(
-                        original_lines = lines.len(),
-                        kept_lines = MAX_C2RUST_LINES_CHUNKED,
-                        "truncating c2rust output for chunked translation token budget"
-                    );
-                    format!(
-                        "{}\n// ... ({} more lines truncated — see type definitions above for reference)",
-                        truncated,
-                        lines.len() - MAX_C2RUST_LINES_CHUNKED
-                    )
-                } else {
-                    s.to_string()
-                }
-            })
-        } else {
-            None
-        };
+        // P2: Per-function C2Rust context — extract only the c2rust functions
+        // matching this chunk's function names, plus type definitions (first chunk).
+        // This gives the LLM targeted reference without noise and saves tokens.
+        let chunk_c2rust = c2rust_output.and_then(|s| {
+            let extracted = extract_c2rust_for_chunk(s, &chunk.function_names, i == 0);
+            if extracted.is_empty() {
+                None
+            } else {
+                Some(extracted)
+            }
+        });
 
         let rust_code = translate_function_with_patterns_and_temperature(
             client,
@@ -413,6 +397,133 @@ fn build_structural_summary(c_source: &str) -> String {
     summary
 }
 
+/// P2: Extract only the c2rust functions matching a chunk's function names.
+///
+/// For chunk 0 (`include_types=true`), also includes struct/enum/type definitions.
+/// Keeps the output under a reasonable size by extracting only relevant functions
+/// instead of the entire c2rust output. Falls back to truncation for very large output.
+fn extract_c2rust_for_chunk(c2rust_output: &str, function_names: &[String], include_types: bool) -> String {
+    let lines: Vec<&str> = c2rust_output.lines().collect();
+    let mut result = Vec::new();
+
+    // Always include use/extern statements (first ~50 lines typically)
+    let mut header_end = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("use ")
+            || trimmed.starts_with("extern ")
+            || trimmed.starts_with("#[")
+            || trimmed.starts_with("//")
+            || trimmed.is_empty()
+        {
+            result.push(*line);
+            header_end = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    // For chunk 0, include type definitions (struct, enum, type aliases)
+    if include_types {
+        let mut in_type_def = false;
+        let mut brace_depth: i32 = 0;
+        for line in &lines[header_end..] {
+            let trimmed = line.trim();
+            let is_type = trimmed.starts_with("pub struct ")
+                || trimmed.starts_with("pub enum ")
+                || trimmed.starts_with("pub type ")
+                || trimmed.starts_with("pub union ")
+                || trimmed.starts_with("struct ")
+                || trimmed.starts_with("enum ")
+                || trimmed.starts_with("type ")
+                || trimmed.starts_with("#[repr(");
+
+            if is_type || in_type_def {
+                result.push(*line);
+                let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
+                let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
+                brace_depth += opens - closes;
+                in_type_def = brace_depth > 0;
+            }
+        }
+    }
+
+    // Extract functions matching this chunk's names
+    let name_set: std::collections::HashSet<&str> = function_names.iter().map(|s| s.as_str()).collect();
+    let mut in_function = false;
+    let mut brace_depth: i32 = 0;
+    let mut current_fn_lines: Vec<&str> = Vec::new();
+
+    for line in &lines[header_end..] {
+        let trimmed = line.trim();
+
+        if !in_function {
+            // Check if this line starts a function matching our names
+            let is_matching_fn = (trimmed.starts_with("pub unsafe extern ")
+                || trimmed.starts_with("pub extern ")
+                || trimmed.starts_with("unsafe extern ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("fn "))
+                && name_set.iter().any(|name| {
+                    // Match C function name to c2rust mangled name
+                    let snake = to_snake_case(name);
+                    trimmed.contains(&format!("fn {name}("))
+                        || trimmed.contains(&format!("fn {snake}("))
+                        || trimmed.contains(&format!("fn {name} ("))
+                });
+
+            if is_matching_fn {
+                in_function = true;
+                brace_depth = 0;
+                current_fn_lines.clear();
+            }
+        }
+
+        if in_function {
+            current_fn_lines.push(line);
+            let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
+            let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
+            brace_depth += opens - closes;
+
+            if brace_depth <= 0 && current_fn_lines.len() > 1 {
+                result.push(""); // blank line separator
+                result.append(&mut current_fn_lines);
+                in_function = false;
+            }
+        }
+    }
+
+    // Cap total output to avoid token overflow
+    const MAX_C2RUST_LINES_CHUNK: usize = 1500;
+    if result.len() > MAX_C2RUST_LINES_CHUNK {
+        let kept: String = result[..MAX_C2RUST_LINES_CHUNK].join("\n");
+        info!(
+            original_lines = result.len(),
+            kept_lines = MAX_C2RUST_LINES_CHUNK,
+            "P2: truncating per-chunk c2rust context"
+        );
+        format!(
+            "{}\n// ... ({} more lines truncated)",
+            kept,
+            result.len() - MAX_C2RUST_LINES_CHUNK
+        )
+    } else {
+        result.join("\n")
+    }
+}
+
+/// Convert a C identifier to snake_case for matching c2rust output.
+fn to_snake_case(name: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            result.push('_');
+        }
+        result.push(c.to_lowercase().next().unwrap_or(c));
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,5 +601,66 @@ double baz(double x) {
             summary.is_empty(),
             "empty source should produce empty summary"
         );
+    }
+
+    #[test]
+    fn test_to_snake_case() {
+        assert_eq!(to_snake_case("cJSON_Parse"), "c_j_s_o_n__parse");
+        assert_eq!(to_snake_case("add"), "add");
+        assert_eq!(to_snake_case("getValue"), "get_value");
+    }
+
+    #[test]
+    fn test_extract_c2rust_for_chunk_matching_functions() {
+        let c2rust = "\
+use std::ffi;\n\
+\n\
+pub struct Foo {\n\
+    pub x: i32,\n\
+}\n\
+\n\
+pub unsafe extern \"C\" fn add(a: i32, b: i32) -> i32 {\n\
+    return a + b;\n\
+}\n\
+\n\
+pub unsafe extern \"C\" fn mul(a: i32, b: i32) -> i32 {\n\
+    return a * b;\n\
+}\n\
+\n\
+pub unsafe extern \"C\" fn sub(a: i32, b: i32) -> i32 {\n\
+    return a - b;\n\
+}\n";
+        let names = vec!["add".to_string(), "sub".to_string()];
+        let result = extract_c2rust_for_chunk(c2rust, &names, false);
+        assert!(result.contains("fn add("), "should contain add, got: {result}");
+        assert!(result.contains("fn sub("), "should contain sub, got: {result}");
+        assert!(!result.contains("fn mul("), "should NOT contain mul");
+    }
+
+    #[test]
+    fn test_extract_c2rust_for_chunk_with_types() {
+        let c2rust = "\
+use std::ffi;\n\
+\n\
+pub struct Foo {\n\
+    pub x: i32,\n\
+}\n\
+\n\
+pub unsafe extern \"C\" fn add(a: i32, b: i32) -> i32 {\n\
+    return a + b;\n\
+}\n";
+        let names = vec!["add".to_string()];
+        let result = extract_c2rust_for_chunk(c2rust, &names, true);
+        assert!(result.contains("struct Foo"), "chunk 0 should include types");
+        assert!(result.contains("fn add("), "should contain matching function");
+    }
+
+    #[test]
+    fn test_extract_c2rust_for_chunk_empty_names() {
+        let c2rust = "pub unsafe extern \"C\" fn add(a: i32, b: i32) -> i32 { a + b }\n";
+        let names: Vec<String> = vec![];
+        let result = extract_c2rust_for_chunk(c2rust, &names, false);
+        // No matching functions, should return only header lines
+        assert!(!result.contains("fn add("), "no names means no functions extracted");
     }
 }
