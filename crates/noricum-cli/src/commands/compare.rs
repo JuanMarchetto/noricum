@@ -26,14 +26,8 @@ pub fn cmd_compare(
 
     // Header
     let col_w = 22;
-    println!(
-        "{:<20} | {:<col_w$} | {:<col_w$}",
-        "File", label_a, label_b
-    );
-    println!(
-        "{:-<20}-+-{:-<col_w$}-+-{:-<col_w$}",
-        "", "", ""
-    );
+    println!("{:<20} | {:<col_w$} | {:<col_w$}", "File", label_a, label_b);
+    println!("{:-<20}-+-{:-<col_w$}-+-{:-<col_w$}", "", "", "");
 
     // Collect all file names from both baselines
     let mut all_names: Vec<String> = Vec::new();
@@ -98,10 +92,7 @@ pub fn cmd_compare(
         "{:<20} | {:<col_w$} | {:<col_w$}",
         "Metric", label_a, label_b
     );
-    println!(
-        "{:-<20}-+-{:-<col_w$}-+-{:-<col_w$}",
-        "", "", ""
-    );
+    println!("{:-<20}-+-{:-<col_w$}-+-{:-<col_w$}", "", "", "");
 
     let a_rate = if a_count > 0 {
         a_pass as f64 / a_count as f64 * 100.0
@@ -182,11 +173,7 @@ fn format_entry(entry: Option<&serde_json::Value>) -> String {
     };
 
     let state = e["state"].as_str().unwrap_or("?");
-    let status = if state == "Validated" {
-        "PASS"
-    } else {
-        "FAIL"
-    };
+    let status = if state == "Validated" { "PASS" } else { "FAIL" };
     let score = e["idiomatic_score"].as_u64().unwrap_or(0);
     let ms = e["total_ms"].as_u64().unwrap_or(0);
     let secs = ms as f64 / 1000.0;

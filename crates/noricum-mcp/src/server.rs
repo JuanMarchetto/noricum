@@ -339,12 +339,7 @@ fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRp
     let input_size: usize = call_params
         .arguments
         .as_object()
-        .map(|m| {
-            m.values()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.len())
-                .sum()
-        })
+        .map(|m| m.values().filter_map(|v| v.as_str()).map(|s| s.len()).sum())
         .unwrap_or(0);
 
     info!(tool = %tool_name, input_bytes = input_size, "MCP tool call started");

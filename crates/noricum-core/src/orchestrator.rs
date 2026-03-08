@@ -626,13 +626,18 @@ pub async fn migrate_file(
         let c_lines_for_chunk = unit.c_source.lines().count();
         let use_chunked = c_lines_for_chunk > MEDIUM_FILE_LOC;
         let rust_code = if use_chunked {
-            let chunk_target = if c_lines_for_chunk > VERY_LARGE_FILE_LOC { 500 } else { 400 };
+            let chunk_target = if c_lines_for_chunk > VERY_LARGE_FILE_LOC {
+                500
+            } else {
+                400
+            };
             // Use structural chunking when data model patterns are detected
             let has_data_model = analysis.patterns.iter().any(|p| {
                 p.contains("struct") || p.contains("linked_list") || p.contains("recursive")
             });
             let chunks = if has_data_model {
-                let structural = noricum_tools::ast::chunk_c_source_structural(&unit.c_source, chunk_target);
+                let structural =
+                    noricum_tools::ast::chunk_c_source_structural(&unit.c_source, chunk_target);
                 if structural.len() > 1 {
                     info!(
                         function = %name,
