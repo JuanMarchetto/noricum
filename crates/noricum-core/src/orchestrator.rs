@@ -739,7 +739,11 @@ pub async fn migrate_file(
 
         // P6: Substance gate — reject translations that are mostly empty stubs.
         // This catches the case where the LLM returns function signatures with empty bodies.
-        let c_lines_nonempty = unit.c_source.lines().filter(|l| !l.trim().is_empty()).count();
+        let c_lines_nonempty = unit
+            .c_source
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
         let rust_lines_nonempty = rust_code.lines().filter(|l| !l.trim().is_empty()).count();
         let empty_fn_count = noricum_validation::count_empty_functions(&rust_code);
         let total_fn_count = noricum_validation::count_total_functions(&rust_code);
@@ -768,7 +772,10 @@ pub async fn migrate_file(
             .await
             {
                 Ok(retranslated) => {
-                    let new_lines = retranslated.lines().filter(|l| !l.trim().is_empty()).count();
+                    let new_lines = retranslated
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .count();
                     let new_empty = noricum_validation::count_empty_functions(&retranslated);
                     let new_total = noricum_validation::count_total_functions(&retranslated);
                     let still_stub = (c_lines_nonempty > 20 && new_lines < c_lines_nonempty / 4)
@@ -911,7 +918,9 @@ pub async fn migrate_file(
         // P1: Best-version tracking — keep the version with the highest score
         // that doesn't exceed the baseline unsafe count.
         // P6b: Only seed best version if it has substance (not empty stubs).
-        let initial_has_substance = unit.rust_output.as_deref()
+        let initial_has_substance = unit
+            .rust_output
+            .as_deref()
             .is_some_and(|r| has_substance(r, &unit.c_source));
         let mut best_version: Option<String> = if initial_has_substance {
             unit.rust_output.clone()
@@ -919,9 +928,17 @@ pub async fn migrate_file(
             warn!(function = %name, "P6b: initial translation is stub, not seeding as best version");
             None
         };
-        let mut best_score: u32 = if initial_has_substance { validation.idiomatic_score } else { 0 };
+        let mut best_score: u32 = if initial_has_substance {
+            validation.idiomatic_score
+        } else {
+            0
+        };
         let mut best_unsafe: u32 = baseline_unsafe;
-        let mut best_compiles: bool = if initial_has_substance { validation.compiles } else { false };
+        let mut best_compiles: bool = if initial_has_substance {
+            validation.compiles
+        } else {
+            false
+        };
 
         let mut iteration = 1u32;
         let mut prev_error_count: Option<usize> = None;
@@ -1035,7 +1052,9 @@ pub async fn migrate_file(
                     );
 
                     // P1+P6b: Update best version if this re-translation is better and has substance
-                    let retrans_has_substance = unit.rust_output.as_deref()
+                    let retrans_has_substance = unit
+                        .rust_output
+                        .as_deref()
                         .is_some_and(|r| has_substance(r, &unit.c_source));
                     if retrans_has_substance
                         && re_validation.unsafe_count <= baseline_unsafe
@@ -1138,7 +1157,9 @@ pub async fn migrate_file(
             );
 
             // P1+P6b: Update best version if this repair is better AND has substance
-            let repair_has_substance = unit.rust_output.as_deref()
+            let repair_has_substance = unit
+                .rust_output
+                .as_deref()
                 .is_some_and(|r| has_substance(r, &unit.c_source));
             if repair_has_substance
                 && re_validation.unsafe_count <= baseline_unsafe
@@ -1665,7 +1686,10 @@ fn main() {
 
     #[test]
     fn test_stall_threshold_constant() {
-        assert_eq!(STALL_THRESHOLD, 2, "stall triggers after 2 unchanged iterations");
+        assert_eq!(
+            STALL_THRESHOLD, 2,
+            "stall triggers after 2 unchanged iterations"
+        );
     }
 
     #[test]

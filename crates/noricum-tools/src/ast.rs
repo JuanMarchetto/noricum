@@ -622,7 +622,11 @@ pub fn detect_static_data_blocks(c_source: &str) -> Vec<(usize, usize, String)> 
                     .take(end_line + 1)
                     .map(|l| l.len() + 1)
                     .sum::<usize>();
-                blocks.push((start_byte.min(c_source.len()), end_byte.min(c_source.len()), name));
+                blocks.push((
+                    start_byte.min(c_source.len()),
+                    end_byte.min(c_source.len()),
+                    name,
+                ));
                 debug!(
                     name = %blocks.last().unwrap().2,
                     lines = block_lines,
@@ -740,8 +744,7 @@ pub fn chunk_c_source_structural(c_source: &str, target_chunk_lines: usize) -> V
         if data_lines > 0 {
             debug!(
                 blocks = data_blocks.len(),
-                data_lines,
-                "P8: adding data-only chunk"
+                data_lines, "P8: adding data-only chunk"
             );
             chunks.push(CChunk {
                 shared_context: shared_context.clone(),
@@ -1394,8 +1397,16 @@ int main() { return 0; }
 ";
         let modules = split_into_modules(source);
         let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
-        assert!(names.contains(&"hash"), "should have hash module, got {:?}", names);
-        assert!(names.contains(&"parse"), "should have parse module, got {:?}", names);
+        assert!(
+            names.contains(&"hash"),
+            "should have hash module, got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"parse"),
+            "should have parse module, got {:?}",
+            names
+        );
 
         let hash_mod = modules.iter().find(|m| m.name == "hash").unwrap();
         assert_eq!(hash_mod.function_names.len(), 3);
@@ -1408,7 +1419,11 @@ int add(int a, int b) { return a + b; }
 int sub(int a, int b) { return a - b; }
 ";
         let modules = split_into_modules(source);
-        assert_eq!(modules.len(), 1, "too few functions should produce 1 module");
+        assert_eq!(
+            modules.len(),
+            1,
+            "too few functions should produce 1 module"
+        );
         assert_eq!(modules[0].name, "main");
     }
 
