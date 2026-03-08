@@ -1,0 +1,95 @@
+# miniz core test suite
+# Checksums
+ok 1 - adler32_hello
+# adler32_hello=530449514
+ok 2 - adler32_empty
+ok 3 - adler32_null
+ok 4 - adler32_incremental
+ok 5 - crc32_hello
+# crc32_hello=3964322768
+ok 6 - crc32_empty
+ok 7 - crc32_null
+ok 8 - crc32_incremental
+# One-shot compress/uncompress
+ok 9 - compress_alloc
+ok 10 - compress_ok
+ok 11 - compressed_smaller
+# compressed: 122 -> 106 bytes
+ok 12 - decompress_alloc
+ok 13 - uncompress_ok
+ok 14 - decompress_size_match
+ok 15 - decompress_data_match
+# Compression levels
+ok 16 - no_compression
+# level_no_compression: 4096 -> 4107 bytes
+ok 17 - no_compression_roundtrip
+ok 18 - best_speed
+# level_best_speed: 4096 -> 58 bytes
+ok 19 - best_speed_roundtrip
+ok 20 - default
+# level_default: 4096 -> 58 bytes
+ok 21 - default_roundtrip
+ok 22 - best_compression
+# level_best_compression: 4096 -> 58 bytes
+ok 23 - best_compression_roundtrip
+# Streaming deflate/inflate
+ok 24 - deflateInit
+ok 25 - deflate_chunk
+ok 26 - deflate_chunk
+ok 27 - deflate_chunk
+ok 28 - deflate_chunk
+ok 29 - deflate_chunk
+ok 30 - deflate_chunk
+ok 31 - deflate_chunk
+ok 32 - deflate_chunk
+ok 33 - deflate_finish
+# streaming_deflate: 8192 -> 344 bytes
+ok 34 - deflate_total_in
+ok 35 - deflateEnd
+ok 36 - inflateInit
+ok 37 - inflate_finish
+ok 38 - inflate_total_out
+ok 39 - inflate_data_match
+ok 40 - inflate_adler32_match
+ok 41 - inflateEnd
+# Low-level tdefl/tinfl
+ok 42 - tdefl_compress_to_heap
+ok 43 - tdefl_compressed_smaller
+# tdefl: 108 -> 23 bytes
+ok 44 - tinfl_decompress_size
+ok 45 - tinfl_decompress_match
+ok 46 - tinfl_to_heap_alloc
+ok 47 - tinfl_to_heap_size
+ok 48 - tinfl_to_heap_match
+# Edge cases
+ok 49 - compress_empty
+# empty_compressed_size=8
+ok 50 - uncompress_empty
+ok 51 - uncompress_empty_size
+ok 52 - version_string
+# version=11.3.1
+ok 53 - error_string_ok
+ok 54 - error_string_data
+ok 55 - compress_bound
+ok 56 - compress_one_byte
+ok 57 - roundtrip_one_byte
+ok 58 - compress_large
+# large: 65536 -> 5481 bytes
+ok 59 - uncompress_large
+ok 60 - large_roundtrip_match
+ok 61 - large_crc_match
+# large_crc=2049162624
+# Deflate reset
+ok 62 - reset_deflateInit
+ok 63 - reset_first_deflate
+ok 64 - deflateReset
+ok 65 - reset_second_deflate
+ok 66 - reset_same_size
+ok 67 - reset_same_data
+# tdefl_compress_mem_to_mem
+ok 68 - mem_to_mem_compress
+# mem_to_mem: 51 -> 31 bytes
+ok 69 - mem_to_mem_decompress_size
+ok 70 - mem_to_mem_decompress_match
+1..70
+# all 70 tests passed
