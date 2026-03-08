@@ -202,6 +202,11 @@ pub mod models {
     pub use rig::providers::anthropic::completion::{
         CLAUDE_3_5_HAIKU, CLAUDE_3_5_SONNET, CLAUDE_3_7_SONNET, CLAUDE_4_OPUS, CLAUDE_4_SONNET,
     };
+
+    /// Claude Opus 4.6 — latest and most capable model (not yet in rig-rs constants).
+    pub const CLAUDE_4_6_OPUS: &str = "claude-opus-4-6";
+    /// Claude Sonnet 4.6.
+    pub const CLAUDE_4_6_SONNET: &str = "claude-sonnet-4-6";
 }
 
 /// Select a model based on task difficulty and available providers.
@@ -215,8 +220,8 @@ pub fn select_model(
 ) -> Result<ModelSelection, crate::AgentError> {
     if config.anthropic_api_key.is_some() {
         let model = match (difficulty, task) {
-            (Difficulty::Hard, _) => models::CLAUDE_4_OPUS.to_string(),
-            (Difficulty::Medium, _) | (_, "analysis") => models::CLAUDE_4_SONNET.to_string(),
+            (Difficulty::Hard, _) => models::CLAUDE_4_6_OPUS.to_string(),
+            (Difficulty::Medium, _) | (_, "analysis") => models::CLAUDE_4_6_SONNET.to_string(),
             (Difficulty::Easy, _) => "claude-haiku-4-5-20251001".to_string(),
         };
         info!(provider = "anthropic", model = %model, ?difficulty, "selected model");
@@ -247,7 +252,7 @@ mod tests {
 
         let selection = select_model(&config, Difficulty::Hard, "translation").unwrap();
         assert_eq!(selection.provider, ProviderKind::Anthropic);
-        assert_eq!(selection.model, "claude-opus-4-0");
+        assert_eq!(selection.model, "claude-opus-4-6");
 
         let selection = select_model(&config, Difficulty::Easy, "translation").unwrap();
         assert_eq!(selection.provider, ProviderKind::Anthropic);

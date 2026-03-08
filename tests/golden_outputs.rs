@@ -273,6 +273,60 @@ fn golden_expr_eval_fixture() {
 }
 
 #[test]
+fn golden_picohttpparser() {
+    // Compile C fixture with appropriate flags (suppress unused warnings from combined file)
+    let full_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/picohttpparser/picohttpparser_combined.c");
+    assert!(full_path.exists(), "picohttpparser C fixture not found");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("test_exe");
+
+    let compile = Command::new("cc")
+        .args([
+            "-std=gnu11",
+            "-Wno-unused-function",
+            "-Wno-unused-parameter",
+            "-o",
+        ])
+        .arg(&exe)
+        .arg(&full_path)
+        .output()
+        .expect("failed to run cc");
+    assert!(
+        compile.status.success(),
+        "picohttpparser C compilation failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let c_run = Command::new(&exe)
+        .output()
+        .expect("failed to run picohttpparser C executable");
+    assert!(
+        c_run.status.success(),
+        "picohttpparser C test failed: {}",
+        String::from_utf8_lossy(&c_run.stderr)
+    );
+    let c_output = String::from_utf8_lossy(&c_run.stdout).to_string();
+
+    // Verify against expected output
+    let expected = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/picohttpparser/expected_output.txt"),
+    )
+    .expect("failed to read expected output");
+    assert_eq!(c_output, expected, "C output must match expected_output.txt");
+
+    // Verify the migrated Rust version produces identical output
+    let rust_output =
+        compile_and_run_rust("tests/fixtures/picohttpparser/picohttpparser_migrated.rs");
+    assert_eq!(
+        c_output, rust_output,
+        "Rust migration output must match C output byte-for-byte"
+    );
+}
+
+#[test]
 fn golden_cjson_combined_extended() {
     let c_output = compile_and_run("tests/fixtures/cjson/cjson_combined_extended.c");
     assert_eq!(
