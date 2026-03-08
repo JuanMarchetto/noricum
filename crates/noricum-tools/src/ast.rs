@@ -537,6 +537,152 @@ pub fn chunk_c_source(c_source: &str, target_chunk_lines: usize) -> Vec<CChunk> 
     chunks
 }
 
+/// Check if a C function is likely a data model function (constructor, getter, setter, type checker).
+fn is_data_model_function(func: &CFunction, known_types: &[String]) -> bool {
+    let name_lower = func.name.to_lowercase();
+    let is_short = func.body.lines().count() < 20;
+    let has_model_prefix = name_lower.contains("create")
+        || name_lower.contains("new")
+        || name_lower.contains("init")
+        || name_lower.contains("is_")
+        || name_lower.contains("get_")
+        || name_lower.contains("set_");
+
+    // Also match cJSON-style naming: cJSON_Create*, cJSON_Is*, cJSON_Get*
+    let has_cstyle_prefix = known_types.iter().any(|t| {
+        let prefix = t.to_lowercase();
+        name_lower.starts_with(&prefix)
+            && (name_lower.contains("create")
+                || name_lower.contains("is")
+                || name_lower.contains("get")
+                || name_lower.contains("set"))
+    });
+
+    is_short && (has_model_prefix || has_cstyle_prefix)
+}
+
+/// Split C source into chunks with data model (structs/enums + constructors/getters) in chunk 0.
+///
+/// Puts struct/enum/typedef definitions and their associated constructor/getter functions
+/// into the first chunk, then groups remaining functions into subsequent chunks.
+/// Falls back to regular `chunk_c_source` when no structs are detected.
+pub fn chunk_c_source_structural(c_source: &str, target_chunk_lines: usize) -> Vec<CChunk> {
+    let functions = extract_c_functions(c_source);
+    let types = extract_c_types(c_source);
+
+    if types.is_empty() || functions.is_empty() {
+        return chunk_c_source(c_source, target_chunk_lines);
+    }
+
+    // Separate data model functions from logic functions
+    let mut model_funcs: Vec<&CFunction> = Vec::new();
+    let mut logic_funcs: Vec<&CFunction> = Vec::new();
+
+    for func in &functions {
+        if is_data_model_function(func, &types) {
+            model_funcs.push(func);
+        } else {
+            logic_funcs.push(func);
+        }
+    }
+
+    if model_funcs.is_empty() {
+        return chunk_c_source(c_source, target_chunk_lines);
+    }
+
+    // Build shared context (same as chunk_c_source)
+    let mut shared_lines = Vec::new();
+    let mut pos = 0;
+    for func in &functions {
+        if func.start_byte > pos {
+            let before = &c_source[pos..func.start_byte];
+            for line in before.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    shared_lines.push(line.to_string());
+                }
+            }
+        }
+        let func_text = &c_source[func.start_byte..func.end_byte];
+        if let Some(first_line) = func_text.lines().next() {
+            shared_lines.push(format!(
+                "{} // ...",
+                first_line.trim().trim_end_matches('{')
+            ));
+        }
+        pos = func.end_byte;
+    }
+    if pos < c_source.len() {
+        let after = &c_source[pos..];
+        for line in after.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                shared_lines.push(line.to_string());
+            }
+        }
+    }
+    let shared_context = shared_lines.join("\n");
+
+    // Chunk 0: data model functions
+    let mut chunks = Vec::new();
+    let mut model_source = String::new();
+    let mut model_names = Vec::new();
+    let mut model_lines = 0;
+    for func in &model_funcs {
+        let func_text = &c_source[func.start_byte..func.end_byte];
+        if !model_source.is_empty() {
+            model_source.push_str("\n\n");
+        }
+        model_source.push_str(func_text);
+        model_names.push(func.name.clone());
+        model_lines += func_text.lines().count();
+    }
+    chunks.push(CChunk {
+        shared_context: shared_context.clone(),
+        functions_source: model_source,
+        function_names: model_names,
+        line_count: model_lines,
+    });
+
+    // Remaining chunks: logic functions grouped by target size
+    let mut current_source = String::new();
+    let mut current_names = Vec::new();
+    let mut current_lines = 0;
+    for func in &logic_funcs {
+        let func_text = &c_source[func.start_byte..func.end_byte];
+        let func_lines = func_text.lines().count();
+
+        if !current_names.is_empty() && current_lines + func_lines > target_chunk_lines {
+            chunks.push(CChunk {
+                shared_context: shared_context.clone(),
+                functions_source: current_source.clone(),
+                function_names: current_names.clone(),
+                line_count: current_lines,
+            });
+            current_source.clear();
+            current_names.clear();
+            current_lines = 0;
+        }
+
+        if !current_source.is_empty() {
+            current_source.push_str("\n\n");
+        }
+        current_source.push_str(func_text);
+        current_names.push(func.name.clone());
+        current_lines += func_lines;
+    }
+    if !current_names.is_empty() {
+        chunks.push(CChunk {
+            shared_context,
+            functions_source: current_source,
+            function_names: current_names,
+            line_count: current_lines,
+        });
+    }
+
+    chunks
+}
+
 /// Extract function signatures from Rust source code for dependency context.
 ///
 /// Looks for `pub fn` and `fn` lines, returning them as context strings
@@ -891,5 +1037,86 @@ fn helper(x: i32) -> i32 {
     fn test_extract_rust_signatures_empty() {
         let sigs = extract_rust_signatures("let x = 5;\nstruct Foo { bar: i32 }");
         assert!(sigs.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_structural_puts_data_model_first() {
+        let source = "\
+typedef struct Node Node;
+struct Node {
+    int value;
+    struct Node *next;
+};
+
+Node *create_node(int val) {
+    Node *n = malloc(sizeof(Node));
+    n->value = val;
+    n->next = NULL;
+    return n;
+}
+
+int get_value(Node *n) {
+    return n->value;
+}
+
+void process_list(Node *head) {
+    int sum = 0;
+    while (head) {
+        sum += head->value;
+        head = head->next;
+    }
+    printf(\"%d\\n\", sum);
+}
+
+void complex_transform(Node *head, int factor) {
+    while (head) {
+        head->value *= factor;
+        head = head->next;
+    }
+}
+";
+        let chunks = chunk_c_source_structural(source, 20);
+        assert!(
+            chunks.len() >= 2,
+            "structural chunking should produce 2+ chunks, got {}",
+            chunks.len()
+        );
+        // Chunk 0 should contain data model functions
+        let chunk0_names = &chunks[0].function_names;
+        assert!(
+            chunk0_names.iter().any(|n| n == "create_node"),
+            "chunk 0 should contain create_node, got {:?}",
+            chunk0_names
+        );
+        assert!(
+            chunk0_names.iter().any(|n| n == "get_value"),
+            "chunk 0 should contain get_value, got {:?}",
+            chunk0_names
+        );
+        // Logic functions should be in later chunks
+        let later_names: Vec<&str> = chunks[1..]
+            .iter()
+            .flat_map(|c| c.function_names.iter().map(|s| s.as_str()))
+            .collect();
+        assert!(
+            later_names.contains(&"process_list") || later_names.contains(&"complex_transform"),
+            "later chunks should contain logic functions, got {:?}",
+            later_names
+        );
+    }
+
+    #[test]
+    fn test_chunk_structural_no_structs_falls_back() {
+        let source = "\
+int add(int a, int b) { return a + b; }
+int mul(int a, int b) { return a * b; }
+";
+        let structural = chunk_c_source_structural(source, 500);
+        let regular = chunk_c_source(source, 500);
+        assert_eq!(
+            structural.len(),
+            regular.len(),
+            "no structs should produce same as regular chunking"
+        );
     }
 }

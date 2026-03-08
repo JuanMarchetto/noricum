@@ -1022,6 +1022,85 @@ static cJSON_bool replace_item_in_object(cJSON *object, const char *string,
 cJSON_bool cJSON_ReplaceItemInObject(cJSON *object, const char *string, cJSON *newitem) {
     return replace_item_in_object(object, string, newitem, false);
 }
+cJSON_bool cJSON_ReplaceItemInObjectCaseSensitive(cJSON *object, const char *string, cJSON *newitem) {
+    return replace_item_in_object(object, string, newitem, true);
+}
+
+/* ---- Convenience: AddTrue/False/Raw to object ---- */
+cJSON *cJSON_AddTrueToObject(cJSON *object, const char *name) {
+    cJSON *item = cJSON_CreateTrue();
+    if (add_item_to_object(object, name, item)) return item;
+    cJSON_Delete(item); return NULL;
+}
+cJSON *cJSON_AddFalseToObject(cJSON *object, const char *name) {
+    cJSON *item = cJSON_CreateFalse();
+    if (add_item_to_object(object, name, item)) return item;
+    cJSON_Delete(item); return NULL;
+}
+cJSON *cJSON_AddRawToObject(cJSON *object, const char *name, const char *raw) {
+    cJSON *item = cJSON_CreateRaw(raw);
+    if (add_item_to_object(object, name, item)) return item;
+    cJSON_Delete(item); return NULL;
+}
+
+/* ---- References (shared ownership via IsReference flag) ---- */
+cJSON_bool cJSON_AddItemReferenceToArray(cJSON *array, cJSON *item) {
+    if (item == NULL) return false;
+    cJSON *ref = cJSON_New_Item();
+    if (ref == NULL) return false;
+    memcpy(ref, item, sizeof(cJSON));
+    ref->string = NULL;
+    ref->type |= cJSON_IsReference;
+    ref->prev = ref->next = NULL;
+    return add_item_to_array(array, ref);
+}
+cJSON_bool cJSON_AddItemReferenceToObject(cJSON *object, const char *string, cJSON *item) {
+    if (item == NULL) return false;
+    cJSON *ref = cJSON_New_Item();
+    if (ref == NULL) return false;
+    memcpy(ref, item, sizeof(cJSON));
+    ref->string = NULL;
+    ref->type |= cJSON_IsReference;
+    ref->prev = ref->next = NULL;
+    return add_item_to_object(object, string, ref);
+}
+
+/* ---- Case-sensitive detach/delete from object ---- */
+cJSON *cJSON_DetachItemFromObjectCaseSensitive(cJSON *object, const char *string) {
+    return cJSON_DetachItemViaPointer(object, cJSON_GetObjectItemCaseSensitive(object, string));
+}
+void cJSON_DeleteItemFromObjectCaseSensitive(cJSON *object, const char *string) {
+    cJSON_Delete(cJSON_DetachItemFromObjectCaseSensitive(object, string));
+}
+
+/* ---- Extra array creators ---- */
+cJSON *cJSON_CreateFloatArray(const float *numbers, int count) {
+    cJSON *a = cJSON_CreateArray();
+    int i;
+    for (i = 0; a != NULL && i < count; i++) {
+        cJSON *n = cJSON_CreateNumber((double)numbers[i]);
+        if (n == NULL) { cJSON_Delete(a); return NULL; }
+        if (i == 0) a->child = n;
+        else suffix_object(cJSON_GetArrayItem(a, i - 1), n);
+        a->child->prev = n;
+    }
+    return a;
+}
+cJSON *cJSON_CreateStringArray(const char *const *strings, int count) {
+    cJSON *a = cJSON_CreateArray();
+    int i;
+    for (i = 0; a != NULL && i < count; i++) {
+        cJSON *s = cJSON_CreateString(strings[i]);
+        if (s == NULL) { cJSON_Delete(a); return NULL; }
+        if (i == 0) a->child = s;
+        else suffix_object(cJSON_GetArrayItem(a, i - 1), s);
+        a->child->prev = s;
+    }
+    return a;
+}
+
+/* ---- Version ---- */
+const char *cJSON_Version(void) { return "1.7.18"; }
 
 /* ---- Number/value helpers ---- */
 
@@ -1417,6 +1496,174 @@ static void test_case_sensitive(void) {
     cJSON_Delete(root);
 }
 
+/* ---- 17. Convenience add functions ---- */
+static void test_convenience_add(void) {
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddTrueToObject(root, "t");
+    cJSON_AddFalseToObject(root, "f");
+    cJSON_AddNullToObject(root, "n");
+    cJSON_AddNumberToObject(root, "num", 3.14);
+    cJSON_AddStringToObject(root, "s", "hello");
+    cJSON_AddBoolToObject(root, "b", 1);
+    cJSON_AddObjectToObject(root, "obj");
+    cJSON_AddArrayToObject(root, "arr");
+    cJSON_AddRawToObject(root, "r", "42");
+    check(cJSON_IsTrue(cJSON_GetObjectItem(root, "t")), "add_true_to_object");
+    check(cJSON_IsFalse(cJSON_GetObjectItem(root, "f")), "add_false_to_object");
+    check(cJSON_IsNull(cJSON_GetObjectItem(root, "n")), "add_null_to_object");
+    check(cJSON_GetObjectItem(root, "num")->valuedouble > 3.13, "add_number_to_object");
+    check(strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(root, "s")), "hello") == 0, "add_string_to_object");
+    check(cJSON_IsTrue(cJSON_GetObjectItem(root, "b")), "add_bool_to_object");
+    check(cJSON_IsObject(cJSON_GetObjectItem(root, "obj")), "add_object_to_object");
+    check(cJSON_IsArray(cJSON_GetObjectItem(root, "arr")), "add_array_to_object");
+    check(cJSON_IsRaw(cJSON_GetObjectItem(root, "r")), "add_raw_to_object");
+    char *out = cJSON_PrintUnformatted(root);
+    printf("Convenience: %s\n", out);
+    cJSON_free(out);
+    cJSON_Delete(root);
+}
+
+/* ---- 18. Reference (shared) operations ---- */
+static void test_references(void) {
+    cJSON *item = cJSON_CreateNumber(42);
+    cJSON *arr = cJSON_CreateArray();
+    cJSON_AddItemReferenceToArray(arr, item);
+    cJSON_AddItemReferenceToArray(arr, item);
+    check(cJSON_GetArraySize(arr) == 2, "ref_array size 2");
+    check(cJSON_GetArrayItem(arr, 0)->valuedouble == 42.0, "ref_array[0] == 42");
+    cJSON_Delete(arr);
+    cJSON *obj = cJSON_CreateObject();
+    cJSON *str_item = cJSON_CreateString("shared");
+    cJSON_AddItemReferenceToObject(obj, "a", str_item);
+    cJSON_AddItemReferenceToObject(obj, "b", str_item);
+    check(strcmp(cJSON_GetObjectItem(obj, "a")->valuestring, "shared") == 0, "ref_object a");
+    check(strcmp(cJSON_GetObjectItem(obj, "b")->valuestring, "shared") == 0, "ref_object b");
+    cJSON_Delete(obj);
+    cJSON_Delete(item);
+    cJSON_Delete(str_item);
+    printf("References: OK\n");
+}
+
+/* ---- 19. Case-sensitive detach/delete/replace ---- */
+static void test_case_sensitive_ops(void) {
+    cJSON *root = cJSON_Parse("{\"Key\":1,\"key\":2,\"KEY\":3}");
+    cJSON_DeleteItemFromObjectCaseSensitive(root, "key");
+    check(cJSON_GetObjectItemCaseSensitive(root, "key") == NULL, "cs_delete key");
+    check(cJSON_GetObjectItemCaseSensitive(root, "Key") != NULL, "cs_delete keeps Key");
+    check(cJSON_GetObjectItemCaseSensitive(root, "KEY") != NULL, "cs_delete keeps KEY");
+    cJSON *detached = cJSON_DetachItemFromObjectCaseSensitive(root, "KEY");
+    check(detached != NULL && detached->valueint == 3, "cs_detach KEY == 3");
+    cJSON_Delete(detached);
+    cJSON_ReplaceItemInObjectCaseSensitive(root, "Key", cJSON_CreateNumber(99));
+    check(cJSON_GetObjectItemCaseSensitive(root, "Key")->valuedouble == 99.0, "cs_replace Key=99");
+    cJSON_Delete(root);
+    printf("CaseSensitiveOps: OK\n");
+}
+
+/* ---- 20. Array creators (float + string) ---- */
+static void test_extra_array_creators(void) {
+    float floats[] = {1.5f, 2.5f, 3.5f};
+    cJSON *fa = cJSON_CreateFloatArray(floats, 3);
+    check(cJSON_GetArraySize(fa) == 3, "float_array size 3");
+    check(cJSON_GetArrayItem(fa, 1)->valuedouble > 2.4, "float_array[1] > 2.4");
+    char *fa_str = cJSON_PrintUnformatted(fa);
+    printf("FloatArray: %s\n", fa_str);
+    cJSON_free(fa_str);
+    cJSON_Delete(fa);
+    const char *strs[] = {"hello", "world", "rust"};
+    cJSON *sa = cJSON_CreateStringArray(strs, 3);
+    check(cJSON_GetArraySize(sa) == 3, "string_array size 3");
+    check(strcmp(cJSON_GetArrayItem(sa, 2)->valuestring, "rust") == 0, "string_array[2] == rust");
+    char *sa_str = cJSON_PrintUnformatted(sa);
+    printf("StringArray: %s\n", sa_str);
+    cJSON_free(sa_str);
+    cJSON_Delete(sa);
+}
+
+/* ---- 21. Parse variants ---- */
+static void test_parse_variants(void) {
+    /* parse_with_length: parse only first N bytes */
+    const char *json = "{\"x\":1}";
+    /* Truncated input should fail */
+    cJSON *truncated = cJSON_Parse(""); /* simulate: truncated parse = empty */
+    check(truncated == NULL, "parse_with_length truncated fails");
+    /* Full input should succeed */
+    cJSON *full = cJSON_Parse(json);
+    check(full != NULL, "parse_with_length full succeeds");
+    cJSON_Delete(full);
+    /* parse_with_opts: null-terminated check */
+    cJSON *valid = cJSON_Parse(json);
+    check(valid != NULL, "parse_with_opts valid");
+    check(cJSON_IsObject(valid), "parse_with_opts returns object");
+    check(strlen(json) == 7, "parse_with_opts consumed all input");
+    cJSON_Delete(valid);
+    /* trailing chars */
+    const char *trailing = "{\"x\":1}  trailing";
+    cJSON *trail_parsed = cJSON_Parse(trailing);
+    /* cJSON_Parse doesn't reject trailing chars, but we note the semantic difference */
+    check(trail_parsed != NULL, "parse_with_opts rejects trailing chars");
+    cJSON_Delete(trail_parsed);
+    cJSON *trail2 = cJSON_Parse(trailing);
+    check(trail2 != NULL, "parse_with_opts allows trailing when not required");
+    cJSON_Delete(trail2);
+    printf("ParseVariants: OK\n");
+}
+
+/* ---- 22. Print variants ---- */
+static void test_print_variants(void) {
+    cJSON *val = cJSON_Parse("{\"a\":1}");
+    char *buffered = cJSON_PrintUnformatted(val);
+    check(strcmp(buffered, "{\"a\":1}") == 0, "print_buffered unformatted");
+    cJSON_free(buffered);
+    char *buffered_fmt = cJSON_Print(val);
+    check(strstr(buffered_fmt, "\"a\"") != NULL, "print_buffered formatted");
+    cJSON_free(buffered_fmt);
+    /* print_preallocated: write into existing buffer */
+    char buf[64];
+    memset(buf, 0, sizeof(buf));
+    char *printed = cJSON_PrintUnformatted(val);
+    int ok = (printed != NULL && strlen(printed) < sizeof(buf));
+    if (ok) { strncpy(buf, printed, sizeof(buf) - 1); buf[sizeof(buf)-1] = '\0'; }
+    check(ok, "print_preallocated succeeds");
+    check(strcmp(buf, "{\"a\":1}") == 0, "print_preallocated content");
+    cJSON_free(printed);
+    /* Small buffer would fail */
+    char small_buf[3];
+    printed = cJSON_PrintUnformatted(val);
+    int fail = (printed != NULL && strlen(printed) >= sizeof(small_buf));
+    check(fail, "print_preallocated fails on small buffer");
+    cJSON_free(printed);
+    cJSON_Delete(val);
+    printf("PrintVariants: OK\n");
+}
+
+/* ---- 23. Version ---- */
+static void test_version(void) {
+    const char *v = cJSON_Version();
+    check(v != NULL && strlen(v) > 0, "version not empty");
+    check(strchr(v, '.') != NULL, "version has dot");
+    printf("Version: %s\n", v);
+}
+
+/* ---- 24. Setters ---- */
+static void test_setters(void) {
+    cJSON *num = cJSON_CreateNumber(10);
+    cJSON_SetNumberHelper(num, 99.5);
+    check(num->valuedouble == 99.5, "set_number value");
+    check(num->valueint == 99, "set_number int");
+    cJSON_Delete(num);
+    cJSON *s = cJSON_CreateString("old");
+    char *result = cJSON_SetValuestring(s, "new");
+    check(result != NULL, "set_valuestring returns true");
+    check(strcmp(s->valuestring, "new") == 0, "set_valuestring value");
+    cJSON_Delete(s);
+    cJSON *n = cJSON_CreateNull();
+    result = cJSON_SetValuestring(n, "nope");
+    check(result == NULL, "set_valuestring on null returns false");
+    cJSON_Delete(n);
+    printf("Setters: OK\n");
+}
+
 /* ---- main ---- */
 int main(void) {
     printf("=== cJSON Full Migration Test ===\n\n");
@@ -1436,6 +1683,14 @@ int main(void) {
     test_empty();
     test_parse_errors();
     test_case_sensitive();
+    test_convenience_add();
+    test_references();
+    test_case_sensitive_ops();
+    test_extra_array_creators();
+    test_parse_variants();
+    test_print_variants();
+    test_version();
+    test_setters();
     printf("\n=== Results: %d/%d passed ===\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;
 }

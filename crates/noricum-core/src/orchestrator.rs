@@ -19,9 +19,11 @@ use tracing::{debug, info, warn};
 /// Prevents OOM on extremely large C files.
 const MAX_C_SOURCE_SIZE: usize = 5 * 1024 * 1024;
 
+/// LOC threshold above which chunked translation is used.
+const MEDIUM_FILE_LOC: usize = 800;
 /// LOC threshold above which repair iterations are reduced to save tokens.
 const LARGE_FILE_LOC: usize = 1000;
-/// LOC threshold above which repair iterations are further reduced.
+/// LOC threshold above which repair iterations are further reduced and larger chunk targets apply.
 const VERY_LARGE_FILE_LOC: usize = 2000;
 
 use crate::CoreError;
@@ -163,7 +165,7 @@ fn preflight_budget_check(config: &MigrationConfig, c_source: &str, name: &str) 
     // Repair (per iter): Rust source + C source + errors in, Rust out
     let repair_per_iter = c_tokens * 4;
     let c_lines = c_source.lines().count();
-    let effective_iters = effective_repair_iterations(config.max_repair_iterations, c_lines);
+    let effective_iters = effective_repair_iterations(config.max_repair_iterations, c_lines, false);
     let repair_cost = repair_per_iter * effective_iters as u64;
     // Test gen: C + Rust in, tests out
     let test_gen_cost = c_tokens * 3;
@@ -191,11 +193,15 @@ fn preflight_budget_check(config: &MigrationConfig, c_source: &str, name: &str) 
     }
 }
 
-/// Compute effective max repair iterations based on file size.
+/// Compute effective max repair iterations based on file size and chunking.
 ///
 /// Large files use fewer iterations to conserve tokens — each repair
 /// iteration sends the full Rust + C source, which is expensive.
-fn effective_repair_iterations(configured_max: u32, c_lines: usize) -> u32 {
+/// Chunked translations get full iterations since each chunk is small.
+fn effective_repair_iterations(configured_max: u32, c_lines: usize, was_chunked: bool) -> u32 {
+    if was_chunked {
+        return configured_max;
+    }
     if c_lines > VERY_LARGE_FILE_LOC {
         configured_max.min(2)
     } else if c_lines > LARGE_FILE_LOC {
@@ -618,12 +624,32 @@ pub async fn migrate_file(
             "calling translation agent"
         );
         let c_lines_for_chunk = unit.c_source.lines().count();
-        let rust_code = if c_lines_for_chunk > VERY_LARGE_FILE_LOC {
-            let chunks = noricum_tools::ast::chunk_c_source(&unit.c_source, 500);
+        let use_chunked = c_lines_for_chunk > MEDIUM_FILE_LOC;
+        let rust_code = if use_chunked {
+            let chunk_target = if c_lines_for_chunk > VERY_LARGE_FILE_LOC { 500 } else { 400 };
+            // Use structural chunking when data model patterns are detected
+            let has_data_model = analysis.patterns.iter().any(|p| {
+                p.contains("struct") || p.contains("linked_list") || p.contains("recursive")
+            });
+            let chunks = if has_data_model {
+                let structural = noricum_tools::ast::chunk_c_source_structural(&unit.c_source, chunk_target);
+                if structural.len() > 1 {
+                    info!(
+                        function = %name,
+                        "using structural chunking (data model first)"
+                    );
+                    structural
+                } else {
+                    noricum_tools::ast::chunk_c_source(&unit.c_source, chunk_target)
+                }
+            } else {
+                noricum_tools::ast::chunk_c_source(&unit.c_source, chunk_target)
+            };
             info!(
                 function = %name,
                 chunks = chunks.len(),
                 c_lines = c_lines_for_chunk,
+                chunk_target,
                 "using multi-pass chunked translation"
             );
             match noricum_agents::translation::translate_chunked(
@@ -662,6 +688,54 @@ pub async fn migrate_file(
                 }
             }
         };
+
+        // Quality gate: if initial translation has >5 unsafe blocks, re-translate
+        let unsafe_count = noricum_tools::ast::count_unsafe_blocks_ast(&rust_code);
+        let rust_code = if unsafe_count > 5 {
+            warn!(
+                function = %name,
+                unsafe_count,
+                "initial translation has too many unsafe blocks, re-translating with temperature 0.5"
+            );
+            unit.metrics.llm_calls += 1;
+            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                &client,
+                &translation_model_sel.model,
+                &unit.c_source,
+                unit.c2rust_output.as_deref(),
+                &analysis,
+                &relevant_patterns,
+                Some(0.5),
+            )
+            .await
+            {
+                Ok(retranslated) => {
+                    let new_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&retranslated);
+                    if new_unsafe < unsafe_count {
+                        info!(
+                            function = %name,
+                            old_unsafe = unsafe_count,
+                            new_unsafe,
+                            "re-translation reduced unsafe blocks"
+                        );
+                        retranslated
+                    } else {
+                        info!(
+                            function = %name,
+                            "re-translation did not improve, keeping original"
+                        );
+                        rust_code
+                    }
+                }
+                Err(e) => {
+                    warn!(function = %name, error = %e, "re-translation failed, keeping original");
+                    rust_code
+                }
+            }
+        } else {
+            rust_code
+        };
+
         unit.rust_output = Some(rust_code);
         unit.state = MigrationState::Refined;
         unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
@@ -677,7 +751,8 @@ pub async fn migrate_file(
 
     // --- Stage 6: Validate ---
     let c_lines = unit.c_source.lines().count();
-    let max_iters = effective_repair_iterations(config.max_repair_iterations, c_lines);
+    let was_chunked = c_lines > MEDIUM_FILE_LOC;
+    let max_iters = effective_repair_iterations(config.max_repair_iterations, c_lines, was_chunked);
 
     let validation =
         noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
@@ -755,7 +830,8 @@ pub async fn migrate_file(
                 );
             }
 
-            let repaired = noricum_agents::repair::repair_function_with_temperature(
+            let c_abbrev_limit = if c_lines > 500 { Some(500) } else { None };
+            let repaired = noricum_agents::repair::repair_function_full(
                 &client,
                 &repair_model_sel.model,
                 current_rust,
@@ -765,6 +841,7 @@ pub async fn migrate_file(
                 iteration,
                 max_iters,
                 config.repair_base_temperature,
+                c_abbrev_limit,
             )
             .await?;
 
@@ -1233,34 +1310,54 @@ fn main() {
 
     #[test]
     fn test_effective_small() {
-        assert_eq!(effective_repair_iterations(5, 500), 5);
+        assert_eq!(effective_repair_iterations(5, 500, false), 5);
     }
 
     #[test]
     fn test_effective_large() {
-        assert_eq!(effective_repair_iterations(5, 1500), 3);
+        assert_eq!(effective_repair_iterations(5, 1500, false), 3);
     }
 
     #[test]
     fn test_effective_very_large() {
-        assert_eq!(effective_repair_iterations(5, 3000), 2);
+        assert_eq!(effective_repair_iterations(5, 3000, false), 2);
     }
 
     #[test]
     fn test_effective_already_low() {
-        assert_eq!(effective_repair_iterations(1, 3000), 1);
+        assert_eq!(effective_repair_iterations(1, 3000, false), 1);
     }
 
     #[test]
     fn test_effective_boundary_1000() {
         // 1000 is NOT > LARGE_FILE_LOC (1000), so no reduction
-        assert_eq!(effective_repair_iterations(5, 1000), 5);
+        assert_eq!(effective_repair_iterations(5, 1000, false), 5);
     }
 
     #[test]
     fn test_effective_boundary_2001() {
         // 2001 > VERY_LARGE_FILE_LOC (2000), so min(5, 2) = 2
-        assert_eq!(effective_repair_iterations(5, 2001), 2);
+        assert_eq!(effective_repair_iterations(5, 2001, false), 2);
+    }
+
+    #[test]
+    fn test_effective_chunked_gets_full_iterations() {
+        // Chunked translations always get full configured iterations
+        assert_eq!(effective_repair_iterations(5, 1500, true), 5);
+        assert_eq!(effective_repair_iterations(5, 3000, true), 5);
+        assert_eq!(effective_repair_iterations(3, 5000, true), 3);
+    }
+
+    #[test]
+    fn test_medium_file_triggers_chunking() {
+        // Files >800 LOC should trigger chunked translation
+        assert!(800 < LARGE_FILE_LOC);
+        assert!(MEDIUM_FILE_LOC == 800);
+        // 900 LOC > MEDIUM_FILE_LOC, so chunking is used
+        let c_lines = 900;
+        assert!(c_lines > MEDIUM_FILE_LOC);
+        // But with was_chunked=true, full iterations are restored
+        assert_eq!(effective_repair_iterations(5, c_lines, true), 5);
     }
 
     #[test]

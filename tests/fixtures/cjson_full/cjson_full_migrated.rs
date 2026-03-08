@@ -145,6 +145,101 @@ impl JsonValue {
         }
         false
     }
+
+    fn replace_item_in_object_case_sensitive(&mut self, key: &str, item: JsonValue) -> bool {
+        if let JsonValue::Object(entries) = self {
+            for entry in entries.iter_mut() {
+                if entry.0 == key {
+                    entry.1 = item;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn add_true_to_object(&mut self, key: &str) -> bool {
+        self.add_item_to_object(key, JsonValue::Bool(true))
+    }
+
+    fn add_false_to_object(&mut self, key: &str) -> bool {
+        self.add_item_to_object(key, JsonValue::Bool(false))
+    }
+
+    fn add_raw_to_object(&mut self, key: &str, raw: &str) -> bool {
+        self.add_item_to_object(key, JsonValue::Raw(raw.to_string()))
+    }
+
+    fn add_null_to_object(&mut self, key: &str) -> bool {
+        self.add_item_to_object(key, JsonValue::Null)
+    }
+
+    fn add_number_to_object(&mut self, key: &str, num: f64) -> bool {
+        self.add_item_to_object(key, make_number(num))
+    }
+
+    fn add_string_to_object(&mut self, key: &str, val: &str) -> bool {
+        self.add_item_to_object(key, JsonValue::Str(val.to_string()))
+    }
+
+    fn add_bool_to_object(&mut self, key: &str, val: bool) -> bool {
+        self.add_item_to_object(key, JsonValue::Bool(val))
+    }
+
+    fn add_object_to_object(&mut self, key: &str) -> bool {
+        self.add_item_to_object(key, JsonValue::Object(Vec::new()))
+    }
+
+    fn add_array_to_object(&mut self, key: &str) -> bool {
+        self.add_item_to_object(key, JsonValue::Array(Vec::new()))
+    }
+
+    /// In C, references share ownership via IsReference flag to avoid double-free.
+    /// In Rust, Clone replaces this entirely.
+    fn add_item_reference_to_array(&mut self, item: &JsonValue) -> bool {
+        self.add_item_to_array(item.clone())
+    }
+
+    fn add_item_reference_to_object(&mut self, key: &str, item: &JsonValue) -> bool {
+        self.add_item_to_object(key, item.clone())
+    }
+
+    fn detach_item_from_object_case_sensitive(&mut self, key: &str) -> Option<JsonValue> {
+        if let JsonValue::Object(entries) = self {
+            if let Some(pos) = entries.iter().position(|(k, _)| k == key) {
+                return Some(entries.remove(pos).1);
+            }
+        }
+        None
+    }
+
+    fn delete_item_from_object_case_sensitive(&mut self, key: &str) {
+        if let JsonValue::Object(entries) = self {
+            entries.retain(|(k, _)| k != key);
+        }
+    }
+
+    fn set_number(&mut self, num: f64) {
+        if let JsonValue::Number { value, int_value } = self {
+            *value = num;
+            *int_value = if num >= i32::MAX as f64 {
+                i32::MAX
+            } else if num <= i32::MIN as f64 {
+                i32::MIN
+            } else {
+                num as i32
+            };
+        }
+    }
+
+    fn set_valuestring(&mut self, new_val: &str) -> bool {
+        if let JsonValue::Str(s) = self {
+            *s = new_val.to_string();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl PartialEq for JsonValue {
@@ -218,6 +313,18 @@ fn create_int_array(numbers: &[i32]) -> JsonValue {
 
 fn create_double_array(numbers: &[f64]) -> JsonValue {
     JsonValue::Array(numbers.iter().map(|&n| make_number(n)).collect())
+}
+
+fn create_float_array(numbers: &[f32]) -> JsonValue {
+    JsonValue::Array(numbers.iter().map(|&n| make_number(n as f64)).collect())
+}
+
+fn create_string_array(strings: &[&str]) -> JsonValue {
+    JsonValue::Array(strings.iter().map(|&s| JsonValue::Str(s.to_string())).collect())
+}
+
+fn cjson_version() -> &'static str {
+    "1.7.18"
 }
 
 // ---- Parser ----
@@ -517,6 +624,45 @@ fn cjson_parse(input: &str) -> Option<JsonValue> {
     Parser::new(input).parse()
 }
 
+#[derive(Debug)]
+struct ParseError {
+    position: usize,
+    message: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "parse error at position {}: {}", self.position, self.message)
+    }
+}
+
+fn parse_with_length(input: &str, max_len: usize) -> Option<JsonValue> {
+    let truncated = if input.len() > max_len { &input[..max_len] } else { input };
+    Parser::new(truncated).parse()
+}
+
+fn parse_with_opts(input: &str, require_null_terminated: bool) -> Result<(JsonValue, usize), ParseError> {
+    let mut parser = Parser::new(input);
+    match parser.parse() {
+        Some(val) => {
+            if require_null_terminated {
+                parser.skip_whitespace();
+                if parser.offset < parser.input.len() {
+                    return Err(ParseError {
+                        position: parser.offset,
+                        message: "trailing characters after JSON value".to_string(),
+                    });
+                }
+            }
+            Ok((val, parser.offset))
+        }
+        None => Err(ParseError {
+            position: parser.offset,
+            message: "invalid JSON".to_string(),
+        }),
+    }
+}
+
 // ---- Printer ----
 
 fn print_string_escaped(s: &str) -> String {
@@ -692,6 +838,32 @@ fn cjson_print(val: &JsonValue) -> String {
 
 fn cjson_print_unformatted(val: &JsonValue) -> String {
     print_value_unformatted(val)
+}
+
+fn print_buffered(val: &JsonValue, prebuffer: usize, formatted: bool) -> String {
+    let mut out = String::with_capacity(prebuffer);
+    let printed = if formatted {
+        print_value_formatted(val, 0)
+    } else {
+        print_value_unformatted(val)
+    };
+    out.push_str(&printed);
+    out
+}
+
+fn print_preallocated(val: &JsonValue, buffer: &mut [u8], formatted: bool) -> bool {
+    let printed = if formatted {
+        print_value_formatted(val, 0)
+    } else {
+        print_value_unformatted(val)
+    };
+    let bytes = printed.as_bytes();
+    if bytes.len() >= buffer.len() {
+        return false;
+    }
+    buffer[..bytes.len()].copy_from_slice(bytes);
+    buffer[bytes.len()] = 0;
+    true
 }
 
 // ---- Minify ----
@@ -1072,6 +1244,167 @@ fn test_case_sensitive() {
     check(k3.map_or(false, |v| v.get_valueint() == 3), "KEY == 3");
 }
 
+// ---- 17. Convenience add functions ----
+fn test_convenience_add() {
+    let mut root = JsonValue::Object(Vec::new());
+    root.add_true_to_object("t");
+    root.add_false_to_object("f");
+    root.add_null_to_object("n");
+    root.add_number_to_object("num", 3.14);
+    root.add_string_to_object("s", "hello");
+    root.add_bool_to_object("b", true);
+    root.add_object_to_object("obj");
+    root.add_array_to_object("arr");
+    root.add_raw_to_object("r", "42");
+    check(root.get_object_item("t").map_or(false, |v| v.is_true()), "add_true_to_object");
+    check(root.get_object_item("f").map_or(false, |v| v.is_false()), "add_false_to_object");
+    check(root.get_object_item("n").map_or(false, |v| v.is_null()), "add_null_to_object");
+    check(
+        root.get_object_item("num").map_or(false, |v| v.get_valuedouble() > 3.13),
+        "add_number_to_object",
+    );
+    check(
+        root.get_object_item("s").and_then(|v| v.get_string_value()) == Some("hello"),
+        "add_string_to_object",
+    );
+    check(root.get_object_item("b").map_or(false, |v| v.is_true()), "add_bool_to_object");
+    check(root.get_object_item("obj").map_or(false, |v| v.is_object()), "add_object_to_object");
+    check(root.get_object_item("arr").map_or(false, |v| v.is_array()), "add_array_to_object");
+    check(root.get_object_item("r").map_or(false, |v| v.is_raw()), "add_raw_to_object");
+    let out = cjson_print_unformatted(&root);
+    println!("Convenience: {}", out);
+}
+
+// ---- 18. Reference (clone) operations ----
+fn test_references() {
+    let item = make_number(42.0);
+    let mut arr = JsonValue::Array(Vec::new());
+    arr.add_item_reference_to_array(&item);
+    arr.add_item_reference_to_array(&item);
+    check(arr.get_array_size() == 2, "ref_array size 2");
+    check(
+        arr.get_array_item(0).map_or(false, |v| v.get_valuedouble() == 42.0),
+        "ref_array[0] == 42",
+    );
+    let mut obj = JsonValue::Object(Vec::new());
+    let str_item = JsonValue::Str("shared".to_string());
+    obj.add_item_reference_to_object("a", &str_item);
+    obj.add_item_reference_to_object("b", &str_item);
+    check(
+        obj.get_object_item("a").and_then(|v| v.get_string_value()) == Some("shared"),
+        "ref_object a",
+    );
+    check(
+        obj.get_object_item("b").and_then(|v| v.get_string_value()) == Some("shared"),
+        "ref_object b",
+    );
+    println!("References: OK");
+}
+
+// ---- 19. Case-sensitive detach/delete/replace ----
+fn test_case_sensitive_ops() {
+    let mut root = cjson_parse(r#"{"Key":1,"key":2,"KEY":3}"#).unwrap();
+    root.delete_item_from_object_case_sensitive("key");
+    check(root.get_object_item_case_sensitive("key").is_none(), "cs_delete key");
+    check(root.get_object_item_case_sensitive("Key").is_some(), "cs_delete keeps Key");
+    check(root.get_object_item_case_sensitive("KEY").is_some(), "cs_delete keeps KEY");
+    let detached = root.detach_item_from_object_case_sensitive("KEY");
+    check(
+        detached.as_ref().map_or(false, |v| v.get_valueint() == 3),
+        "cs_detach KEY == 3",
+    );
+    root.replace_item_in_object_case_sensitive("Key", make_number(99.0));
+    check(
+        root.get_object_item_case_sensitive("Key").map_or(false, |v| v.get_valuedouble() == 99.0),
+        "cs_replace Key=99",
+    );
+    println!("CaseSensitiveOps: OK");
+}
+
+// ---- 20. Array creators (float + string) ----
+fn test_extra_array_creators() {
+    let floats: [f32; 3] = [1.5, 2.5, 3.5];
+    let fa = create_float_array(&floats);
+    check(fa.get_array_size() == 3, "float_array size 3");
+    check(
+        fa.get_array_item(1).map_or(false, |v| v.get_valuedouble() > 2.4),
+        "float_array[1] > 2.4",
+    );
+    let fa_str = cjson_print_unformatted(&fa);
+    println!("FloatArray: {}", fa_str);
+    let strs = ["hello", "world", "rust"];
+    let sa = create_string_array(&strs);
+    check(sa.get_array_size() == 3, "string_array size 3");
+    check(
+        sa.get_array_item(2).and_then(|v| v.get_string_value()) == Some("rust"),
+        "string_array[2] == rust",
+    );
+    let sa_str = cjson_print_unformatted(&sa);
+    println!("StringArray: {}", sa_str);
+}
+
+// ---- 21. Parse variants ----
+fn test_parse_variants() {
+    let json = r#"{"x":1}"#;
+    let truncated = parse_with_length(json, 4);
+    check(truncated.is_none(), "parse_with_length truncated fails");
+    let full = parse_with_length(json, 100);
+    check(full.is_some(), "parse_with_length full succeeds");
+    let result = parse_with_opts(json, true);
+    check(result.is_ok(), "parse_with_opts valid");
+    if let Ok((val, pos)) = result {
+        check(val.is_object(), "parse_with_opts returns object");
+        check(pos == json.len(), "parse_with_opts consumed all input");
+    }
+    let trailing = r#"{"x":1}  trailing"#;
+    let result2 = parse_with_opts(trailing, true);
+    check(result2.is_err(), "parse_with_opts rejects trailing chars");
+    let result3 = parse_with_opts(trailing, false);
+    check(result3.is_ok(), "parse_with_opts allows trailing when not required");
+    println!("ParseVariants: OK");
+}
+
+// ---- 22. Print variants ----
+fn test_print_variants() {
+    let val = cjson_parse(r#"{"a":1}"#).unwrap();
+    let buffered = print_buffered(&val, 256, false);
+    check(buffered == r#"{"a":1}"#, "print_buffered unformatted");
+    let buffered_fmt = print_buffered(&val, 256, true);
+    check(buffered_fmt.contains("\"a\""), "print_buffered formatted");
+    let mut buf = [0u8; 64];
+    let ok = print_preallocated(&val, &mut buf, false);
+    check(ok, "print_preallocated succeeds");
+    let printed = std::str::from_utf8(&buf[..buf.iter().position(|&b| b == 0).unwrap_or(0)])
+        .unwrap_or("");
+    check(printed == r#"{"a":1}"#, "print_preallocated content");
+    let mut small_buf = [0u8; 3];
+    let fail = print_preallocated(&val, &mut small_buf, false);
+    check(!fail, "print_preallocated fails on small buffer");
+    println!("PrintVariants: OK");
+}
+
+// ---- 23. Version ----
+fn test_version() {
+    let v = cjson_version();
+    check(!v.is_empty(), "version not empty");
+    check(v.contains('.'), "version has dot");
+    println!("Version: {}", v);
+}
+
+// ---- 24. Setters ----
+fn test_setters() {
+    let mut num = make_number(10.0);
+    num.set_number(99.5);
+    check(num.get_valuedouble() == 99.5, "set_number value");
+    check(num.get_valueint() == 99, "set_number int");
+    let mut s = JsonValue::Str("old".to_string());
+    check(s.set_valuestring("new"), "set_valuestring returns true");
+    check(s.get_string_value() == Some("new"), "set_valuestring value");
+    let mut n = JsonValue::Null;
+    check(!n.set_valuestring("nope"), "set_valuestring on null returns false");
+    println!("Setters: OK");
+}
+
 // ---- main ----
 fn main() {
     println!("=== cJSON Full Migration Test ===\n");
@@ -1091,6 +1424,14 @@ fn main() {
     test_empty();
     test_parse_errors();
     test_case_sensitive();
+    test_convenience_add();
+    test_references();
+    test_case_sensitive_ops();
+    test_extra_array_creators();
+    test_parse_variants();
+    test_print_variants();
+    test_version();
+    test_setters();
     let pass = PASS_COUNT.load(Ordering::Relaxed);
     let total = TEST_COUNT.load(Ordering::Relaxed);
     println!("\n=== Results: {}/{} passed ===", pass, total);
