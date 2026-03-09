@@ -8,8 +8,17 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use chrono::Local;
+use chrono::Utc;
 use tracing::debug;
+
+/// Sanitise a user-provided name so it is safe to use as a path component.
+///
+/// Replaces any character that is not alphanumeric, `_`, or `-` with `_`.
+fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
 
 /// Persists all intermediate artifacts produced during a migration run.
 ///
@@ -51,8 +60,9 @@ impl ArtifactStore {
     /// `{base_dir}/{function_name}-{YYYYMMDD-HHMMSS}/` and the
     /// `03-translation/` and `05-repair/` subdirectories are created eagerly.
     pub fn new(base_dir: &Path, function_name: &str) -> io::Result<Self> {
-        let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-        let run_dir = base_dir.join(format!("{function_name}-{timestamp}"));
+        let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
+        let safe_name = sanitize_name(function_name);
+        let run_dir = base_dir.join(format!("{safe_name}-{timestamp}"));
 
         fs::create_dir_all(run_dir.join("03-translation"))?;
         fs::create_dir_all(run_dir.join("05-repair"))?;
@@ -130,13 +140,15 @@ impl ArtifactStore {
         module_name: &str,
         rust_source: &str,
     ) -> io::Result<()> {
-        let name = format!("03-translation/module-{module_name}.rs");
+        let safe = sanitize_name(module_name);
+        let name = format!("03-translation/module-{safe}.rs");
         self.write_artifact(Path::new(&name), rust_source)
     }
 
     /// Save a re-translation attempt (`03-translation/retranslation-{reason}.rs`).
     pub fn save_retranslation(&self, reason: &str, rust_source: &str) -> io::Result<()> {
-        let name = format!("03-translation/retranslation-{reason}.rs");
+        let safe = sanitize_name(reason);
+        let name = format!("03-translation/retranslation-{safe}.rs");
         self.write_artifact(Path::new(&name), rust_source)
     }
 
