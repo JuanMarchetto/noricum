@@ -9,5 +9,7 @@
 /demo.cast
 /demo.gif
 .noricum-cache/
+.noricum-artifacts/
+proptest-regressions/
 .worktrees/
 check

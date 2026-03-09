@@ -1,8 +1,0 @@
-{
-  "difficulty": "easy",
-  "patterns": [],
-  "rust_equivalents": {},
-  "dependencies": [],
-  "risks": [],
-  "strategy": "Direct translation to a simple Rust function."
-}
