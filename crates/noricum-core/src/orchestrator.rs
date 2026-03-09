@@ -1654,7 +1654,6 @@ async fn migrate_file_modular(
         let translation_model_sel = select_model(provider_config, difficulty, "translation")?;
         let relevant_patterns = pattern_store.find_relevant(&module.source, 3);
 
-        // For modules, always use single-pass translation (each module is ≤ ~1000 LOC)
         // Inject accumulated context as a prefix hint in the C source
         let augmented_c = if context_note.is_empty() {
             module.source.clone()
@@ -1666,11 +1665,30 @@ async fn migrate_file_modular(
             )
         };
 
-        let rust_code =
-            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+        // P12: Sub-chunk large modules — if a module exceeds MEDIUM_FILE_LOC, use
+        // chunked translation instead of single-pass to avoid LLM context overflow.
+        let module_lines = module.line_count;
+        let rust_code = if module_lines > MEDIUM_FILE_LOC {
+            let chunk_target = if module_lines > MASSIVE_FILE_LOC {
+                600
+            } else if module_lines > VERY_LARGE_FILE_LOC {
+                500
+            } else {
+                400
+            };
+            info!(
+                module = %mod_name,
+                lines = module_lines,
+                chunk_target,
+                "P12: module exceeds {} LOC, using chunked translation",
+                MEDIUM_FILE_LOC
+            );
+
+            let chunks = noricum_tools::ast::chunk_c_source(&augmented_c, chunk_target);
+            match noricum_agents::translation::translate_chunked(
                 client,
                 &translation_model_sel.model,
-                &augmented_c,
+                &chunks,
                 None, // No c2rust context for modular
                 analysis,
                 &relevant_patterns,
@@ -1678,18 +1696,50 @@ async fn migrate_file_modular(
             )
             .await
             {
-                Ok(code) => code,
+                Ok(chunked_result) => {
+                    total_metrics.llm_calls += chunked_result.chunks.len() as u32;
+                    for chunk in &chunked_result.chunks {
+                        total_metrics.input_tokens +=
+                            noricum_agents::estimate_tokens(&chunk.rust_source);
+                    }
+                    total_metrics.translation_ms +=
+                        translation_start.elapsed().as_millis() as u64;
+                    chunked_result.combined
+                }
+                Err(e) => {
+                    warn!(module = %mod_name, error = %e, "chunked module translation failed");
+                    all_validated = false;
+                    continue;
+                }
+            }
+        } else {
+            // Small module — single-pass translation
+            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                client,
+                &translation_model_sel.model,
+                &augmented_c,
+                None,
+                analysis,
+                &relevant_patterns,
+                config.translation_temperature,
+            )
+            .await
+            {
+                Ok(code) => {
+                    total_metrics.llm_calls += 1;
+                    total_metrics.input_tokens += noricum_agents::estimate_tokens(&augmented_c);
+                    total_metrics.output_tokens += noricum_agents::estimate_tokens(&code);
+                    total_metrics.translation_ms +=
+                        translation_start.elapsed().as_millis() as u64;
+                    code
+                }
                 Err(e) => {
                     warn!(module = %mod_name, error = %e, "module translation failed");
                     all_validated = false;
                     continue;
                 }
-            };
-
-        total_metrics.llm_calls += 1;
-        total_metrics.input_tokens += noricum_agents::estimate_tokens(&augmented_c);
-        total_metrics.output_tokens += noricum_agents::estimate_tokens(&rust_code);
-        total_metrics.translation_ms += translation_start.elapsed().as_millis() as u64;
+            }
+        };
 
         // Substance check
         let is_stub = !has_substance(&rust_code, &module.source);
