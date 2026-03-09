@@ -1,0 +1,440 @@
+HTTP_PARSER DIFF TEST SUITE
+TEST 1: Simple GET
+  parsed=41/41
+  method=GET
+  url=/path
+  http=1.1
+  headers=1
+    Host: example.com
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 2: GET with query string
+  parsed=78/78
+  method=GET
+  url=/search?q=hello&lang=en
+  http=1.1
+  headers=2
+    Host: example.com
+    Accept: text/html
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 3: POST with body
+  parsed=126/126
+  method=POST
+  url=/submit
+  http=1.1
+  headers=3
+    Host: example.com
+    Content-Length: 13
+    Content-Type: application/x-www-form-urlencoded
+  body=hello=world!!
+  body_len=13
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 4: PUT request
+  parsed=122/122
+  method=PUT
+  url=/resource/42
+  http=1.1
+  headers=3
+    Host: api.example.com
+    Content-Length: 18
+    Content-Type: application/json
+  body={"name":"updated"}
+  body_len=18
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 5: DELETE request
+  parsed=55/55
+  method=DELETE
+  url=/resource/42
+  http=1.1
+  headers=1
+    Host: api.example.com
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 6: HEAD request
+  parsed=38/38
+  method=HEAD
+  url=/
+  http=1.1
+  headers=1
+    Host: example.com
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 7: OPTIONS request
+  parsed=41/41
+  method=OPTIONS
+  url=*
+  http=1.1
+  headers=1
+    Host: example.com
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 8: PATCH request
+  parsed=122/122
+  method=PATCH
+  url=/resource/42
+  http=1.1
+  headers=3
+    Host: api.example.com
+    Content-Length: 16
+    Content-Type: application/json
+  body={"name":"patch"}
+  body_len=16
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 9: CONNECT request
+  parsed=67/67
+  method=CONNECT
+  url=www.example.com:443
+  http=1.1
+  headers=1
+    Host: www.example.com:443
+  keep_alive=1
+  upgrade=1
+  message_complete=1
+TEST 10: TRACE request
+  parsed=43/43
+  method=TRACE
+  url=/path
+  http=1.1
+  headers=1
+    Host: example.com
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 11: HTTP/1.0 GET
+  parsed=21/21
+  method=GET
+  url=/old
+  http=1.0
+  headers=0
+  keep_alive=0
+  upgrade=0
+  message_complete=1
+TEST 12: Multiple headers
+  parsed=196/196
+  method=GET
+  url=/headers
+  http=1.1
+  headers=7
+    Host: example.com
+    Accept: text/html
+    Accept-Language: en-US
+    Accept-Encoding: gzip, deflate
+    Connection: keep-alive
+    User-Agent: TestClient/1.0
+    Cache-Control: no-cache
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 13: Connection close
+  parsed=61/61
+  method=GET
+  url=/close
+  http=1.1
+  headers=2
+    Host: example.com
+    Connection: close
+  keep_alive=0
+  upgrade=0
+  message_complete=1
+TEST 14: HTTP/1.0 Keep-Alive
+  parsed=44/44
+  method=GET
+  url=/ka
+  http=1.0
+  headers=1
+    Connection: keep-alive
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 15: Response 200 OK
+  parsed=43/43
+  status_code=200
+  status_text=OK
+  http=1.1
+  headers=1
+    Content-Length: 5
+  body=hello
+  body_len=5
+  keep_alive=1
+  message_complete=1
+TEST 16: Response 404
+  parsed=54/54
+  status_code=404
+  status_text=Not Found
+  http=1.1
+  headers=1
+    Content-Length: 9
+  body=not found
+  body_len=9
+  keep_alive=1
+  message_complete=1
+TEST 17: Response 301 Redirect
+  parsed=87/87
+  status_code=301
+  status_text=Moved Permanently
+  http=1.1
+  headers=2
+    Location: http://example.com/new
+    Content-Length: 0
+  keep_alive=1
+  message_complete=1
+TEST 18: Response 500
+  parsed=62/62
+  status_code=500
+  status_text=Internal Server Error
+  http=1.1
+  headers=1
+    Content-Length: 5
+  body=error
+  body_len=5
+  keep_alive=1
+  message_complete=1
+TEST 19: Response 204 No Content
+  parsed=27/27
+  status_code=204
+  status_text=No Content
+  http=1.1
+  headers=0
+  keep_alive=1
+  message_complete=1
+TEST 20: Chunked response
+  parsed=73/73
+  status_code=200
+  status_text=OK
+  http=1.1
+  headers=1
+    Transfer-Encoding: chunked
+  body=hello world
+  body_len=11
+  keep_alive=1
+  chunks=3
+  message_complete=1
+TEST 21: Chunked with trailer
+  parsed=96/96
+  status_code=200
+  status_text=OK
+  http=1.1
+  headers=1
+    Transfer-Encoding: chunked
+  body=foobar
+  body_len=6
+  keep_alive=1
+  chunks=3
+  message_complete=1
+TEST 22: HTTP/1.0 response
+  parsed=41/41
+  status_code=200
+  status_text=OK
+  http=1.0
+  headers=1
+    Content-Length: 3
+  body=foo
+  body_len=3
+  keep_alive=0
+  message_complete=1
+TEST 23: Response 100 Continue
+  parsed=25/25
+  status_code=100
+  status_text=Continue
+  http=1.1
+  headers=0
+  keep_alive=1
+  message_complete=1
+TEST 24: Response with many headers
+  parsed=194/194
+  status_code=200
+  status_text=OK
+  http=1.1
+  headers=6
+    Content-Type: text/html; charset=utf-8
+    Content-Length: 4
+    Server: TestServer/1.0
+    X-Request-Id: abc123
+    Cache-Control: max-age=3600
+    Date: Mon, 01 Jan 2024 00:00:00 GMT
+  body=test
+  body_len=4
+  keep_alive=1
+  message_complete=1
+TEST 25: Response 101 Switching Protocols
+  parsed=77/77
+  status_code=101
+  status_text=Switching Protocols
+  http=1.1
+  headers=2
+    Upgrade: websocket
+    Connection: Upgrade
+  keep_alive=1
+  message_complete=1
+TEST 26: Response 302 Found
+  parsed=59/59
+  status_code=302
+  status_text=Found
+  http=1.1
+  headers=2
+    Location: /login
+    Content-Length: 0
+  keep_alive=1
+  message_complete=1
+TEST 27: Response 304 Not Modified
+  parsed=45/45
+  status_code=304
+  status_text=Not Modified
+  http=1.1
+  headers=1
+    ETag: "abc123"
+  keep_alive=1
+  message_complete=1
+TEST 28: WebSocket upgrade
+  parsed=161/161
+  method=GET
+  url=/chat
+  http=1.1
+  headers=5
+    Host: server.example.com
+    Upgrade: websocket
+    Connection: Upgrade
+    Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+    Sec-WebSocket-Version: 13
+  keep_alive=1
+  upgrade=1
+  message_complete=1
+TEST 29: POST large body
+  parsed=141/141
+  method=POST
+  url=/upload
+  http=1.1
+  headers=3
+    Host: example.com
+    Content-Length: 51
+    Content-Type: text/plain
+  body=The quick brown fox jumps over the lazy dog. Done!!
+  body_len=51
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 30: GET with fragment
+  parsed=50/50
+  method=GET
+  url=/page#section2
+  http=1.1
+  headers=1
+    Host: example.com
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 31: GET with absolute URL
+  parsed=63/63
+  method=GET
+  url=http://example.com/resource
+  http=1.1
+  headers=1
+    Host: example.com
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 32: Response with Connection close
+  parsed=59/59
+  status_code=200
+  status_text=OK
+  http=1.1
+  headers=2
+    Connection: close
+    Content-Length: 2
+  body=ok
+  body_len=2
+  keep_alive=0
+  message_complete=1
+TEST 33: POST with JSON content
+  parsed=152/152
+  method=POST
+  url=/api/data
+  http=1.1
+  headers=4
+    Host: api.example.com
+    Content-Type: application/json
+    Content-Length: 24
+    Accept: application/json
+  body={"key":"value","num":42}
+  body_len=24
+  keep_alive=1
+  upgrade=0
+  message_complete=1
+TEST 34: URL parsing
+  url=http://example.com/path?query=val#frag is_connect=0 result=0
+  field_set=0x3b port=0
+    SCHEMA=http
+    HOST=example.com
+    PATH=/path
+    QUERY=query=val
+    FRAGMENT=frag
+  url=http://user:pass@host.com:8080/p/a/t/h?q=1 is_connect=0 result=0
+  field_set=0x5f port=8080
+    SCHEMA=http
+    HOST=host.com
+    PORT=8080
+    PATH=/p/a/t/h
+    QUERY=q=1
+    USERINFO=user:pass
+  url=/status?format=json is_connect=0 result=0
+  field_set=0x18 port=0
+    PATH=/status
+    QUERY=format=json
+  url=http://[::1]:8080/ipv6 is_connect=0 result=0
+  field_set=0xf port=8080
+    SCHEMA=http
+    HOST=::1
+    PORT=8080
+    PATH=/ipv6
+  url=example.com:443 is_connect=1 result=0
+  field_set=0x6 port=443
+    HOST=example.com
+    PORT=443
+  url=http://example.com is_connect=0 result=0
+  field_set=0x3 port=0
+    SCHEMA=http
+    HOST=example.com
+  url=/ is_connect=0 result=0
+  field_set=0x8 port=0
+    PATH=/
+  url=/path/to/resource is_connect=0 result=0
+  field_set=0x8 port=0
+    PATH=/path/to/resource
+TEST 35: Utility functions
+  version=2.9.4
+  method[GET]=GET
+  method[POST]=POST
+  method[DELETE]=DELETE
+  method[PUT]=PUT
+  method[PATCH]=PATCH
+  method[OPTIONS]=OPTIONS
+  method[HEAD]=HEAD
+  method[CONNECT]=CONNECT
+  method[TRACE]=TRACE
+  errno[OK]=HPE_OK
+  errno[INVALID_URL]=HPE_INVALID_URL
+  errno[INVALID_METHOD]=HPE_INVALID_METHOD
+  errno_desc[OK]=success
+  errno_desc[HEADER_OVERFLOW]=too many header bytes seen; overflow detected
+  keep_alive_10=0
+  keep_alive_11=1
+TEST 36: Invalid method
+  parsed=0/21
+  error=HPE_INVALID_METHOD
+TEST 37: Invalid HTTP version
+  parsed=18/18
+  error=HPE_OK
+TOTAL TESTS: 37
+ALL TESTS COMPLETE
