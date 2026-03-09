@@ -21,7 +21,7 @@ pub enum ValidationError {
 }
 
 /// Result of running the full validation pipeline on a function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ValidationResult {
     pub compiles: bool,
     pub compiler_errors: Vec<String>,
