@@ -171,6 +171,9 @@ struct MigrateOpts {
     /// LLM provider: anthropic, deepseek, or ollama (default: auto-detect from available API keys)
     #[arg(long)]
     provider: Option<String>,
+    /// Directory for intermediate artifact persistence (default: .noricum-artifacts)
+    #[arg(long, default_value = ".noricum-artifacts")]
+    artifacts_dir: PathBuf,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -212,6 +215,7 @@ async fn main() {
                 ollama_model: opts.ollama_model,
                 skip_c2rust: opts.skip_c2rust,
                 provider: opts.provider,
+                artifacts_dir: opts.artifacts_dir,
             })
             .await
         }

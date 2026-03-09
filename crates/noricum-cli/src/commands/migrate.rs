@@ -25,6 +25,7 @@ pub struct MigrateParams {
     pub ollama_model: Option<String>,
     pub skip_c2rust: bool,
     pub provider: Option<String>,
+    pub artifacts_dir: std::path::PathBuf,
 }
 
 pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
@@ -62,6 +63,7 @@ pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
         generate_docs: opts.docs,
         ollama_model: opts.ollama_model,
         skip_c2rust: opts.skip_c2rust,
+        artifacts_dir: opts.artifacts_dir,
         max_tokens_budget: match opts.max_tokens {
             Some(0) => None,
             Some(n) => Some(n),
