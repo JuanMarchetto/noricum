@@ -135,6 +135,37 @@ impl Buffer {
 //   (this is the HARDEST pattern — requires full algorithm understanding)
 ```
 
+## State Machine Migration (learned from http-parser)
+```rust
+// C goto-based state machine (58 states, 1515 lines) -> clean line-based parsing
+// Key: DON'T port the goto mess line-by-line. Rewrite at a higher abstraction level.
+
+// C pattern:
+//   switch(parser->state) {
+//     case s_req_method: ... goto reexecute;
+//     case s_req_url: ... goto reexecute;
+//   }
+// Rust pattern: parse complete lines with find_crlf(), process phases sequentially
+fn find_crlf(data: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i + 1 < data.len() {
+        if data[i] == b'\r' && data[i + 1] == b'\n' { return Some(i); }
+        i += 1;
+    }
+    None
+}
+// Then: parse_request_line() -> parse_headers() -> parse_body()
+// Each returns the position after processing, maintaining byte-exact count.
+
+// C global mutable callback state -> thread_local! { RefCell<T> }
+use std::cell::RefCell;
+thread_local! {
+    static G_STATE: RefCell<TestState> = RefCell::new(TestState::new());
+}
+// Callbacks are regular functions accessing the thread_local (no unsafe needed)
+// This mirrors C's static globals but is safe in Rust
+```
+
 ## Numeric Formatting (learned from cJSON)
 ```rust
 // C printf("%.17g", num) doesn't map directly to Rust format!("{}", num)
@@ -159,3 +190,6 @@ fn format_g(val: f64) -> String {
 - **Use `usize` for array dimensions**: C uses `int` for sizes, but Rust indexing requires `usize`. Using `i32` forces `as usize` on every array access, which penalizes idiomatic score heavily. Prefer `usize` from the start.
 - **glibc `srand`/`rand` determinism**: C's `rand()` uses glibc TYPE_3 (degree-31) PRNG. For diff-test to pass, must reimplement the exact PRNG algorithm, not use Rust's `rand` crate.
 - **`a > 0` returns double in C**: This is an implicit bool-to-double cast. In Rust: `if a > 0.0 { 1.0 } else { 0.0 }`
+- **goto state machines**: Don't port byte-by-byte. Rewrite at higher abstraction (line-by-line parsing). 1515 LOC goto → ~200 LOC clean Rust. The `parsed` byte count stays correct via position tracking.
+- **C callback APIs with global state**: Use `thread_local! { RefCell<T> }` instead of `unsafe static mut`. Callbacks are plain functions that access the thread_local.
+- **Frontier target stochasticity**: For >2500 LOC with goto/switch state machines, the LLM pipeline converges stochastically. Manual completion is a valid strategy when LLM provides good types+structure but truncates on complex functions.
