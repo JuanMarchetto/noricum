@@ -81,6 +81,9 @@ pub struct MigrationConfig {
     /// Skip C2Rust transpilation entirely. Useful when the LLM produces better
     /// translations directly from C source, saving tokens and time.
     pub skip_c2rust: bool,
+    /// Directory for pipeline artifact persistence. Every intermediate output
+    /// is saved here for debugging and recovery. Defaults to `.noricum-artifacts/`.
+    pub artifacts_dir: std::path::PathBuf,
 }
 
 impl Default for MigrationConfig {
@@ -107,6 +110,7 @@ impl Default for MigrationConfig {
             max_tokens_budget: Some(2_000_000),
             max_llm_calls: Some(50),
             skip_c2rust: false,
+            artifacts_dir: std::path::PathBuf::from(".noricum-artifacts"),
         }
     }
 }
@@ -525,6 +529,18 @@ pub async fn migrate_file(
         );
     }
 
+    // --- Initialize artifact store ---
+    let artifacts = match crate::artifacts::ArtifactStore::new(&config.artifacts_dir, &name) {
+        Ok(store) => {
+            info!(artifacts_dir = %store.run_dir().display(), "artifact store initialized");
+            Some(store)
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to create artifact store, continuing without persistence");
+            None
+        }
+    };
+
     // Try to get an Anthropic client; fall back to sync if unavailable
     let client = match config.create_client() {
         Some(c) => c,
@@ -545,6 +561,10 @@ pub async fn migrate_file(
     let mut unit = FunctionUnit::new(name.clone(), source_path, c_source);
     unit.state = MigrationState::Extracted;
     info!(function = %name, state = ?unit.state, "state -> Extracted");
+
+    if let Some(ref store) = artifacts {
+        let _ = store.save_c_source(&unit.c_source);
+    }
 
     // --- Preprocessor step ---
     if config.preprocess {
@@ -592,6 +612,9 @@ pub async fn migrate_file(
             Ok(output) => {
                 let rust_src = output.rust_source;
                 unit.c2rust_output = Some(rust_src.clone());
+                if let Some(ref store) = artifacts {
+                    let _ = store.save_c2rust(&rust_src);
+                }
                 unit.rust_output = Some(rust_src);
                 unit.state = MigrationState::C2RustDone;
                 info!(function = %name, state = ?unit.state, "state -> C2RustDone");
@@ -630,6 +653,11 @@ pub async fn migrate_file(
         }
     };
     unit.state = MigrationState::Analyzed;
+    if let Some(ref store) = artifacts
+        && let Ok(json) = serde_json::to_string_pretty(&analysis)
+    {
+        let _ = store.save_analysis(&json);
+    }
     unit.metrics.analysis_ms = analysis_start.elapsed().as_millis() as u64;
     unit.metrics.llm_calls += 1;
     // Estimate token usage for analysis call
@@ -681,6 +709,7 @@ pub async fn migrate_file(
             &provider_config,
             &analysis,
             difficulty,
+            &artifacts,
         )
         .await?
         {
@@ -775,7 +804,20 @@ pub async fn migrate_file(
             )
             .await
             {
-                Ok(code) => code,
+                Ok(chunked_result) => {
+                    if let Some(ref store) = artifacts {
+                        for chunk in &chunked_result.chunks {
+                            let _ = store.save_translation_chunk(chunk.index, &chunk.rust_source);
+                        }
+                        if let Some(ref sigs) = chunked_result.agreed_signatures {
+                            let _ = store.save_agreed_signatures(sigs);
+                        }
+                        if let Some(ref foundation) = chunked_result.foundation {
+                            let _ = store.save_foundation(foundation);
+                        }
+                    }
+                    chunked_result.combined
+                }
                 Err(e) => {
                     warn!(function = %name, error = %e, "chunked translation failed, falling back to sync");
                     return migrate_file_sync(c_file);
@@ -851,6 +893,9 @@ pub async fn migrate_file(
                             new_lines,
                             "P6: re-translation produced substantial code"
                         );
+                        if let Some(ref store) = artifacts {
+                            let _ = store.save_retranslation("stub", &retranslated);
+                        }
                         retranslated
                     } else {
                         warn!(function = %name, "P6: re-translation still produced stubs");
@@ -895,6 +940,9 @@ pub async fn migrate_file(
                             new_unsafe,
                             "re-translation reduced unsafe blocks"
                         );
+                        if let Some(ref store) = artifacts {
+                            let _ = store.save_retranslation("unsafe", &retranslated);
+                        }
                         retranslated
                     } else {
                         info!(
@@ -914,6 +962,9 @@ pub async fn migrate_file(
         };
 
         unit.rust_output = Some(rust_code);
+        if let Some(ref store) = artifacts {
+            let _ = store.save_translation_final(unit.rust_output.as_deref().unwrap_or(""));
+        }
         unit.state = MigrationState::Refined;
         unit.metrics.translation_ms = translation_start.elapsed().as_millis() as u64;
         unit.metrics.llm_calls += 1;
@@ -934,6 +985,11 @@ pub async fn migrate_file(
     let validation =
         noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
     noricum_validation::apply_validation_with_max(&mut unit, &validation, max_iters);
+    if let Some(ref store) = artifacts
+        && let Ok(json) = serde_json::to_string_pretty(&validation)
+    {
+        let _ = store.save_initial_validation(&json);
+    }
     info!(
         function = %name,
         state = ?unit.state,
@@ -1100,6 +1156,10 @@ pub async fn migrate_file(
 
                 if let Ok(retranslated) = retranslate_result {
                     unit.rust_output = Some(retranslated);
+                    if let Some(ref store) = artifacts {
+                        let _ = store
+                            .save_retranslation_stall(unit.rust_output.as_deref().unwrap_or(""));
+                    }
                     unit.metrics.llm_calls += 1;
                     stall_count = 0;
                     prev_error_count = None;
@@ -1136,6 +1196,16 @@ pub async fn migrate_file(
                             best_compiles,
                             "new best version from re-translation"
                         );
+                        if let Some(ref store) = artifacts
+                            && let Some(ref best) = best_version
+                        {
+                            let _ = store.save_best_version(
+                                best,
+                                best_score,
+                                best_unsafe,
+                                best_compiles,
+                            );
+                        }
                     }
 
                     if re_validation.passed {
@@ -1204,6 +1274,9 @@ pub async fn migrate_file(
                     baseline_unsafe,
                     "P0: repair rejected — introduces more unsafe blocks than translation baseline"
                 );
+                if let Some(ref store) = artifacts {
+                    let _ = store.save_repair_rejected(iteration, &repaired);
+                }
                 // Don't apply this repair; keep the current version and continue
                 unit.metrics.llm_calls += 1;
                 unit.metrics.repair_iterations = iteration;
@@ -1225,6 +1298,15 @@ pub async fn migrate_file(
             let re_validation =
                 noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
             noricum_validation::apply_validation_with_max(&mut unit, &re_validation, max_iters);
+            if let Some(ref store) = artifacts
+                && let Ok(val_json) = serde_json::to_string_pretty(&re_validation)
+            {
+                let _ = store.save_repair_iteration(
+                    iteration,
+                    unit.rust_output.as_deref().unwrap_or(""),
+                    &val_json,
+                );
+            }
             info!(
                 function = %name,
                 iteration,
@@ -1258,6 +1340,11 @@ pub async fn migrate_file(
                     best_compiles,
                     "new best version from repair"
                 );
+                if let Some(ref store) = artifacts
+                    && let Some(ref best) = best_version
+                {
+                    let _ = store.save_best_version(best, best_score, best_unsafe, best_compiles);
+                }
             }
 
             if re_validation.passed {
@@ -1442,6 +1529,39 @@ pub async fn migrate_file(
         }
     }
 
+    // --- Save final artifacts ---
+    if let Some(ref store) = artifacts {
+        if let Some(ref rust) = unit.rust_output {
+            let _ = store.save_final_output(rust);
+        }
+        if let Some(ref tests) = unit.generated_tests {
+            let _ = store.save_generated_tests(tests);
+        }
+        let manifest = serde_json::json!({
+            "name": unit.name,
+            "source_path": unit.source_path,
+            "final_state": format!("{:?}", unit.state),
+            "difficulty": format!("{:?}", unit.difficulty),
+            "idiomatic_score": unit.idiomatic_score,
+            "unsafe_count": unit.unsafe_count,
+            "metrics": {
+                "total_ms": unit.metrics.total_ms,
+                "llm_calls": unit.metrics.llm_calls,
+                "repair_iterations": unit.metrics.repair_iterations,
+                "c_lines": unit.metrics.c_lines,
+                "rust_lines": unit.metrics.rust_lines,
+                "input_tokens": unit.metrics.input_tokens,
+                "output_tokens": unit.metrics.output_tokens,
+                "estimated_cost_usd": unit.metrics.estimated_cost_usd,
+            },
+            "artifacts_dir": store.run_dir().display().to_string(),
+        });
+        if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+            let _ = store.save_manifest(&json);
+        }
+        info!(artifacts_dir = %store.run_dir().display(), "all pipeline artifacts saved");
+    }
+
     Ok(unit)
 }
 
@@ -1461,6 +1581,7 @@ pub async fn migrate_file(
 ///
 /// Each module gets its own repair loop with reasonable context size, solving the
 /// core problem where repair of 4000+ LOC Rust is too large for the LLM to handle.
+#[allow(clippy::too_many_arguments)]
 async fn migrate_file_modular(
     c_source: &str,
     name: &str,
@@ -1469,6 +1590,7 @@ async fn migrate_file_modular(
     provider_config: &noricum_agents::providers::ProviderConfig,
     analysis: &noricum_agents::analysis::AnalysisResult,
     difficulty: noricum_ir::Difficulty,
+    artifacts: &Option<crate::artifacts::ArtifactStore>,
 ) -> Result<ModularResult, CoreError> {
     let modules = noricum_tools::ast::split_into_modules(c_source);
 
@@ -1594,6 +1716,13 @@ async fn migrate_file_modular(
 
         mod_unit.rust_output = Some(rust_code);
         mod_unit.state = MigrationState::Refined;
+
+        // Save per-module artifact
+        if let Some(store) = artifacts
+            && let Some(rust) = &mod_unit.rust_output
+        {
+            let _ = store.save_translation_module(&module.name, rust);
+        }
 
         // Validate this module (compile check + scoring, no diff test for modules)
         let mod_validation =
