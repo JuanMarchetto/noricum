@@ -36,8 +36,12 @@ use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit}
 /// Configuration for the async LLM-based migration pipeline.
 #[derive(Debug, Clone)]
 pub struct MigrationConfig {
+    /// Primary LLM provider: "anthropic", "deepseek", or "ollama".
+    pub primary_provider: Option<String>,
     /// Anthropic API key. Defaults to `ANTHROPIC_API_KEY` env var.
     pub anthropic_api_key: Option<String>,
+    /// DeepSeek API key. Defaults to `DEEPSEEK_API_KEY` env var.
+    pub deepseek_api_key: Option<String>,
     /// Ollama URL override. If `None`, uses the default `http://localhost:11434`.
     pub ollama_url: Option<String>,
     /// Ollama model name override. Defaults to "qwen2.5-coder:32b".
@@ -82,7 +86,9 @@ pub struct MigrationConfig {
 impl Default for MigrationConfig {
     fn default() -> Self {
         Self {
+            primary_provider: None,
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            deepseek_api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
             ollama_url: None,
             ollama_model: None,
             max_repair_iterations: 5,
@@ -107,8 +113,19 @@ impl Default for MigrationConfig {
 
 impl From<&MigrationConfig> for ProviderConfig {
     fn from(config: &MigrationConfig) -> Self {
+        let primary = config.primary_provider.clone().unwrap_or_else(|| {
+            if config.anthropic_api_key.is_some() {
+                "anthropic".to_string()
+            } else if config.deepseek_api_key.is_some() {
+                "deepseek".to_string()
+            } else {
+                "ollama".to_string()
+            }
+        });
         Self {
+            primary_provider: primary,
             anthropic_api_key: config.anthropic_api_key.clone(),
+            deepseek_api_key: config.deepseek_api_key.clone(),
             ollama_url: config
                 .ollama_url
                 .clone()
@@ -2008,6 +2025,34 @@ mod tests {
         let pc = ProviderConfig::from(&config);
         assert_eq!(pc.anthropic_api_key, Some("test-key".to_string()));
         assert_eq!(pc.ollama_url, "http://custom:1234");
+        assert_eq!(pc.primary_provider, "anthropic");
+    }
+
+    #[test]
+    fn test_migration_config_to_provider_config_deepseek() {
+        let config = MigrationConfig {
+            primary_provider: Some("deepseek".to_string()),
+            deepseek_api_key: Some("ds-key".to_string()),
+            anthropic_api_key: None,
+            ..Default::default()
+        };
+        let provider: ProviderConfig = (&config).into();
+        assert_eq!(provider.primary_provider, "deepseek");
+        assert_eq!(provider.deepseek_api_key, Some("ds-key".to_string()));
+        assert!(provider.anthropic_api_key.is_none());
+    }
+
+    #[test]
+    fn test_migration_config_auto_detects_provider() {
+        // No primary set, has deepseek key, no anthropic key
+        let config = MigrationConfig {
+            primary_provider: None,
+            deepseek_api_key: Some("ds-key".to_string()),
+            anthropic_api_key: None,
+            ..Default::default()
+        };
+        let provider: ProviderConfig = (&config).into();
+        assert_eq!(provider.primary_provider, "deepseek");
     }
 
     #[tokio::test]

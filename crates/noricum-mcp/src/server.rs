@@ -672,10 +672,12 @@ fn tool_behavioral_review(c_source: Option<String>, rust_source: Option<String>)
 
     let provider_config = noricum_agents::providers::ProviderConfig {
         anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+        deepseek_api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
         ollama_url: std::env::var("OLLAMA_URL")
             .unwrap_or_else(|_| "http://localhost:11434".to_string()),
         ollama_model: std::env::var("OLLAMA_MODEL")
             .unwrap_or_else(|_| "qwen2.5-coder:32b".to_string()),
+        ..Default::default()
     };
 
     let client = match noricum_agents::providers::create_llm_client(&provider_config) {
