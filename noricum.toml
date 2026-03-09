@@ -11,6 +11,13 @@ hard_model = "claude-opus-4-6"
 medium_model = "claude-sonnet-4-6"
 easy_model = "claude-3-5-haiku-latest"
 
+[llm.deepseek]
+# Model selection by task complexity
+# Hard tasks use Reasoner (R1), Medium/Easy use Chat (V3)
+hard_model = "deepseek-reasoner"
+medium_model = "deepseek-chat"
+easy_model = "deepseek-chat"
+
 [llm.temperature]
 # Defaults used if not set
 # analysis = 0.2
