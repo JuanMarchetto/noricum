@@ -1,0 +1,19 @@
+{
+  "artifacts_dir": ".noricum-artifacts/b-20260309-190928",
+  "difficulty": "Some(Easy)",
+  "final_state": "Validated",
+  "idiomatic_score": 100,
+  "metrics": {
+    "c_lines": 1,
+    "estimated_cost_usd": 0.000855,
+    "input_tokens": 10,
+    "llm_calls": 1,
+    "output_tokens": 55,
+    "repair_iterations": 0,
+    "rust_lines": 7,
+    "total_ms": 354471
+  },
+  "name": "b",
+  "source_path": "/tmp/.tmphUgruy/b.c",
+  "unsafe_count": 0
+}

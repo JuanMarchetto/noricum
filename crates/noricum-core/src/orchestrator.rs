@@ -1140,7 +1140,8 @@ pub async fn migrate_file(
                 if let Ok(retranslated) = retranslate_result {
                     unit.rust_output = Some(retranslated);
                     if let Some(ref store) = artifacts {
-                        let _ = store.save_retranslation_stall(unit.rust_output.as_deref().unwrap_or(""));
+                        let _ = store
+                            .save_retranslation_stall(unit.rust_output.as_deref().unwrap_or(""));
                     }
                     unit.metrics.llm_calls += 1;
                     stall_count = 0;
@@ -1181,7 +1182,12 @@ pub async fn migrate_file(
                         if let Some(ref store) = artifacts
                             && let Some(ref best) = best_version
                         {
-                            let _ = store.save_best_version(best, best_score, best_unsafe, best_compiles);
+                            let _ = store.save_best_version(
+                                best,
+                                best_score,
+                                best_unsafe,
+                                best_compiles,
+                            );
                         }
                     }
 

@@ -16,7 +16,13 @@ use tracing::debug;
 /// Replaces any character that is not alphanumeric, `_`, or `-` with `_`.
 fn sanitize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -135,11 +141,7 @@ impl ArtifactStore {
     }
 
     /// Save a translated module (`03-translation/module-{name}.rs`).
-    pub fn save_translation_module(
-        &self,
-        module_name: &str,
-        rust_source: &str,
-    ) -> io::Result<()> {
+    pub fn save_translation_module(&self, module_name: &str, rust_source: &str) -> io::Result<()> {
         let safe = sanitize_name(module_name);
         let name = format!("03-translation/module-{safe}.rs");
         self.write_artifact(Path::new(&name), rust_source)
@@ -285,8 +287,7 @@ mod tests {
     fn save_translation_final() {
         let (store, _tmp) = make_store();
         store.save_translation_final("fn main() {}").unwrap();
-        let content =
-            fs::read_to_string(store.run_dir().join("03-translation/final.rs")).unwrap();
+        let content = fs::read_to_string(store.run_dir().join("03-translation/final.rs")).unwrap();
         assert_eq!(content, "fn main() {}");
     }
 
@@ -295,10 +296,8 @@ mod tests {
         let (store, _tmp) = make_store();
         store.save_translation_chunk(0, "// chunk 0").unwrap();
         store.save_translation_chunk(3, "// chunk 3").unwrap();
-        let c0 =
-            fs::read_to_string(store.run_dir().join("03-translation/chunk-00.rs")).unwrap();
-        let c3 =
-            fs::read_to_string(store.run_dir().join("03-translation/chunk-03.rs")).unwrap();
+        let c0 = fs::read_to_string(store.run_dir().join("03-translation/chunk-00.rs")).unwrap();
+        let c3 = fs::read_to_string(store.run_dir().join("03-translation/chunk-03.rs")).unwrap();
         assert_eq!(c0, "// chunk 0");
         assert_eq!(c3, "// chunk 3");
     }
@@ -307,10 +306,9 @@ mod tests {
     fn save_agreed_signatures() {
         let (store, _tmp) = make_store();
         store.save_agreed_signatures("fn foo();").unwrap();
-        let content = fs::read_to_string(
-            store.run_dir().join("03-translation/agreed-signatures.rs"),
-        )
-        .unwrap();
+        let content =
+            fs::read_to_string(store.run_dir().join("03-translation/agreed-signatures.rs"))
+                .unwrap();
         assert_eq!(content, "fn foo();");
     }
 
@@ -326,7 +324,9 @@ mod tests {
     #[test]
     fn save_translation_module() {
         let (store, _tmp) = make_store();
-        store.save_translation_module("parser", "mod parser;").unwrap();
+        store
+            .save_translation_module("parser", "mod parser;")
+            .unwrap();
         let content =
             fs::read_to_string(store.run_dir().join("03-translation/module-parser.rs")).unwrap();
         assert_eq!(content, "mod parser;");
@@ -365,12 +365,8 @@ mod tests {
             .save_repair_iteration(1, "fn repaired() {}", "{\"ok\":true}")
             .unwrap();
         let rs = fs::read_to_string(store.run_dir().join("05-repair/iter-01.rs")).unwrap();
-        let json = fs::read_to_string(
-            store
-                .run_dir()
-                .join("05-repair/iter-01-validation.json"),
-        )
-        .unwrap();
+        let json =
+            fs::read_to_string(store.run_dir().join("05-repair/iter-01-validation.json")).unwrap();
         assert_eq!(rs, "fn repaired() {}");
         assert_eq!(json, "{\"ok\":true}");
     }
@@ -389,9 +385,7 @@ mod tests {
     #[test]
     fn save_retranslation_stall() {
         let (store, _tmp) = make_store();
-        store
-            .save_retranslation_stall("fn fresh() {}")
-            .unwrap();
+        store.save_retranslation_stall("fn fresh() {}").unwrap();
         let content =
             fs::read_to_string(store.run_dir().join("05-repair/retranslation-stall.rs")).unwrap();
         assert_eq!(content, "fn fresh() {}");
@@ -403,14 +397,9 @@ mod tests {
         store
             .save_best_version("fn best() {}", 85, 0, true)
             .unwrap();
-        let rs =
-            fs::read_to_string(store.run_dir().join("05-repair/best-version.rs")).unwrap();
-        let meta = fs::read_to_string(
-            store
-                .run_dir()
-                .join("05-repair/best-version-meta.json"),
-        )
-        .unwrap();
+        let rs = fs::read_to_string(store.run_dir().join("05-repair/best-version.rs")).unwrap();
+        let meta =
+            fs::read_to_string(store.run_dir().join("05-repair/best-version-meta.json")).unwrap();
         assert_eq!(rs, "fn best() {}");
         assert_eq!(meta, "{\"score\":85,\"unsafe_count\":0,\"compiles\":true}");
     }

@@ -1,0 +1,10 @@
+{
+  "compiles": true,
+  "compiler_errors": [],
+  "clippy_warnings": [],
+  "unsafe_count": 0,
+  "idiomatic_score": 100,
+  "diff_test_passed": true,
+  "diff_test_feedback": [],
+  "passed": true
+}
