@@ -73,4 +73,6 @@ These fixtures are regression-tested and represent known-good migrations:
 | cjson_full_combined.c | 1696→1439 | 100* | 0 | Full cJSON library (49/78 fns) |
 | picohttpparser.c | 1102→1551 | 100 | 0 | HTTP parser, state machine |
 | genann_combined.c | 642→622 | 100 | 0 | Neural network, fn ptrs→enum, autonomous pipeline |
+| olive_combined.c | 1443→1176 | 100 | 0 | 2D graphics, pixel buffers, checksum diff test |
+| http_parser_combined.c | 3680→1492 | N/A | 0 | HTTP parser, goto state machine→line parsing, manual completion |
 | miniz_core_standalone.c | 4429 | N/A | N/A | FallbackUnsafe (ceiling case) |
