@@ -1,11 +1,11 @@
 /// LLM provider configuration.
 ///
-/// Manages connections to Anthropic (Claude API) and Ollama (local models).
+/// Manages connections to Anthropic (Claude API), DeepSeek, and Ollama (local models).
 /// Model routing selects the appropriate provider/model based on task difficulty.
 use noricum_ir::Difficulty;
 use rig::client::{CompletionClient, Nothing};
 use rig::completion::{AssistantContent, Completion, Prompt};
-use rig::providers::{anthropic, ollama};
+use rig::providers::{anthropic, deepseek, ollama};
 use tracing::info;
 
 use crate::AgentError;
@@ -22,8 +22,12 @@ pub struct TokenUsage {
 /// Configuration for LLM providers.
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
+    /// Which provider to prefer ("anthropic", "deepseek", "ollama").
+    pub primary_provider: String,
     /// Anthropic API key (from ANTHROPIC_API_KEY env var)
     pub anthropic_api_key: Option<String>,
+    /// DeepSeek API key (from DEEPSEEK_API_KEY env var)
+    pub deepseek_api_key: Option<String>,
     /// Ollama base URL (default: http://localhost:11434)
     pub ollama_url: String,
     /// Ollama model name
@@ -33,7 +37,9 @@ pub struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
+            primary_provider: "anthropic".to_string(),
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            deepseek_api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
             ollama_url: "http://localhost:11434".to_string(),
             ollama_model: "qwen2.5-coder:32b".to_string(),
         }
@@ -47,19 +53,28 @@ pub struct ModelSelection {
     pub model: String,
 }
 
+/// Identifies which LLM provider backend is in use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderKind {
+    /// Anthropic (Claude API).
     Anthropic,
+    /// DeepSeek API.
+    DeepSeek,
+    /// Ollama (local models).
     Ollama,
 }
 
-/// Unified LLM client wrapping either Anthropic or Ollama.
+/// Unified LLM client wrapping Anthropic, DeepSeek, or Ollama.
 ///
-/// Both providers share the same `run_prompt` interface via rig-rs's
-/// `CompletionClient` trait. Adding a new provider (e.g., Gemini) requires
-/// only a new enum variant and extending the match in `run_prompt`.
+/// All providers share the same `run_prompt` interface via rig-rs's
+/// `CompletionClient` trait. Adding a new provider requires only a new
+/// enum variant and extending the match in `run_prompt`.
 pub enum LlmClient {
+    /// Anthropic (Claude) backend.
     Anthropic(anthropic::Client),
+    /// DeepSeek backend.
+    DeepSeek(deepseek::Client),
+    /// Ollama (local) backend.
     Ollama(ollama::Client),
 }
 
@@ -121,6 +136,9 @@ impl LlmClient {
             LlmClient::Anthropic(client) => {
                 build_and_prompt!(client, model, preamble, temperature, max_tokens, message)
             }
+            LlmClient::DeepSeek(client) => {
+                build_and_prompt!(client, model, preamble, temperature, max_tokens, message)
+            }
             LlmClient::Ollama(client) => {
                 build_and_prompt!(client, model, preamble, temperature, max_tokens, message)
             }
@@ -144,6 +162,9 @@ impl LlmClient {
             LlmClient::Anthropic(client) => {
                 build_and_complete!(client, model, preamble, temperature, max_tokens, message)
             }
+            LlmClient::DeepSeek(client) => {
+                build_and_complete!(client, model, preamble, temperature, max_tokens, message)
+            }
             LlmClient::Ollama(client) => {
                 build_and_complete!(client, model, preamble, temperature, max_tokens, message)
             }
@@ -151,12 +172,35 @@ impl LlmClient {
     }
 }
 
-/// Create an LLM client, preferring Anthropic if a key is available, falling back to Ollama.
+/// Create an LLM client based on provider config preferences.
+///
+/// Routes by `config.primary_provider`:
+/// - `"deepseek"` + key exists -> DeepSeek client
+/// - `"anthropic"` (or default) + key exists -> Anthropic client; if no anthropic key, try deepseek key
+/// - Fallback: Ollama
 pub fn create_llm_client(config: &ProviderConfig) -> Result<LlmClient, AgentError> {
+    if config.primary_provider.as_str() == "deepseek" {
+        if let Some(ref key) = config.deepseek_api_key {
+            let client = create_deepseek_client_with_key(key)?;
+            return Ok(client);
+        }
+        info!("DeepSeek preferred but no API key found, trying Anthropic fallback");
+    }
+
+    // Anthropic path (default)
     if let Some(ref key) = config.anthropic_api_key {
         let client = create_anthropic_client_with_key(key)?;
         return Ok(LlmClient::Anthropic(client));
     }
+
+    // If no anthropic key, try deepseek as secondary
+    if let Some(ref key) = config.deepseek_api_key {
+        info!("No Anthropic API key, falling back to DeepSeek");
+        let client = create_deepseek_client_with_key(key)?;
+        return Ok(client);
+    }
+
+    // Final fallback: Ollama
     let client = create_ollama_client_with_url(&config.ollama_url)?;
     Ok(LlmClient::Ollama(client))
 }
@@ -179,6 +223,13 @@ pub fn create_anthropic_client_with_key(api_key: &str) -> Result<anthropic::Clie
         .map_err(|e| AgentError::Provider(format!("failed to create Anthropic client: {e}")))
 }
 
+/// Create a DeepSeek client from an explicit API key string.
+pub fn create_deepseek_client_with_key(api_key: &str) -> Result<LlmClient, AgentError> {
+    let client = deepseek::Client::new(api_key)
+        .map_err(|e| AgentError::Provider(format!("failed to create DeepSeek client: {e}")))?;
+    Ok(LlmClient::DeepSeek(client))
+}
+
 /// Create an Ollama client.
 ///
 /// Uses the default Ollama URL (http://localhost:11434). For custom URLs,
@@ -197,7 +248,7 @@ pub fn create_ollama_client_with_url(url: &str) -> Result<ollama::Client, AgentE
         .map_err(|e| AgentError::Provider(format!("failed to create Ollama client at {url}: {e}")))
 }
 
-/// Model constants for Anthropic.
+/// Model constants for supported providers.
 pub mod models {
     pub use rig::providers::anthropic::completion::{
         CLAUDE_3_5_HAIKU, CLAUDE_3_5_SONNET, CLAUDE_3_7_SONNET, CLAUDE_4_OPUS, CLAUDE_4_SONNET,
@@ -207,17 +258,38 @@ pub mod models {
     pub const CLAUDE_4_6_OPUS: &str = "claude-opus-4-6";
     /// Claude Sonnet 4.6.
     pub const CLAUDE_4_6_SONNET: &str = "claude-sonnet-4-6";
+
+    /// DeepSeek Chat — general-purpose model.
+    pub const DEEPSEEK_CHAT: &str = "deepseek-chat";
+    /// DeepSeek Reasoner — advanced reasoning model.
+    pub const DEEPSEEK_REASONER: &str = "deepseek-reasoner";
 }
 
 /// Select a model based on task difficulty and available providers.
 ///
-/// Prefers Anthropic if an API key is configured; otherwise falls through
-/// to Ollama with the configured model name.
+/// Checks `primary_provider` first:
+/// - `"deepseek"` with key -> DeepSeek models (Hard -> reasoner, others -> chat)
+/// - `"anthropic"` (default) with key -> Anthropic models
+/// - Fallback: Ollama with the configured model name.
 pub fn select_model(
     config: &ProviderConfig,
     difficulty: Difficulty,
     task: &str,
 ) -> Result<ModelSelection, crate::AgentError> {
+    // DeepSeek preferred
+    if config.primary_provider == "deepseek" && config.deepseek_api_key.is_some() {
+        let model = match difficulty {
+            Difficulty::Hard => models::DEEPSEEK_REASONER.to_string(),
+            Difficulty::Medium | Difficulty::Easy => models::DEEPSEEK_CHAT.to_string(),
+        };
+        info!(provider = "deepseek", model = %model, ?difficulty, "selected model");
+        return Ok(ModelSelection {
+            provider: ProviderKind::DeepSeek,
+            model,
+        });
+    }
+
+    // Anthropic path
     if config.anthropic_api_key.is_some() {
         let model = match (difficulty, task) {
             (Difficulty::Hard, _) => models::CLAUDE_4_6_OPUS.to_string(),
@@ -227,6 +299,19 @@ pub fn select_model(
         info!(provider = "anthropic", model = %model, ?difficulty, "selected model");
         return Ok(ModelSelection {
             provider: ProviderKind::Anthropic,
+            model,
+        });
+    }
+
+    // DeepSeek fallback (when not primary but key is available and no anthropic key)
+    if config.deepseek_api_key.is_some() {
+        let model = match difficulty {
+            Difficulty::Hard => models::DEEPSEEK_REASONER.to_string(),
+            Difficulty::Medium | Difficulty::Easy => models::DEEPSEEK_CHAT.to_string(),
+        };
+        info!(provider = "deepseek", model = %model, ?difficulty, "selected model (DeepSeek fallback)");
+        return Ok(ModelSelection {
+            provider: ProviderKind::DeepSeek,
             model,
         });
     }
@@ -263,6 +348,7 @@ mod tests {
     fn test_select_model_falls_through_to_ollama() {
         let config = ProviderConfig {
             anthropic_api_key: None,
+            deepseek_api_key: None,
             ..Default::default()
         };
 
@@ -275,6 +361,7 @@ mod tests {
     fn test_create_llm_client_ollama_fallback() {
         let config = ProviderConfig {
             anthropic_api_key: None,
+            deepseek_api_key: None,
             ..Default::default()
         };
         let client = create_llm_client(&config);
@@ -311,5 +398,42 @@ mod tests {
     fn test_create_ollama_client_ok() {
         let result = create_ollama_client();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_deepseek_client_ok() {
+        let result = create_deepseek_client_with_key("test-key");
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), LlmClient::DeepSeek(_)));
+    }
+
+    #[test]
+    fn test_select_model_with_deepseek() {
+        let config = ProviderConfig {
+            primary_provider: "deepseek".to_string(),
+            deepseek_api_key: Some("test-key".to_string()),
+            anthropic_api_key: None,
+            ..Default::default()
+        };
+        let sel = select_model(&config, Difficulty::Hard, "translation").unwrap();
+        assert_eq!(sel.provider, ProviderKind::DeepSeek);
+        assert_eq!(sel.model, "deepseek-reasoner");
+
+        let sel = select_model(&config, Difficulty::Easy, "translation").unwrap();
+        assert_eq!(sel.provider, ProviderKind::DeepSeek);
+        assert_eq!(sel.model, "deepseek-chat");
+    }
+
+    #[test]
+    fn test_create_llm_client_deepseek_preferred() {
+        let config = ProviderConfig {
+            primary_provider: "deepseek".to_string(),
+            deepseek_api_key: Some("test-key".to_string()),
+            anthropic_api_key: None,
+            ..Default::default()
+        };
+        let client = create_llm_client(&config);
+        assert!(client.is_ok());
+        assert!(matches!(client.unwrap(), LlmClient::DeepSeek(_)));
     }
 }
