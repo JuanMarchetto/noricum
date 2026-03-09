@@ -71,9 +71,13 @@ fn validate_file_path(path: &str) -> Result<(), RigToolError> {
                 "cannot resolve path {path}: no parent directory"
             )));
         };
-        let tmp = Path::new("/tmp");
-        let var_tmp = Path::new("/var/tmp");
-        let is_tmp = canonical.starts_with(tmp) || canonical.starts_with(var_tmp);
+        let tmp = Path::new("/tmp")
+            .canonicalize()
+            .unwrap_or_else(|_| Path::new("/tmp").to_path_buf());
+        let var_tmp = Path::new("/var/tmp")
+            .canonicalize()
+            .unwrap_or_else(|_| Path::new("/var/tmp").to_path_buf());
+        let is_tmp = canonical.starts_with(&tmp) || canonical.starts_with(&var_tmp);
         let is_cwd = std::env::current_dir()
             .ok()
             .is_some_and(|cwd| canonical.starts_with(&cwd));
