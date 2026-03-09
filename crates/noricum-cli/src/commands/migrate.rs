@@ -24,6 +24,7 @@ pub struct MigrateParams {
     pub max_llm_calls: Option<u32>,
     pub ollama_model: Option<String>,
     pub skip_c2rust: bool,
+    pub provider: Option<String>,
 }
 
 pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
@@ -53,6 +54,7 @@ pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
         } else {
             MigrationConfig::default().anthropic_api_key
         },
+        primary_provider: opts.provider,
         fuzz_test: opts.fuzz,
         fuzz_iterations: opts.fuzz_iterations,
         audit_log: opts.audit_log.map(|p| p.to_path_buf()),
