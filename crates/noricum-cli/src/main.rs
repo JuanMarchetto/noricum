@@ -162,6 +162,9 @@ struct MigrateOpts {
     /// Skip C2Rust transpilation (translate directly from C source)
     #[arg(long)]
     skip_c2rust: bool,
+    /// Directory for intermediate artifact persistence (default: .noricum-artifacts)
+    #[arg(long, default_value = ".noricum-artifacts")]
+    artifacts_dir: PathBuf,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -202,6 +205,7 @@ async fn main() {
                 max_llm_calls: opts.max_llm_calls,
                 ollama_model: opts.ollama_model,
                 skip_c2rust: opts.skip_c2rust,
+                artifacts_dir: opts.artifacts_dir,
             })
             .await
         }

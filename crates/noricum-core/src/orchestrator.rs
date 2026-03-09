@@ -77,6 +77,9 @@ pub struct MigrationConfig {
     /// Skip C2Rust transpilation entirely. Useful when the LLM produces better
     /// translations directly from C source, saving tokens and time.
     pub skip_c2rust: bool,
+    /// Directory for pipeline artifact persistence. Every intermediate output
+    /// is saved here for debugging and recovery. Defaults to `.noricum-artifacts/`.
+    pub artifacts_dir: std::path::PathBuf,
 }
 
 impl Default for MigrationConfig {
@@ -101,6 +104,7 @@ impl Default for MigrationConfig {
             max_tokens_budget: Some(2_000_000),
             max_llm_calls: Some(50),
             skip_c2rust: false,
+            artifacts_dir: std::path::PathBuf::from(".noricum-artifacts"),
         }
     }
 }
