@@ -60,6 +60,9 @@ enum Commands {
         /// Ollama model name (forces Ollama provider instead of Anthropic)
         #[arg(long)]
         ollama_model: Option<String>,
+        /// LLM provider: anthropic, deepseek, or ollama (default: auto-detect from available API keys)
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Compare two baseline JSON files side-by-side
     Compare {
@@ -111,6 +114,9 @@ enum Commands {
         /// Ollama model name (forces Ollama provider instead of Anthropic)
         #[arg(long)]
         ollama_model: Option<String>,
+        /// LLM provider: anthropic, deepseek, or ollama (default: auto-detect from available API keys)
+        #[arg(long)]
+        provider: Option<String>,
     },
 }
 
@@ -162,6 +168,9 @@ struct MigrateOpts {
     /// Skip C2Rust transpilation (translate directly from C source)
     #[arg(long)]
     skip_c2rust: bool,
+    /// LLM provider: anthropic, deepseek, or ollama (default: auto-detect from available API keys)
+    #[arg(long)]
+    provider: Option<String>,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -202,6 +211,7 @@ async fn main() {
                 max_llm_calls: opts.max_llm_calls,
                 ollama_model: opts.ollama_model,
                 skip_c2rust: opts.skip_c2rust,
+                provider: opts.provider,
             })
             .await
         }
@@ -214,6 +224,7 @@ async fn main() {
             save_baseline,
             compare_baseline,
             ollama_model,
+            provider,
         } => {
             commands::bench::cmd_bench(
                 &fixtures,
@@ -221,6 +232,7 @@ async fn main() {
                 save_baseline.as_deref(),
                 compare_baseline.as_deref(),
                 ollama_model,
+                provider,
             )
             .await
         }
@@ -251,6 +263,7 @@ async fn main() {
             json,
             output,
             ollama_model,
+            provider,
         } => {
             cmd_crust_bench(
                 &dataset,
@@ -259,6 +272,7 @@ async fn main() {
                 json,
                 output.as_deref(),
                 ollama_model,
+                provider,
             )
             .await
         }
@@ -344,12 +358,14 @@ async fn cmd_crust_bench(
     json: bool,
     output: Option<&std::path::Path>,
     ollama_model: Option<String>,
+    provider: Option<String>,
 ) -> Result<()> {
     let mut migration_config = noricum_core::MigrationConfig::default();
     if ollama_model.is_some() {
         migration_config.anthropic_api_key = None;
         migration_config.ollama_model = ollama_model;
     }
+    migration_config.primary_provider = provider;
 
     let config = crust_bench::CrustBenchConfig {
         dataset_path: dataset.to_path_buf(),

@@ -9,6 +9,7 @@ pub async fn cmd_bench(
     save_baseline: Option<&Path>,
     compare_baseline: Option<&Path>,
     ollama_model: Option<String>,
+    provider: Option<String>,
 ) -> Result<()> {
     let fixtures_dir = fixtures_dir
         .canonicalize()
@@ -20,6 +21,7 @@ pub async fn cmd_bench(
         } else {
             MigrationConfig::default().anthropic_api_key
         },
+        primary_provider: provider,
         ollama_model,
         ..MigrationConfig::default()
     };
