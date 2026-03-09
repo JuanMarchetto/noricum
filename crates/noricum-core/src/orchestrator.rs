@@ -692,6 +692,7 @@ pub async fn migrate_file(
             &provider_config,
             &analysis,
             difficulty,
+            &artifacts,
         )
         .await?
         {
@@ -1557,6 +1558,7 @@ pub async fn migrate_file(
 ///
 /// Each module gets its own repair loop with reasonable context size, solving the
 /// core problem where repair of 4000+ LOC Rust is too large for the LLM to handle.
+#[allow(clippy::too_many_arguments)]
 async fn migrate_file_modular(
     c_source: &str,
     name: &str,
@@ -1565,6 +1567,7 @@ async fn migrate_file_modular(
     provider_config: &noricum_agents::providers::ProviderConfig,
     analysis: &noricum_agents::analysis::AnalysisResult,
     difficulty: noricum_ir::Difficulty,
+    artifacts: &Option<crate::artifacts::ArtifactStore>,
 ) -> Result<ModularResult, CoreError> {
     let modules = noricum_tools::ast::split_into_modules(c_source);
 
@@ -1690,6 +1693,13 @@ async fn migrate_file_modular(
 
         mod_unit.rust_output = Some(rust_code);
         mod_unit.state = MigrationState::Refined;
+
+        // Save per-module artifact
+        if let Some(store) = artifacts
+            && let Some(rust) = &mod_unit.rust_output
+        {
+            let _ = store.save_translation_module(&module.name, rust);
+        }
 
         // Validate this module (compile check + scoring, no diff test for modules)
         let mod_validation =
