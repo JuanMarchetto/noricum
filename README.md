@@ -1,41 +1,43 @@
 # Noricum
 
-**Autonomous C/C++ to Rust migration agent — 0 unsafe blocks, verified by differential testing.**
+**The first open-source, production-ready C-to-Rust migration CLI — 0 unsafe blocks, verified by differential testing.**
 
 [![CI](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-321%2B%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
+[![Tests](https://img.shields.io/badge/tests-317%2B%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
-[![LOC](https://img.shields.io/badge/LOC-~16%2C000-blue)](https://github.com/JuanMarchetto/noricum)
+[![LOC](https://img.shields.io/badge/LOC-~18%2C000-blue)](https://github.com/JuanMarchetto/noricum)
 
 <!-- Demo GIF: replace with actual recording -->
 <!-- ![Noricum Demo](demo.gif) -->
 
-> **Migrate C to safe Rust in seconds.** Noricum takes your C source, translates it to idiomatic Rust using LLM agents, then *proves* behavioral equivalence by compiling both and comparing outputs byte-by-byte. If they differ, the LLM fixes it automatically.
+> Noricum takes your C source, translates it to idiomatic Rust using LLM agents, then verifies behavioral equivalence by compiling both and comparing outputs byte-by-byte. If they differ, the LLM fixes it automatically.
 
-Noricum combines a deterministic pipeline (C2Rust as step zero) with LLM-powered
-agents and differential verification to migrate C/C++ code to safe, idiomatic Rust.
+Noricum combines a deterministic pipeline with LLM-powered agents and differential
+verification to migrate C code to safe, idiomatic Rust.
+
+> **Note:** Noricum-generated code is verified by differential testing against specific inputs, not formally proven correct for all possible inputs. Always review migrated code before deploying to production.
 
 **[Blog Post](blog/2026-03-06-c-to-rust-llm-agent.md)** | **[Quick Start](#quick-start)** | **[Benchmarks](#benchmark-results)**
 
 ## Why Noricum
 
-Existing C-to-Rust migration tools fall into two camps: **mechanical transpilers** that wrap everything in `unsafe`, and **manual rewriting** that's slow and error-prone. Noricum takes a third approach — an **agent-based pipeline** that combines LLM intelligence with automated verification.
+Existing C-to-Rust migration tools fall into two camps: **mechanical transpilers** that wrap everything in `unsafe`, and **manual rewriting** that's slow and error-prone. Noricum takes a third approach — a **production-ready agent pipeline** that combines LLM intelligence with automated verification.
 
 | | C2Rust | Manual Rewrite | Noricum |
 |---|--------|---------------|---------|
 | **Approach** | AST lowering | Human engineer | LLM agent + diff testing |
-| **Output safety** | Everything in `unsafe` | Depends on engineer | **0 unsafe blocks** (15/15 files) |
+| **Output safety** | Everything in `unsafe` | Depends on engineer | **0 unsafe blocks** across all validated files |
 | **Verification** | Compiles | Code review | Byte-exact differential testing |
 | **Auto-repair** | None | N/A | Up to 5 LLM-driven iterations |
 | **Speed** | Seconds | Days/weeks | Seconds per file |
 | **IDE integration** | None | N/A | MCP server for Claude Code |
 
-**Key differentiator:** Noricum doesn't just translate — it *verifies*. Every migration is validated by compiling both the original C and generated Rust, running them with identical inputs, and comparing outputs byte-by-byte. If they differ, the LLM automatically repairs the translation. No other tool in this space offers automated behavioral verification with a self-healing repair loop.
+**Key differentiator:** Noricum doesn't just translate — it *verifies*. Every migration is validated by compiling both the original C and generated Rust, running them with identical inputs, and comparing outputs byte-by-byte. If they differ, the LLM automatically repairs the translation.
 
 ## Features
 
-- **C2Rust mechanical translation** as step zero — guaranteed baseline output
+- **C2Rust mechanical translation** as optional step zero (graceful fallback if not installed)
 - **LLM-powered analysis, translation, and repair** via Claude API
 - **Automatic difficulty classification** and model routing (easy/medium/hard)
 - **Differential testing** — compile both C and Rust, compare outputs byte-by-byte
@@ -58,31 +60,28 @@ The following features are on the roadmap but not yet implemented:
 
 ## Benchmark Results
 
-Real migration results on test fixtures (LLM-powered pipeline):
+Validated migrations on real-world C libraries (LLM-powered pipeline):
 
 | Source | Lines | Functions | Score | Unsafe | Diff Test | Repairs |
 |--------|-------|-----------|-------|--------|-----------|---------|
-| `add.c` | 13 | 1 | 100/100 | 0 | PASS | 0 |
-| `power.c` | 33 | 3 | 100/100 | 0 | PASS | 0 |
-| `gcd.c` | 24 | 2 | 100/100 | 0 | PASS | 0 |
-| `factorial.c` | 18 | 1 | 100/100 | 0 | PASS | 0 |
-| `fibonacci.c` | 30 | 1 | 100/100 | 0 | PASS | 0 |
-| `max_min.c` | 31 | 3 | 100/100 | 0 | PASS | 0 |
-| `strlen.c` | 18 | 1 | 100/100 | 0 | PASS | 0 |
-| `linked_list.c` | 50 | 4 | 92/100 | 0 | PASS | 0 |
-| `error_codes.c` | 43 | 2 | 96/100 | 0 | PASS | 0 |
-| `buffer.c` | 36 | 2 | 94/100 | 0 | PASS | 0 |
-| **`hash_table.c`** | **204** | **8** | **89/100** | **0** | **PASS** | **0** |
-| **`miniz_test.c`** | **154** | **2** | **93/100** | **0** | **PASS** | **0** |
+| **`cjson_full_combined.c`** | **1,441** | **~60** | **95+** | **0** | **PASS** | **0** |
+| **`expr_eval.c`** | **1,686** | **74** | **100/100** | **0** | **PASS** | **0** |
+| **`genann.c`** | **642** | **18** | **100/100** | **0** | **PASS** | **1** |
 | **`cjson_combined.c`** | **520** | **12** | **100/100** | **0** | **PASS** | **1** |
-| **`expr_eval.c`** | **1686** | **74** | **100/100** | **0** | **PASS** | **0** |
-| **`cjson_full_combined.c`** | **1441** | **~60** | **est. 95+** | **0** | **PASS** | **0** |
+| `hash_table.c` | 204 | 8 | 89/100 | 0 | PASS | 0 |
+| `miniz_test.c` | 154 | 2 | 93/100 | 0 | PASS | 0 |
 
-**15/15 files validated, 0 unsafe blocks, 100% diff test pass rate.**
+Plus 9 smaller fixtures (13-50 LOC each): all pass with 0 unsafe, scores 92-100.
 
-### cJSON Full Migration (Flagship Result)
+**0 unsafe blocks across all validated files. All diff tests pass byte-exact.**
 
-The `cjson_full_combined.c` migration is the largest successful idiomatic migration — a substantial subset of [DaveGamble/cJSON](https://github.com/DaveGamble/cJSON) (12,510 stars):
+**Tested range:** Files up to ~1,700 LOC migrate reliably. A 4,429 LOC file (miniz compression library) exceeded the current pipeline's capacity — see [Known Limitations](#known-limitations).
+
+### Flagship Migrations
+
+#### cJSON (DaveGamble/cJSON — 12,510 stars)
+
+The `cjson_full_combined.c` migration is the largest successful idiomatic migration:
 
 | Metric | Value |
 |--------|-------|
@@ -103,12 +102,40 @@ Key transformations:
 - UTF-16 surrogate pair decoding → `char::from_u32`
 - C `sprintf("%1.15g")` number formatting → custom `format_g()` for byte-exact match
 
+#### genann (codeplea/genann — 2,246 stars)
+
+Neural network library migrated fully autonomously (no manual intervention):
+
+| Metric | Value |
+|--------|-------|
+| **C LOC** | 642 |
+| **Rust LOC** | 721 |
+| **Unsafe blocks** | **0** |
+| **Diff test** | **PASS (521,556 byte-exact assertions)** |
+| **Repairs** | 1 (automatic) |
+
+Key transformations:
+- Function pointers → `ActivationFn` enum dispatch
+- Single-malloc flat array → separate `Vec<f64>` per layer
+- Global lookup table → struct field
+- glibc RNG reimplemented (TYPE_3 degree-31 LFSR)
+- `FILE*` I/O → `std::io::Read`/`Write` traits
+
+### Known Limitations
+
+- **Scale ceiling:** Reliable up to ~1,700 LOC single-file migrations. Files >2,000 LOC use chunked translation which may introduce cross-chunk inconsistencies. A 4,429 LOC file (miniz compression) resulted in `FallbackUnsafe` — documented in [docs/research/miniz-migration-attempt.md](docs/research/miniz-migration-attempt.md)
+- **C only:** C++ is not currently supported. Target is C11 (`-std=gnu11` with POSIX extensions)
+- **LLM dependency:** Full pipeline requires an Anthropic API key (Claude). Ollama local fallback is available but produces lower quality output. Cost per migration: ~$0.02 for small files, ~$5-15 for complex 1,000+ LOC files
+- **Non-deterministic:** LLM outputs vary between runs. The same C file may produce different (but equivalent) Rust translations
+- **Test coverage:** Differential testing verifies behavioral equivalence for tested inputs, not all possible inputs. Edge cases not covered by the test harness may differ
+- **Not suitable for:** Safety-critical systems without thorough human review, files with inline assembly, heavily preprocessed code (complex `#ifdef` chains), or C code relying on undefined behavior
+
 ### Noricum vs C2Rust
 
 | Metric | C2Rust Alone | Noricum |
 |--------|-------------|---------|
 | Translation | Mechanical AST lowering | LLM-powered idiomatic |
-| Unsafe blocks | Wraps everything in `unsafe` | 0 across 15 files |
+| Unsafe blocks | Wraps everything in `unsafe` | 0 across all validated files |
 | Diff test verification | None | Byte-exact + exit code automated |
 | Repair loop | None | Up to 5 iterations with diff feedback |
 | Avg. idiomatic score | N/A | 89-100/100 |
