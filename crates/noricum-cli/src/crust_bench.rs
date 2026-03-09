@@ -988,11 +988,13 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
 fn create_llm_client(config: &MigrationConfig) -> Result<LlmClient> {
     let provider_config = ProviderConfig {
         anthropic_api_key: config.anthropic_api_key.clone(),
+        deepseek_api_key: config.deepseek_api_key.clone(),
         ollama_url: "http://localhost:11434".to_string(),
         ollama_model: config
             .ollama_model
             .clone()
             .unwrap_or_else(|| "qwen2.5-coder:32b".to_string()),
+        ..Default::default()
     };
     providers::create_llm_client(&provider_config)
         .map_err(|e| anyhow::anyhow!("failed to create LLM client: {e}"))
