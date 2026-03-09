@@ -11,6 +11,28 @@ use crate::AgentError;
 use crate::analysis::AnalysisResult;
 use crate::providers::LlmClient;
 
+/// Output from a single chunk's translation.
+#[derive(Debug, Clone)]
+pub struct ChunkOutput {
+    /// Chunk index (0-based).
+    pub index: usize,
+    /// Translated Rust source for this chunk.
+    pub rust_source: String,
+}
+
+/// Result of chunked translation including per-chunk details.
+#[derive(Debug, Clone)]
+pub struct ChunkedTranslationResult {
+    /// Combined Rust source from all chunks.
+    pub combined: String,
+    /// Individual chunk outputs (before combination).
+    pub chunks: Vec<ChunkOutput>,
+    /// P11 agreed signatures (if generated).
+    pub agreed_signatures: Option<String>,
+    /// P9 foundation context from chunk 0 (if generated).
+    pub foundation: Option<String>,
+}
+
 /// System prompt for the translation agent, loaded from the prompts directory at compile time.
 const TRANSLATION_PREAMBLE: &str = include_str!("../../../prompts/translation.md");
 
@@ -157,7 +179,7 @@ pub async fn translate_chunked(
     analysis: &AnalysisResult,
     patterns: &[&MigrationPattern],
     temperature: Option<f64>,
-) -> Result<String, AgentError> {
+) -> Result<ChunkedTranslationResult, AgentError> {
     info!(
         chunks = chunks.len(),
         model, "starting chunked multi-pass translation"
@@ -168,6 +190,7 @@ pub async fn translate_chunked(
     // P9: Foundation context — chunk 0's output (types, data model) is passed to all
     // subsequent chunks so they can reference the translated Rust types.
     let mut foundation_rust: Option<String> = None;
+    let mut chunk_outputs: Vec<ChunkOutput> = Vec::new();
 
     // P11: Signature agreement pass — for files with many chunks, generate agreed-upon
     // Rust signatures for all functions before translating bodies. This prevents
@@ -265,6 +288,10 @@ pub async fn translate_chunked(
                 temperature,
             )
             .await?;
+            chunk_outputs.push(ChunkOutput {
+                index: i,
+                rust_source: rust_code.clone(),
+            });
             accumulated_rust.push(rust_code);
             continue;
         }
@@ -404,6 +431,12 @@ pub async fn translate_chunked(
             rust_code
         };
 
+        // Capture per-chunk output before combination
+        chunk_outputs.push(ChunkOutput {
+            index: i,
+            rust_source: rust_code.clone(),
+        });
+
         // Extract signatures from this chunk's output for next chunk's context
         let new_sigs = noricum_tools::ast::extract_rust_signatures(&rust_code);
         accumulated_sigs.extend(new_sigs);
@@ -481,7 +514,12 @@ pub async fn translate_chunked(
         "chunked translation complete"
     );
 
-    Ok(final_output)
+    Ok(ChunkedTranslationResult {
+        combined: final_output,
+        chunks: chunk_outputs,
+        agreed_signatures,
+        foundation: foundation_rust,
+    })
 }
 
 /// Build a condensed structural summary of a large C source file.

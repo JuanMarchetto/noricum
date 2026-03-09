@@ -786,7 +786,20 @@ pub async fn migrate_file(
             )
             .await
             {
-                Ok(code) => code,
+                Ok(chunked_result) => {
+                    if let Some(ref store) = artifacts {
+                        for chunk in &chunked_result.chunks {
+                            let _ = store.save_translation_chunk(chunk.index, &chunk.rust_source);
+                        }
+                        if let Some(ref sigs) = chunked_result.agreed_signatures {
+                            let _ = store.save_agreed_signatures(sigs);
+                        }
+                        if let Some(ref foundation) = chunked_result.foundation {
+                            let _ = store.save_foundation(foundation);
+                        }
+                    }
+                    chunked_result.combined
+                }
                 Err(e) => {
                     warn!(function = %name, error = %e, "chunked translation failed, falling back to sync");
                     return migrate_file_sync(c_file);
