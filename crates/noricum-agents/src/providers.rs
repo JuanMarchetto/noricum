@@ -324,6 +324,25 @@ pub fn select_model(
     })
 }
 
+/// Select model for repair calls — prefers faster models since repair
+/// is about fixing compilation errors, not deep reasoning.
+/// For DeepSeek: always uses deepseek-chat (fast, cheap).
+/// For other providers: uses the normal selection logic.
+pub fn select_repair_model(
+    config: &ProviderConfig,
+    difficulty: Difficulty,
+) -> Result<ModelSelection, crate::AgentError> {
+    if config.primary_provider == "deepseek" && config.deepseek_api_key.is_some() {
+        info!(provider = "deepseek", model = models::DEEPSEEK_CHAT, "P16: using fast model for repair");
+        return Ok(ModelSelection {
+            provider: ProviderKind::DeepSeek,
+            model: models::DEEPSEEK_CHAT.to_string(),
+        });
+    }
+    // For non-DeepSeek providers, use normal model selection
+    select_model(config, difficulty, "repair")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +441,28 @@ mod tests {
         let sel = select_model(&config, Difficulty::Easy, "translation").unwrap();
         assert_eq!(sel.provider, ProviderKind::DeepSeek);
         assert_eq!(sel.model, "deepseek-chat");
+    }
+
+    #[test]
+    fn test_select_repair_model_uses_fast_model() {
+        let config = ProviderConfig {
+            primary_provider: "deepseek".to_string(),
+            deepseek_api_key: Some("test-key".to_string()),
+            anthropic_api_key: None,
+            ..Default::default()
+        };
+        // Repair should use deepseek-chat even for Hard difficulty
+        let sel = select_repair_model(&config, Difficulty::Hard).unwrap();
+        assert_eq!(sel.model, "deepseek-chat");
+        assert_eq!(sel.provider, ProviderKind::DeepSeek);
+
+        // For Anthropic, repair uses normal selection
+        let anthropic_config = ProviderConfig {
+            anthropic_api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        let sel = select_repair_model(&anthropic_config, Difficulty::Hard).unwrap();
+        assert_eq!(sel.provider, ProviderKind::Anthropic);
     }
 
     #[test]
