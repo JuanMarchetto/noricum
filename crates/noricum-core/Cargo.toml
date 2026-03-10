@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
+futures = "0.3.32"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -8,6 +8,7 @@
 /// - `migrate_file`: async, full LLM agent pipeline (analysis, translation, repair, test gen)
 use std::path::Path;
 
+use futures::future::join_all;
 use noricum_agents::LlmClient;
 use noricum_agents::providers::{
     ProviderConfig, create_llm_client, select_model, select_repair_model,
@@ -38,6 +39,25 @@ use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit}
 /// Number of compilation errors above which we re-translate instead of repairing.
 const RETRANSLATE_ERROR_THRESHOLD: usize = 100;
 
+/// Result of migrating a single module within a wave.
+/// Contains all data needed to merge back into the shared state after parallel execution.
+struct ModuleMigrationResult {
+    /// Module name
+    name: String,
+    /// Index in the modules array (for ordering)
+    mod_idx: usize,
+    /// The migrated FunctionUnit (contains rust_output, state, scores, etc.)
+    unit: Option<FunctionUnit>,
+    /// Artifact entry for the v2 manifest
+    artifact: crate::artifacts::ModuleArtifact,
+    /// Metrics accumulated by this module's migration
+    metrics: noricum_ir::MigrationMetrics,
+    /// Whether the module reached Validated or equivalent
+    validated: bool,
+    /// Whether this was a warm-start skip (output already in artifact)
+    was_skip: bool,
+}
+
 /// Warm-start action for a module based on its previous run results.
 #[derive(Debug, PartialEq, Eq)]
 enum WarmAction {
@@ -63,15 +83,17 @@ fn warm_start_action(artifact: &crate::artifacts::ModuleArtifact) -> WarmAction 
 
 /// P25: Build accumulated Rust source from completed module outputs for incremental validation.
 /// This allows validating module N against the combined output of modules 0..N-1.
-fn build_assembly_context(module_outputs: &[(String, String)]) -> String {
-    if module_outputs.is_empty() {
+/// Only includes modules that compiled successfully to avoid error propagation (P26).
+fn build_assembly_context(module_outputs: &[(String, String, bool)]) -> String {
+    let compilable: Vec<&str> = module_outputs
+        .iter()
+        .filter(|(_, _, compiles)| *compiles)
+        .map(|(_, code, _)| code.as_str())
+        .collect();
+    if compilable.is_empty() {
         return String::new();
     }
-    module_outputs
-        .iter()
-        .map(|(_, code)| code.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    compilable.join("\n\n")
 }
 
 /// P25: Validate a module in the context of prior module outputs.
@@ -79,7 +101,7 @@ fn build_assembly_context(module_outputs: &[(String, String)]) -> String {
 fn validate_module_with_assembly(
     mod_unit: &noricum_ir::FunctionUnit,
     module_name: &str,
-    module_outputs: &[(String, String)],
+    module_outputs: &[(String, String, bool)],
     threshold: u32,
 ) -> Result<noricum_validation::ValidationResult, crate::CoreError> {
     let assembly_context = build_assembly_context(module_outputs);
@@ -1753,7 +1775,7 @@ async fn migrate_file_modular(
     let mut effective_config = config.clone();
     effective_config.max_llm_calls = Some(effective_max_calls);
 
-    let mut module_outputs: Vec<(String, String)> = Vec::new(); // (module_name, rust_code)
+    let mut module_outputs: Vec<(String, String, bool)> = Vec::new(); // (module_name, rust_code, compiles)
     let mut accumulated_rust_context = String::new();
     let mut total_metrics = noricum_ir::MigrationMetrics::default();
     let mut all_validated = true;
@@ -1792,519 +1814,151 @@ async fn migrate_file_modular(
     for (wave_idx, wave) in waves.iter().enumerate() {
         info!(wave = wave_idx, modules = wave.len(), "starting wave");
 
-        for &mod_idx in wave {
-            let module = &modules[mod_idx];
-            let mod_name = format!("{name}::{}", module.name);
+        // Snapshot shared state BEFORE the wave — modules in the same wave are independent
+        // and should all see the same pre-wave context.
+        let pre_wave_rust_context = accumulated_rust_context.clone();
+        let pre_wave_module_outputs = module_outputs.clone();
+        let pre_wave_module_number = module_outputs.len() + 1;
 
-            info!(
-                module = %mod_name,
-                functions = module.function_names.len(),
-                lines = module.line_count,
-                "migrating module ({}/{})",
-                module_outputs.len() + 1,
-                modules.len()
-            );
-
-            // P19: Warm-start check
-            if let Some(ref manifest) = warm_manifest
-                && let Some(prev) = manifest.modules.iter().find(|m| m.name == module.name)
-            {
-                match warm_start_action(prev) {
-                    WarmAction::Skip => {
-                        if let Some(ref ws) = warm_store
-                            && let Ok(Some(code)) = ws.load_translation_module(&module.name)
-                        {
-                            info!(module = %mod_name, score = prev.score, "P19: warm-start skip (validated)");
-                            let sigs = noricum_tools::ast::extract_rust_signatures(&code);
-                            if !sigs.is_empty() {
-                                accumulated_rust_context.push_str(&sigs.join("\n"));
-                                accumulated_rust_context.push('\n');
-                            }
-                            module_outputs.push((module.name.clone(), code));
-                            any_succeeded = true;
-                            best_combined_score += prev.score as u32;
-                            module_artifacts.push(crate::artifacts::ModuleArtifact {
-                                name: module.name.clone(),
-                                state: "Validated".to_string(),
-                                score: prev.score,
-                                compiles: true,
-                                unsafe_count: prev.unsafe_count,
-                            });
-                            // Save to new artifacts too
-                            if let Some(store) = artifacts {
-                                let _ = store.save_translation_module(
-                                    &module.name,
-                                    &module_outputs.last().unwrap().1,
-                                );
-                            }
-                            continue;
-                        }
-                    }
-                    WarmAction::SeedRepair => {
-                        info!(module = %mod_name, score = prev.score, "P19: warm-start seed repair");
-                        // Will seed the translation from warm-start code below
-                    }
-                    WarmAction::Retranslate => {
-                        info!(module = %mod_name, score = prev.score, "P19: warm-start retranslate");
-                        // Proceed with normal translation
-                    }
-                }
-            }
-
-            // Create a FunctionUnit for this module
-            let mut mod_unit =
-                FunctionUnit::new(mod_name.clone(), String::new(), module.source.clone());
-            mod_unit.difficulty = Some(difficulty);
-
-            // Build translation context: accumulated Rust from prior modules
-            let context_note = if !accumulated_rust_context.is_empty() {
-                format!(
-                    "\n// === Already migrated modules (use these types/functions) ===\n{}\n// === End migrated context ===\n",
-                    accumulated_rust_context
-                )
-            } else {
-                String::new()
-            };
-
-            // P19: Check if warm-start provides a seed for this module (SeedRepair)
-            let warm_seed = if let (Some(manifest), Some(ws)) = (&warm_manifest, &warm_store) {
-                manifest
-                    .modules
-                    .iter()
-                    .find(|m| m.name == module.name)
-                    .and_then(|prev| {
-                        if warm_start_action(prev) == WarmAction::SeedRepair {
-                            ws.load_translation_module(&module.name).ok().flatten()
-                        } else {
-                            None
-                        }
-                    })
-            } else {
-                None
-            };
-
-            // Translate this module
-            let translation_start = Instant::now();
-            let translation_model_sel = select_model(provider_config, difficulty, "translation")?;
-            let relevant_patterns = pattern_store.find_relevant(&module.source, 3);
-
-            // Inject accumulated context as a prefix hint in the C source
-            let augmented_c = if context_note.is_empty() {
-                module.source.clone()
-            } else {
-                format!(
-                    "/* MIGRATION CONTEXT: The following Rust code has already been migrated from earlier modules in this file. \
-                 Use compatible types and function signatures.\n{}\n*/\n\n{}",
-                    accumulated_rust_context, module.source
-                )
-            };
-
-            // P19: Use warm-start seed if available, skip translation
-            if let Some(seed_code) = warm_seed {
-                info!(module = %mod_name, "P19: using warm-start seed, skipping translation");
-                mod_unit.rust_output = Some(seed_code);
-                mod_unit.state = MigrationState::Refined;
-                // Save warm-seeded code as module artifact
-                if let Some(store) = artifacts
-                    && let Some(rust) = &mod_unit.rust_output
-                {
-                    let _ = store.save_translation_module(&module.name, rust);
-                }
-                // Skip to validation (after the translation block)
-            } else {
-                // P12: Sub-chunk large modules — if a module exceeds MEDIUM_FILE_LOC, use
-                // chunked translation instead of single-pass to avoid LLM context overflow.
-                let module_lines = module.line_count;
-                let rust_code = if module_lines > MEDIUM_FILE_LOC {
-                    let chunk_target = if module_lines > MASSIVE_FILE_LOC {
-                        600
-                    } else if module_lines > VERY_LARGE_FILE_LOC {
-                        500
-                    } else {
-                        400
-                    };
-                    info!(
-                        module = %mod_name,
-                        lines = module_lines,
-                        chunk_target,
-                        "P12: module exceeds {} LOC, using chunked translation",
-                        MEDIUM_FILE_LOC
-                    );
-
-                    let chunks = noricum_tools::ast::chunk_c_source(&augmented_c, chunk_target);
-                    match noricum_agents::translation::translate_chunked(
-                        client,
-                        &translation_model_sel.model,
-                        &chunks,
-                        None, // No c2rust context for modular
-                        analysis,
-                        &relevant_patterns,
-                        config.translation_temperature,
-                    )
-                    .await
-                    {
-                        Ok(chunked_result) => {
-                            total_metrics.llm_calls += chunked_result.chunks.len() as u32;
-                            for chunk in &chunked_result.chunks {
-                                total_metrics.input_tokens +=
-                                    noricum_agents::estimate_tokens(&chunk.rust_source);
-                            }
-                            total_metrics.translation_ms +=
-                                translation_start.elapsed().as_millis() as u64;
-                            chunked_result.combined
-                        }
-                        Err(e) => {
-                            warn!(module = %mod_name, error = %e, "chunked module translation failed");
-                            all_validated = false;
-                            module_artifacts.push(crate::artifacts::ModuleArtifact {
-                                name: module.name.clone(),
-                                state: "TranslationFailed".to_string(),
-                                score: 0.0,
-                                compiles: false,
-                                unsafe_count: 0,
-                            });
-                            continue;
-                        }
-                    }
-                } else {
-                    // Small module — single-pass translation
-                    match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+        // Dispatch: single-module waves run directly, multi-module waves run concurrently.
+        let wave_results: Vec<Result<ModuleMigrationResult, CoreError>> = if wave.len() == 1 {
+            // Single module — call directly, no concurrency overhead
+            let mod_idx = wave[0];
+            let result = migrate_single_module(
+                &modules[mod_idx],
+                mod_idx,
+                name,
+                &effective_config,
                 client,
-                &translation_model_sel.model,
-                &augmented_c,
-                None,
+                provider_config,
                 analysis,
-                &relevant_patterns,
-                config.translation_temperature,
+                difficulty,
+                artifacts,
+                &pattern_store,
+                &warm_manifest,
+                &warm_store,
+                &pre_wave_rust_context,
+                &pre_wave_module_outputs,
+                pre_wave_module_number,
+                modules.len(),
             )
-            .await
-            {
-                Ok(code) => {
-                    total_metrics.llm_calls += 1;
-                    total_metrics.input_tokens += noricum_agents::estimate_tokens(&augmented_c);
-                    total_metrics.output_tokens += noricum_agents::estimate_tokens(&code);
-                    total_metrics.translation_ms +=
-                        translation_start.elapsed().as_millis() as u64;
-                    code
-                }
+            .await;
+            vec![result]
+        } else {
+            // Multi-module wave — run concurrently via join_all
+            let futures: Vec<_> = wave
+                .iter()
+                .enumerate()
+                .map(|(i, &mod_idx)| {
+                    let module = &modules[mod_idx];
+                    let config_ref = &effective_config;
+                    let client_ref = client;
+                    let provider_config_ref = provider_config;
+                    let analysis_ref = analysis;
+                    let artifacts_ref = artifacts;
+                    let pattern_store_ref = &pattern_store;
+                    let warm_manifest_ref = &warm_manifest;
+                    let warm_store_ref = &warm_store;
+                    let pre_wave_ctx = &pre_wave_rust_context;
+                    let pre_wave_outs = &pre_wave_module_outputs;
+                    let module_number = pre_wave_module_number + i;
+                    let total = modules.len();
+                    let parent_name = name;
+
+                    async move {
+                        migrate_single_module(
+                            module,
+                            mod_idx,
+                            parent_name,
+                            config_ref,
+                            client_ref,
+                            provider_config_ref,
+                            analysis_ref,
+                            difficulty,
+                            artifacts_ref,
+                            pattern_store_ref,
+                            warm_manifest_ref,
+                            warm_store_ref,
+                            pre_wave_ctx,
+                            pre_wave_outs,
+                            module_number,
+                            total,
+                        )
+                        .await
+                    }
+                })
+                .collect();
+
+            join_all(futures).await
+        };
+
+        // Merge wave results into shared state, sorted by mod_idx for deterministic ordering.
+        let mut sorted_results: Vec<ModuleMigrationResult> = Vec::new();
+        for result in wave_results {
+            match result {
+                Ok(r) => sorted_results.push(r),
                 Err(e) => {
-                    warn!(module = %mod_name, error = %e, "module translation failed");
+                    // Propagate budget errors; log and continue for others
+                    if matches!(e, CoreError::BudgetExceeded { .. }) {
+                        return Err(e);
+                    }
+                    warn!(error = %e, "module migration failed in wave {}", wave_idx);
                     all_validated = false;
-                    module_artifacts.push(crate::artifacts::ModuleArtifact {
-                        name: module.name.clone(),
-                        state: "TranslationFailed".to_string(),
-                        score: 0.0,
-                        compiles: false,
-                        unsafe_count: 0,
-                    });
-                    continue;
                 }
             }
-                };
+        }
+        sorted_results.sort_by_key(|r| r.mod_idx);
 
-                // Substance check
-                let is_stub = !has_substance(&rust_code, &module.source);
-                let rust_code = if is_stub {
-                    warn!(module = %mod_name, "P6: module translation produced stubs, re-translating");
-                    total_metrics.llm_calls += 1;
-                    match noricum_agents::translation::translate_function_with_patterns_and_temperature(
-                client,
-                &translation_model_sel.model,
-                &augmented_c,
-                None,
-                analysis,
-                &relevant_patterns,
-                Some(0.5),
-            )
-            .await
+        for result in sorted_results {
+            // Merge metrics
+            total_metrics.llm_calls += result.metrics.llm_calls;
+            total_metrics.input_tokens += result.metrics.input_tokens;
+            total_metrics.output_tokens += result.metrics.output_tokens;
+            total_metrics.translation_ms += result.metrics.translation_ms;
+            total_metrics.repair_ms += result.metrics.repair_ms;
+
+            // P26: capture compiles flag before artifact is moved
+            let mod_compiles = result.artifact.compiles;
+
+            // Merge artifact
+            module_artifacts.push(result.artifact);
+
+            if !result.validated && !result.was_skip {
+                all_validated = false;
+            }
+
+            // Merge output and context
+            if let Some(ref unit) = result.unit
+                && let Some(ref rust_output) = unit.rust_output
             {
-                Ok(retranslated) if has_substance(&retranslated, &module.source) => retranslated,
-                _ => rust_code,
-            }
-                } else {
-                    rust_code
-                };
-
-                mod_unit.rust_output = Some(rust_code);
-                mod_unit.state = MigrationState::Refined;
-
-                // Save per-module artifact
-                if let Some(store) = artifacts
-                    && let Some(rust) = &mod_unit.rust_output
-                {
-                    let _ = store.save_translation_module(&module.name, rust);
+                // P27: Propagate complete type definitions (struct, enum, const, impl)
+                // so later modules use the same types instead of redefining them.
+                let type_defs = noricum_tools::ast::extract_rust_type_definitions(rust_output);
+                if !type_defs.is_empty() {
+                    accumulated_rust_context.push_str(&type_defs.join("\n\n"));
+                    accumulated_rust_context.push('\n');
                 }
-            } // end of else (non-warm-start translation path)
-
-            // P24: Modules just need to compile — full validation on assembled output.
-            // Relaxed threshold: min(user_score, 50) so compiling code passes per-module.
-            let module_min_score = config.min_idiomatic_score.min(50);
-            // P25: Validate against accumulated assembly to resolve cross-module deps
-            let mod_validation = validate_module_with_assembly(
-                &mod_unit, &module.name, &module_outputs, module_min_score,
-            )?;
-            noricum_validation::apply_validation_with_max(
-                &mut mod_unit,
-                &mod_validation,
-                config.max_repair_iterations,
-            );
-
-            info!(
-                module = %mod_name,
-                compiles = mod_validation.compiles,
-                score = mod_validation.idiomatic_score,
-                unsafe_count = mod_validation.unsafe_count,
-                "module validation"
-            );
-
-            // P13: Re-translate if error count is catastrophically high
-            let mut mod_validation = mod_validation;
-            if !mod_validation.passed && should_retranslate(mod_validation.compiler_errors.len(), 0)
-            {
-                let error_count = mod_validation.compiler_errors.len();
-                warn!(
-                    module = %mod_name,
-                    errors = error_count,
-                    "P13: error count exceeds threshold, re-translating with higher temperature"
-                );
-                if let Some(store) = artifacts
-                    && let Some(rust) = &mod_unit.rust_output
-                {
-                    let _ = store.save_module_repair_rejected(&module.name, 0, rust);
-                }
-                // Re-translate with temperature 0.5
-                let retranslated =
-                    noricum_agents::translation::translate_function_with_patterns_and_temperature(
-                        client,
-                        &translation_model_sel.model,
-                        &augmented_c,
-                        None,
-                        analysis,
-                        &relevant_patterns,
-                        Some(0.5),
-                    )
-                    .await;
-                total_metrics.llm_calls += 1;
-                if let Ok(new_code) = retranslated
-                    && has_substance(&new_code, &module.source)
-                {
-                    mod_unit.rust_output = Some(new_code);
-                    // P24+P25: Re-validate with assembly context and relaxed threshold
-                    let re_val = validate_module_with_assembly(
-                        &mod_unit, &module.name, &module_outputs, module_min_score,
-                    )?;
-                    noricum_validation::apply_validation_with_max(
-                        &mut mod_unit,
-                        &re_val,
-                        config.max_repair_iterations,
-                    );
-                    info!(
-                        module = %mod_name,
-                        compiles = re_val.compiles,
-                        score = re_val.idiomatic_score,
-                        errors = re_val.compiler_errors.len(),
-                        "P13: re-translation validation"
-                    );
-                    mod_validation = re_val;
-                }
-            }
-
-            // Repair loop for this module (each module is small enough for effective repair)
-            if !mod_validation.passed {
-                let repair_start = Instant::now();
-                let repair_model_sel = select_repair_model(provider_config, difficulty)?;
-                let max_iters = config.max_repair_iterations.min(5);
-                let baseline_unsafe = mod_validation.unsafe_count;
-                // P21: Effective unsafe ceiling for modular repair
-                let unsafe_ceiling = config
-                    .max_unsafe_blocks
-                    .map_or(baseline_unsafe, |max| max.max(baseline_unsafe));
-                let mut best_version = mod_unit.rust_output.clone();
-                let mut best_score = mod_validation.idiomatic_score;
-                let mut best_compiles = mod_validation.compiles;
-
-                for iter in 1..=max_iters {
-                    let current_rust = mod_unit.rust_output.as_deref().unwrap_or("");
-                    let errors = &mod_unit.last_errors;
-                    let diff_feedback = &mod_unit.last_diff_feedback;
-
-                    let idiomatic_hints = if errors.is_empty()
-                        && diff_feedback.is_empty()
-                        && mod_unit.idiomatic_score.unwrap_or(0) < config.min_idiomatic_score
-                    {
-                        noricum_validation::generate_idiomatic_hints(current_rust)
-                    } else {
-                        Vec::new()
-                    };
-                    let effective_feedback = if idiomatic_hints.is_empty() {
-                        diff_feedback.clone()
-                    } else {
-                        idiomatic_hints
-                    };
-
-                    if errors.is_empty()
-                        && effective_feedback.is_empty()
-                        && mod_unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
-                    {
-                        break;
-                    }
-
-                    // P22: After 3+ failed iterations, hint that unsafe is acceptable
-                    let mut effective_feedback = effective_feedback;
-                    if !errors.is_empty() && iter >= 3 && unsafe_ceiling > 0 {
-                        effective_feedback.push(format!(
-                            "IMPORTANT: If you cannot fix the compilation errors with safe code, \
-                             you MAY use up to {} unsafe block(s) to make the code compile. \
-                             A compiling program with minimal unsafe is better than one that doesn't compile. \
-                             Wrap only the minimum necessary code in unsafe.",
-                            unsafe_ceiling
-                        ));
-                    }
-
-                    let repaired = match noricum_agents::repair::repair_function_full(
-                        client,
-                        &repair_model_sel.model,
-                        current_rust,
-                        errors,
-                        &effective_feedback,
-                        &module.source,
-                        iter,
-                        max_iters,
-                        config.repair_base_temperature,
-                        None, // No abbreviation needed — modules are small
-                    )
-                    .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            warn!(module = %mod_name, iter, error = %e, "module repair failed");
-                            break;
-                        }
-                    };
-
-                    total_metrics.llm_calls += 1;
-                    total_metrics.input_tokens += noricum_agents::estimate_tokens(current_rust);
-                    total_metrics.output_tokens += noricum_agents::estimate_tokens(&repaired);
-
-                    // P0: Quality floor
-                    let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
-                    if repaired_unsafe > unsafe_ceiling {
-                        warn!(module = %mod_name, iter, repaired_unsafe, unsafe_ceiling, "P0: repair rejected — exceeds unsafe ceiling (P21)");
-                        if let Some(store) = artifacts {
-                            let _ =
-                                store.save_module_repair_rejected(&module.name, iter, &repaired);
-                        }
-                        continue;
-                    }
-
-                    mod_unit.rust_output = Some(repaired);
-                    mod_unit.state = MigrationState::Repairing(iter);
-
-                    // P24+P25: Validate repair against assembly context
-                    let re_validation = validate_module_with_assembly(
-                        &mod_unit, &module.name, &module_outputs, module_min_score,
-                    )?;
-                    noricum_validation::apply_validation_with_max(
-                        &mut mod_unit,
-                        &re_validation,
-                        max_iters,
-                    );
-
-                    info!(
-                        module = %mod_name,
-                        iter,
-                        compiles = re_validation.compiles,
-                        score = re_validation.idiomatic_score,
-                        "module repair iteration"
-                    );
-
-                    // Save repair artifact for this module
-                    if let Some(store) = artifacts
-                        && let Some(rust) = &mod_unit.rust_output
-                    {
-                        let val_json = format!(
-                            "{{\"module\":\"{}\",\"iter\":{},\"compiles\":{},\"score\":{},\"unsafe\":{}}}",
-                            module.name,
-                            iter,
-                            re_validation.compiles,
-                            re_validation.idiomatic_score,
-                            re_validation.unsafe_count
-                        );
-                        let _ =
-                            store.save_module_repair_iteration(&module.name, iter, rust, &val_json);
-                    }
-
-                    // P1: Best-version tracking
-                    if re_validation.unsafe_count <= unsafe_ceiling
-                        && (re_validation.idiomatic_score > best_score
-                            || (re_validation.compiles && !best_compiles))
-                    {
-                        best_version = mod_unit.rust_output.clone();
-                        best_score = re_validation.idiomatic_score;
-                        best_compiles = re_validation.compiles;
-                    }
-
-                    if re_validation.passed {
-                        info!(module = %mod_name, "module repair succeeded");
-                        break;
-                    }
-
-                    check_budget(&effective_config, &total_metrics)?;
-                }
-
-                total_metrics.repair_ms += repair_start.elapsed().as_millis() as u64;
-
-                // Use best version if repair didn't fully pass
-                if mod_unit.state != MigrationState::Validated {
-                    let mod_error_count = mod_unit.last_errors.len();
-                    let mod_unsafe = mod_unit.unsafe_count.unwrap_or(0);
-                    if let Some(best) = best_version {
-                        mod_unit.rust_output = Some(best);
-                        mod_unit.idiomatic_score = Some(best_score);
-                    }
-                    // P23: Graduated state for module
-                    mod_unit.state = graduated_state(
-                        best_compiles, mod_unsafe, best_score, 80, mod_error_count,
-                    );
-                    if !best_compiles {
-                        all_validated = false;
-                        warn!(module = %mod_name, state = ?mod_unit.state, "module did not reach Validated state (P23)");
-                    }
-                }
-            }
-
-            // Accumulate this module's output for context
-            if let Some(ref rust_output) = mod_unit.rust_output {
+                // Also propagate function signatures for cross-module calls
                 let sigs = noricum_tools::ast::extract_rust_signatures(rust_output);
                 if !sigs.is_empty() {
                     accumulated_rust_context.push_str(&sigs.join("\n"));
                     accumulated_rust_context.push('\n');
                 }
 
-                module_outputs.push((module.name.clone(), rust_output.clone()));
+                module_outputs.push((result.name.clone(), rust_output.clone(), mod_compiles));
                 any_succeeded = true;
-                best_combined_score += mod_unit.idiomatic_score.unwrap_or(0);
-
-                // Track per-module result for v2 manifest
-                module_artifacts.push(crate::artifacts::ModuleArtifact {
-                    name: module.name.clone(),
-                    state: format!("{:?}", mod_unit.state),
-                    score: mod_unit.idiomatic_score.unwrap_or(0) as f64,
-                    compiles: mod_unit.state == MigrationState::Validated
-                        || mod_unit.last_errors.is_empty(),
-                    unsafe_count: mod_unit.unsafe_count.unwrap_or(0),
-                });
+                best_combined_score += unit.idiomatic_score.unwrap_or(0);
 
                 info!(
-                    module = %mod_name,
-                    state = ?mod_unit.state,
-                    score = mod_unit.idiomatic_score.unwrap_or(0),
+                    module = %result.name,
+                    state = ?unit.state,
+                    score = unit.idiomatic_score.unwrap_or(0),
                     "module migration complete"
                 );
             }
+        }
 
-            check_budget(&effective_config, &total_metrics)?;
-        } // end for mod_idx in wave
+        check_budget(&effective_config, &total_metrics)?;
     } // end for wave in waves
 
     if !any_succeeded {
@@ -2347,6 +2001,561 @@ async fn migrate_file_modular(
     })
 }
 
+/// Migrate a single module through the full pipeline (translate -> validate -> repair).
+///
+/// This function is designed to be called concurrently for modules within the same wave.
+/// It takes all context by reference (no shared mutable state) and returns a
+/// `ModuleMigrationResult` that the caller merges into shared state after the wave completes.
+#[allow(clippy::too_many_arguments)]
+async fn migrate_single_module(
+    module: &noricum_tools::ast::CModule,
+    mod_idx: usize,
+    name: &str,
+    config: &MigrationConfig,
+    client: &LlmClient,
+    provider_config: &ProviderConfig,
+    analysis: &noricum_agents::analysis::AnalysisResult,
+    difficulty: noricum_ir::Difficulty,
+    artifacts: &Option<crate::artifacts::ArtifactStore>,
+    pattern_store: &PatternStore,
+    warm_manifest: &Option<crate::artifacts::ArtifactManifest>,
+    warm_store: &Option<crate::artifacts::ArtifactStore>,
+    accumulated_rust_context: &str,
+    module_outputs: &[(String, String, bool)],
+    module_number: usize,
+    total_modules: usize,
+) -> Result<ModuleMigrationResult, CoreError> {
+    let mod_name = format!("{name}::{}", module.name);
+
+    info!(
+        module = %mod_name,
+        functions = module.function_names.len(),
+        lines = module.line_count,
+        "migrating module ({}/{})",
+        module_number,
+        total_modules
+    );
+
+    // --- P19: Warm-start check ---
+    if let Some(manifest) = warm_manifest
+        && let Some(prev) = manifest.modules.iter().find(|m| m.name == module.name)
+    {
+        match warm_start_action(prev) {
+            WarmAction::Skip => {
+                if let Some(ws) = warm_store
+                    && let Ok(Some(code)) = ws.load_translation_module(&module.name)
+                {
+                    info!(module = %mod_name, score = prev.score, "P19: warm-start skip (validated)");
+                    // Save to new artifacts too
+                    if let Some(store) = artifacts {
+                        let _ = store.save_translation_module(&module.name, &code);
+                    }
+                    return Ok(ModuleMigrationResult {
+                        name: module.name.clone(),
+                        mod_idx,
+                        unit: {
+                            let mut u = FunctionUnit::new(
+                                mod_name.clone(),
+                                String::new(),
+                                module.source.clone(),
+                            );
+                            u.rust_output = Some(code);
+                            u.state = MigrationState::Validated;
+                            u.idiomatic_score = Some(prev.score as u32);
+                            Some(u)
+                        },
+                        artifact: crate::artifacts::ModuleArtifact {
+                            name: module.name.clone(),
+                            state: "Validated".to_string(),
+                            score: prev.score,
+                            compiles: true,
+                            unsafe_count: prev.unsafe_count,
+                        },
+                        metrics: noricum_ir::MigrationMetrics::default(),
+                        validated: true,
+                        was_skip: true,
+                    });
+                }
+            }
+            WarmAction::SeedRepair => {
+                info!(module = %mod_name, score = prev.score, "P19: warm-start seed repair");
+                // Will seed the translation from warm-start code below
+            }
+            WarmAction::Retranslate => {
+                info!(module = %mod_name, score = prev.score, "P19: warm-start retranslate");
+                // Proceed with normal translation
+            }
+        }
+    }
+
+    // Local metrics for this module
+    let mut local_metrics = noricum_ir::MigrationMetrics::default();
+
+    // Create a FunctionUnit for this module
+    let mut mod_unit =
+        FunctionUnit::new(mod_name.clone(), String::new(), module.source.clone());
+    mod_unit.difficulty = Some(difficulty);
+
+    // Build translation context: accumulated Rust from prior modules
+    let context_note = if !accumulated_rust_context.is_empty() {
+        format!(
+            "\n// === Already migrated modules (use these types/functions) ===\n{}\n// === End migrated context ===\n",
+            accumulated_rust_context
+        )
+    } else {
+        String::new()
+    };
+
+    // P19: Check if warm-start provides a seed for this module (SeedRepair)
+    let warm_seed = if let (Some(manifest), Some(ws)) = (warm_manifest, warm_store) {
+        manifest
+            .modules
+            .iter()
+            .find(|m| m.name == module.name)
+            .and_then(|prev| {
+                if warm_start_action(prev) == WarmAction::SeedRepair {
+                    ws.load_translation_module(&module.name).ok().flatten()
+                } else {
+                    None
+                }
+            })
+    } else {
+        None
+    };
+
+    // Translate this module
+    let translation_start = Instant::now();
+    let translation_model_sel = select_model(provider_config, difficulty, "translation")?;
+    let relevant_patterns = pattern_store.find_relevant(&module.source, 3);
+
+    // P27: Inject accumulated context as a prefix hint in the C source.
+    // The prompt strongly instructs the LLM to reuse existing types, not redefine them.
+    let augmented_c = if context_note.is_empty() {
+        module.source.clone()
+    } else {
+        format!(
+            "/* MIGRATION CONTEXT: The following Rust types and functions have already been migrated \
+from earlier modules in this same file.\n\
+\n\
+CRITICAL: Do NOT redefine any struct, enum, const, or type alias that appears below. \
+Use them directly — they are already defined and available in scope. \
+Only define NEW types that don't exist yet. If you need a type that's listed below, \
+just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
+\n{}\n*/\n\n{}",
+            accumulated_rust_context, module.source
+        )
+    };
+
+    // P19: Use warm-start seed if available, skip translation
+    if let Some(seed_code) = warm_seed {
+        info!(module = %mod_name, "P19: using warm-start seed, skipping translation");
+        mod_unit.rust_output = Some(seed_code);
+        mod_unit.state = MigrationState::Refined;
+        // Save warm-seeded code as module artifact
+        if let Some(store) = artifacts
+            && let Some(rust) = &mod_unit.rust_output
+        {
+            let _ = store.save_translation_module(&module.name, rust);
+        }
+        // Skip to validation (after the translation block)
+    } else {
+        // P12: Sub-chunk large modules — if a module exceeds MEDIUM_FILE_LOC, use
+        // chunked translation instead of single-pass to avoid LLM context overflow.
+        let module_lines = module.line_count;
+        let rust_code = if module_lines > MEDIUM_FILE_LOC {
+            let chunk_target = if module_lines > MASSIVE_FILE_LOC {
+                600
+            } else if module_lines > VERY_LARGE_FILE_LOC {
+                500
+            } else {
+                400
+            };
+            info!(
+                module = %mod_name,
+                lines = module_lines,
+                chunk_target,
+                "P12: module exceeds {} LOC, using chunked translation",
+                MEDIUM_FILE_LOC
+            );
+
+            let chunks = noricum_tools::ast::chunk_c_source(&augmented_c, chunk_target);
+            match noricum_agents::translation::translate_chunked(
+                client,
+                &translation_model_sel.model,
+                &chunks,
+                None, // No c2rust context for modular
+                analysis,
+                &relevant_patterns,
+                config.translation_temperature,
+            )
+            .await
+            {
+                Ok(chunked_result) => {
+                    local_metrics.llm_calls += chunked_result.chunks.len() as u32;
+                    for chunk in &chunked_result.chunks {
+                        local_metrics.input_tokens +=
+                            noricum_agents::estimate_tokens(&chunk.rust_source);
+                    }
+                    local_metrics.translation_ms +=
+                        translation_start.elapsed().as_millis() as u64;
+                    chunked_result.combined
+                }
+                Err(e) => {
+                    warn!(module = %mod_name, error = %e, "chunked module translation failed");
+                    return Ok(ModuleMigrationResult {
+                        name: module.name.clone(),
+                        mod_idx,
+                        unit: None,
+                        artifact: crate::artifacts::ModuleArtifact {
+                            name: module.name.clone(),
+                            state: "TranslationFailed".to_string(),
+                            score: 0.0,
+                            compiles: false,
+                            unsafe_count: 0,
+                        },
+                        metrics: local_metrics,
+                        validated: false,
+                        was_skip: false,
+                    });
+                }
+            }
+        } else {
+            // Small module — single-pass translation
+            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                client,
+                &translation_model_sel.model,
+                &augmented_c,
+                None,
+                analysis,
+                &relevant_patterns,
+                config.translation_temperature,
+            )
+            .await
+            {
+                Ok(code) => {
+                    local_metrics.llm_calls += 1;
+                    local_metrics.input_tokens += noricum_agents::estimate_tokens(&augmented_c);
+                    local_metrics.output_tokens += noricum_agents::estimate_tokens(&code);
+                    local_metrics.translation_ms +=
+                        translation_start.elapsed().as_millis() as u64;
+                    code
+                }
+                Err(e) => {
+                    warn!(module = %mod_name, error = %e, "module translation failed");
+                    return Ok(ModuleMigrationResult {
+                        name: module.name.clone(),
+                        mod_idx,
+                        unit: None,
+                        artifact: crate::artifacts::ModuleArtifact {
+                            name: module.name.clone(),
+                            state: "TranslationFailed".to_string(),
+                            score: 0.0,
+                            compiles: false,
+                            unsafe_count: 0,
+                        },
+                        metrics: local_metrics,
+                        validated: false,
+                        was_skip: false,
+                    });
+                }
+            }
+        };
+
+        // Substance check
+        let is_stub = !has_substance(&rust_code, &module.source);
+        let rust_code = if is_stub {
+            warn!(module = %mod_name, "P6: module translation produced stubs, re-translating");
+            local_metrics.llm_calls += 1;
+            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                client,
+                &translation_model_sel.model,
+                &augmented_c,
+                None,
+                analysis,
+                &relevant_patterns,
+                Some(0.5),
+            )
+            .await
+            {
+                Ok(retranslated) if has_substance(&retranslated, &module.source) => retranslated,
+                _ => rust_code,
+            }
+        } else {
+            rust_code
+        };
+
+        mod_unit.rust_output = Some(rust_code);
+        mod_unit.state = MigrationState::Refined;
+
+        // Save per-module artifact
+        if let Some(store) = artifacts
+            && let Some(rust) = &mod_unit.rust_output
+        {
+            let _ = store.save_translation_module(&module.name, rust);
+        }
+    } // end of else (non-warm-start translation path)
+
+    // P24: Modules just need to compile — full validation on assembled output.
+    // Relaxed threshold: min(user_score, 50) so compiling code passes per-module.
+    let module_min_score = config.min_idiomatic_score.min(50);
+    // P25: Validate against accumulated assembly to resolve cross-module deps
+    let mod_validation = validate_module_with_assembly(
+        &mod_unit, &module.name, module_outputs, module_min_score,
+    )?;
+    noricum_validation::apply_validation_with_max(
+        &mut mod_unit,
+        &mod_validation,
+        config.max_repair_iterations,
+    );
+
+    info!(
+        module = %mod_name,
+        compiles = mod_validation.compiles,
+        score = mod_validation.idiomatic_score,
+        unsafe_count = mod_validation.unsafe_count,
+        "module validation"
+    );
+
+    // P13: Re-translate if error count is catastrophically high
+    let mut mod_validation = mod_validation;
+    if !mod_validation.passed && should_retranslate(mod_validation.compiler_errors.len(), 0)
+    {
+        let error_count = mod_validation.compiler_errors.len();
+        warn!(
+            module = %mod_name,
+            errors = error_count,
+            "P13: error count exceeds threshold, re-translating with higher temperature"
+        );
+        if let Some(store) = artifacts
+            && let Some(rust) = &mod_unit.rust_output
+        {
+            let _ = store.save_module_repair_rejected(&module.name, 0, rust);
+        }
+        // Re-translate with temperature 0.5
+        let retranslated =
+            noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                client,
+                &translation_model_sel.model,
+                &augmented_c,
+                None,
+                analysis,
+                &relevant_patterns,
+                Some(0.5),
+            )
+            .await;
+        local_metrics.llm_calls += 1;
+        if let Ok(new_code) = retranslated
+            && has_substance(&new_code, &module.source)
+        {
+            mod_unit.rust_output = Some(new_code);
+            // P24+P25: Re-validate with assembly context and relaxed threshold
+            let re_val = validate_module_with_assembly(
+                &mod_unit, &module.name, module_outputs, module_min_score,
+            )?;
+            noricum_validation::apply_validation_with_max(
+                &mut mod_unit,
+                &re_val,
+                config.max_repair_iterations,
+            );
+            info!(
+                module = %mod_name,
+                compiles = re_val.compiles,
+                score = re_val.idiomatic_score,
+                errors = re_val.compiler_errors.len(),
+                "P13: re-translation validation"
+            );
+            mod_validation = re_val;
+        }
+    }
+
+    // Repair loop for this module (each module is small enough for effective repair)
+    if !mod_validation.passed {
+        let repair_start = Instant::now();
+        let repair_model_sel = select_repair_model(provider_config, difficulty)?;
+        let max_iters = config.max_repair_iterations.min(5);
+        let baseline_unsafe = mod_validation.unsafe_count;
+        // P21: Effective unsafe ceiling for modular repair
+        let unsafe_ceiling = config
+            .max_unsafe_blocks
+            .map_or(baseline_unsafe, |max| max.max(baseline_unsafe));
+        let mut best_version = mod_unit.rust_output.clone();
+        let mut best_score = mod_validation.idiomatic_score;
+        let mut best_compiles = mod_validation.compiles;
+
+        for iter in 1..=max_iters {
+            let current_rust = mod_unit.rust_output.as_deref().unwrap_or("");
+            let errors = &mod_unit.last_errors;
+            let diff_feedback = &mod_unit.last_diff_feedback;
+
+            let idiomatic_hints = if errors.is_empty()
+                && diff_feedback.is_empty()
+                && mod_unit.idiomatic_score.unwrap_or(0) < config.min_idiomatic_score
+            {
+                noricum_validation::generate_idiomatic_hints(current_rust)
+            } else {
+                Vec::new()
+            };
+            let effective_feedback = if idiomatic_hints.is_empty() {
+                diff_feedback.clone()
+            } else {
+                idiomatic_hints
+            };
+
+            if errors.is_empty()
+                && effective_feedback.is_empty()
+                && mod_unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
+            {
+                break;
+            }
+
+            // P22: After 3+ failed iterations, hint that unsafe is acceptable
+            let mut effective_feedback = effective_feedback;
+            if !errors.is_empty() && iter >= 3 && unsafe_ceiling > 0 {
+                effective_feedback.push(format!(
+                    "IMPORTANT: If you cannot fix the compilation errors with safe code, \
+                     you MAY use up to {} unsafe block(s) to make the code compile. \
+                     A compiling program with minimal unsafe is better than one that doesn't compile. \
+                     Wrap only the minimum necessary code in unsafe.",
+                    unsafe_ceiling
+                ));
+            }
+
+            let repaired = match noricum_agents::repair::repair_function_full(
+                client,
+                &repair_model_sel.model,
+                current_rust,
+                errors,
+                &effective_feedback,
+                &module.source,
+                iter,
+                max_iters,
+                config.repair_base_temperature,
+                None, // No abbreviation needed — modules are small
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(module = %mod_name, iter, error = %e, "module repair failed");
+                    break;
+                }
+            };
+
+            local_metrics.llm_calls += 1;
+            local_metrics.input_tokens += noricum_agents::estimate_tokens(current_rust);
+            local_metrics.output_tokens += noricum_agents::estimate_tokens(&repaired);
+
+            // P0: Quality floor
+            let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
+            if repaired_unsafe > unsafe_ceiling {
+                warn!(module = %mod_name, iter, repaired_unsafe, unsafe_ceiling, "P0: repair rejected — exceeds unsafe ceiling (P21)");
+                if let Some(store) = artifacts {
+                    let _ =
+                        store.save_module_repair_rejected(&module.name, iter, &repaired);
+                }
+                continue;
+            }
+
+            mod_unit.rust_output = Some(repaired);
+            mod_unit.state = MigrationState::Repairing(iter);
+
+            // P24+P25: Validate repair against assembly context
+            let re_validation = validate_module_with_assembly(
+                &mod_unit, &module.name, module_outputs, module_min_score,
+            )?;
+            noricum_validation::apply_validation_with_max(
+                &mut mod_unit,
+                &re_validation,
+                max_iters,
+            );
+
+            info!(
+                module = %mod_name,
+                iter,
+                compiles = re_validation.compiles,
+                score = re_validation.idiomatic_score,
+                "module repair iteration"
+            );
+
+            // Save repair artifact for this module
+            if let Some(store) = artifacts
+                && let Some(rust) = &mod_unit.rust_output
+            {
+                let val_json = format!(
+                    "{{\"module\":\"{}\",\"iter\":{},\"compiles\":{},\"score\":{},\"unsafe\":{}}}",
+                    module.name,
+                    iter,
+                    re_validation.compiles,
+                    re_validation.idiomatic_score,
+                    re_validation.unsafe_count
+                );
+                let _ =
+                    store.save_module_repair_iteration(&module.name, iter, rust, &val_json);
+            }
+
+            // P1: Best-version tracking
+            if re_validation.unsafe_count <= unsafe_ceiling
+                && (re_validation.idiomatic_score > best_score
+                    || (re_validation.compiles && !best_compiles))
+            {
+                best_version = mod_unit.rust_output.clone();
+                best_score = re_validation.idiomatic_score;
+                best_compiles = re_validation.compiles;
+            }
+
+            if re_validation.passed {
+                info!(module = %mod_name, "module repair succeeded");
+                break;
+            }
+
+            check_budget(config, &local_metrics)?;
+        }
+
+        local_metrics.repair_ms += repair_start.elapsed().as_millis() as u64;
+
+        // Use best version if repair didn't fully pass
+        if mod_unit.state != MigrationState::Validated {
+            let mod_error_count = mod_unit.last_errors.len();
+            let mod_unsafe = mod_unit.unsafe_count.unwrap_or(0);
+            if let Some(best) = best_version {
+                mod_unit.rust_output = Some(best);
+                mod_unit.idiomatic_score = Some(best_score);
+            }
+            // P23: Graduated state for module
+            mod_unit.state = graduated_state(
+                best_compiles, mod_unsafe, best_score, 80, mod_error_count,
+            );
+            if !best_compiles {
+                warn!(module = %mod_name, state = ?mod_unit.state, "module did not reach Validated state (P23)");
+            }
+        }
+    }
+
+    // Build the result — unit contains the FunctionUnit with rust_output
+    let validated = mod_unit.state == MigrationState::Validated
+        || mod_unit.state == MigrationState::CompilesUnsafe;
+    let compiles = mod_unit.state == MigrationState::Validated
+        || mod_unit.last_errors.is_empty();
+
+    let artifact = crate::artifacts::ModuleArtifact {
+        name: module.name.clone(),
+        state: format!("{:?}", mod_unit.state),
+        score: mod_unit.idiomatic_score.unwrap_or(0) as f64,
+        compiles,
+        unsafe_count: mod_unit.unsafe_count.unwrap_or(0),
+    };
+
+    Ok(ModuleMigrationResult {
+        name: module.name.clone(),
+        mod_idx,
+        unit: Some(mod_unit),
+        artifact,
+        metrics: local_metrics,
+        validated,
+        was_skip: false,
+    })
+}
+
 /// Result of modular migration attempt.
 enum ModularResult {
     /// All modules migrated successfully.
@@ -2361,35 +2570,25 @@ enum ModularResult {
 
 /// Assemble the final Rust output from individually migrated module outputs.
 ///
-/// Deduplicates `use` statements and joins module code in order.
-fn assemble_module_outputs(modules: &[(String, String)]) -> String {
+/// P27: Deduplicates `use` statements and type/struct/enum/const definitions
+/// across modules. The first module to define a name wins; subsequent modules
+/// have their duplicate definitions stripped. This prevents compilation errors
+/// from modules that independently translate the same C types.
+fn assemble_module_outputs(modules: &[(String, String, bool)]) -> String {
     let mut all_uses: Vec<String> = Vec::new();
     let mut code_parts: Vec<String> = Vec::new();
+    // P27: Track which type names have already been defined
+    let mut defined_types: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (mod_name, rust_code) in modules {
-        let mut mod_code_lines = Vec::new();
-        for line in rust_code.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("use ") && trimmed.ends_with(';') {
-                if !all_uses.contains(&trimmed.to_string()) {
-                    all_uses.push(trimmed.to_string());
-                }
-            } else {
-                mod_code_lines.push(line);
-            }
-        }
+    for (mod_name, rust_code, _compiles) in modules {
+        let mod_code_lines = dedup_module_definitions(rust_code, &mut all_uses, &mut defined_types);
         // Remove leading/trailing empty lines
-        while mod_code_lines.first().is_some_and(|l| l.trim().is_empty()) {
-            mod_code_lines.remove(0);
-        }
-        while mod_code_lines.last().is_some_and(|l| l.trim().is_empty()) {
-            mod_code_lines.pop();
-        }
-        if !mod_code_lines.is_empty() {
+        let trimmed_lines = trim_empty_lines(&mod_code_lines);
+        if !trimmed_lines.is_empty() {
             code_parts.push(format!(
                 "// --- Module: {} ---\n{}",
                 mod_name,
-                mod_code_lines.join("\n")
+                trimmed_lines.join("\n")
             ));
         }
     }
@@ -2403,6 +2602,161 @@ fn assemble_module_outputs(modules: &[(String, String)]) -> String {
     output.push_str(&code_parts.join("\n\n"));
     output.push('\n');
     output
+}
+
+/// Run the full async LLM migration pipeline on all C files in a directory.
+///
+/// Uses `DependencyGraph` to determine topological order (dependencies first),
+/// and accumulates migrated Rust signatures to inject as context for later files.
+/// P27: Extract non-duplicate lines from a module, collecting `use` statements
+/// and stripping type/struct/enum/const definitions that were already defined
+/// by earlier modules.
+fn dedup_module_definitions<'a>(
+    rust_code: &'a str,
+    all_uses: &mut Vec<String>,
+    defined_types: &mut std::collections::HashSet<String>,
+) -> Vec<&'a str> {
+    let mut result_lines: Vec<&str> = Vec::new();
+    let lines: Vec<&str> = rust_code.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+
+        // Deduplicate use statements
+        if trimmed.starts_with("use ") && trimmed.ends_with(';') {
+            if !all_uses.contains(&trimmed.to_string()) {
+                all_uses.push(trimmed.to_string());
+            }
+            i += 1;
+            continue;
+        }
+
+        // Check for type definitions: pub struct/enum/const/type Name
+        if let Some(type_name) = extract_definition_name(trimmed) {
+            if defined_types.contains(&type_name) {
+                // Skip this entire definition (including its body with braces)
+                i = skip_braced_block(&lines, i);
+                continue;
+            }
+            defined_types.insert(type_name);
+        }
+
+        // Check for impl blocks: impl TypeName / impl Trait for TypeName
+        if let Some(impl_target) = extract_impl_target(trimmed) {
+            // If the type isn't defined yet (was stripped), skip the impl too
+            // But only skip if we've seen this type before AND it was from another module
+            // (i.e., the type was stripped from this module)
+            if !defined_types.contains(&impl_target) && trimmed.contains("impl ") {
+                // Type not defined anywhere yet — keep the impl, it defines behavior
+                result_lines.push(lines[i]);
+                i += 1;
+                continue;
+            }
+        }
+
+        result_lines.push(lines[i]);
+        i += 1;
+    }
+    result_lines
+}
+
+/// Extract the name from a type definition line (struct, enum, const, type).
+/// Returns None if the line is not a definition.
+fn extract_definition_name(line: &str) -> Option<String> {
+    // Match patterns like: pub struct Foo { / pub enum Bar { / const X: ...
+    let prefixes = [
+        "pub struct ", "struct ",
+        "pub enum ", "enum ",
+        "pub const ", "const ",
+        "pub type ", "type ",
+    ];
+    for prefix in &prefixes {
+        if line.starts_with(prefix) {
+            let rest = &line[prefix.len()..];
+            // Extract the name (up to first non-alphanumeric/underscore)
+            let name: String = rest.chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// Extract the target type from an `impl` line.
+/// `impl Foo {` → Some("Foo"), `impl Display for Foo {` → Some("Foo")
+fn extract_impl_target(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("impl ") {
+        return None;
+    }
+    let rest = &trimmed[5..]; // after "impl "
+    // Check for "Trait for Type" pattern
+    if let Some(for_pos) = rest.find(" for ") {
+        let after_for = &rest[for_pos + 5..];
+        let name: String = after_for.chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    // Direct impl: "impl Type {"
+    let name: String = rest.chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if !name.is_empty() {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Skip a braced block starting at line `start`. Returns the index after the closing brace.
+fn skip_braced_block(lines: &[&str], start: usize) -> usize {
+    let mut depth = 0i32;
+    let mut i = start;
+    // Count braces on the first line
+    for ch in lines[start].chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    i += 1;
+    // If the definition had no opening brace on this line (e.g., `const X: i32 = 5;`)
+    // it's a single-line definition — already skipped
+    if depth <= 0 {
+        return i;
+    }
+    // Track braces until balanced
+    while i < lines.len() && depth > 0 {
+        for ch in lines[i].chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Trim leading and trailing empty lines from a slice.
+fn trim_empty_lines<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+    let mut result: Vec<&str> = lines.to_vec();
+    while result.first().is_some_and(|l| l.trim().is_empty()) {
+        result.remove(0);
+    }
+    while result.last().is_some_and(|l| l.trim().is_empty()) {
+        result.pop();
+    }
+    result
 }
 
 /// Run the full async LLM migration pipeline on all C files in a directory.
@@ -2818,11 +3172,13 @@ fn main() {
             (
                 "utils".to_string(),
                 "use std::collections::HashMap;\n\nfn util_a() -> i32 { 1 }\n".to_string(),
+                true,
             ),
             (
                 "core".to_string(),
                 "use std::collections::HashMap;\nuse std::io;\n\nfn core_b() -> i32 { 2 }\n"
                     .to_string(),
+                true,
             ),
         ];
         let result = assemble_module_outputs(&modules);
@@ -2841,7 +3197,7 @@ fn main() {
 
     #[test]
     fn test_assemble_module_outputs_empty() {
-        let modules: Vec<(String, String)> = vec![];
+        let modules: Vec<(String, String, bool)> = vec![];
         let result = assemble_module_outputs(&modules);
         assert_eq!(result.trim(), "");
     }
@@ -2921,9 +3277,9 @@ fn main() {
     #[test]
     fn test_assemble_module_outputs_preserves_order() {
         let modules = vec![
-            ("first".to_string(), "fn a() {}\n".to_string()),
-            ("second".to_string(), "fn b() {}\n".to_string()),
-            ("third".to_string(), "fn c() {}\n".to_string()),
+            ("first".to_string(), "fn a() {}\n".to_string(), true),
+            ("second".to_string(), "fn b() {}\n".to_string(), true),
+            ("third".to_string(), "fn c() {}\n".to_string(), true),
         ];
         let result = assemble_module_outputs(&modules);
         let pos_a = result.find("Module: first").unwrap();
@@ -2931,6 +3287,76 @@ fn main() {
         let pos_c = result.find("Module: third").unwrap();
         assert!(pos_a < pos_b);
         assert!(pos_b < pos_c);
+    }
+
+    #[test]
+    fn test_assemble_dedup_types_across_modules() {
+        // P27: Second module redefines ZipArchive — should be stripped
+        let mod_a = "pub struct ZipArchive {\n    pub data: Vec<u8>,\n}\n\nfn read(a: &ZipArchive) -> usize { a.data.len() }\n".to_string();
+        let mod_b = "pub struct ZipArchive {\n    pub data: Vec<u8>,\n}\n\nfn write(a: &mut ZipArchive) { a.data.push(0); }\n".to_string();
+        let modules = vec![
+            ("types".to_string(), mod_a, true),
+            ("ops".to_string(), mod_b, true),
+        ];
+        let result = assemble_module_outputs(&modules);
+        // ZipArchive struct should appear exactly once
+        assert_eq!(
+            result.matches("pub struct ZipArchive").count(), 1,
+            "ZipArchive should be deduplicated: {result}"
+        );
+        // Both functions should still be present
+        assert!(result.contains("fn read("), "fn read should survive dedup");
+        assert!(result.contains("fn write("), "fn write should survive dedup");
+    }
+
+    #[test]
+    fn test_assemble_dedup_enum_and_const() {
+        let mod_a = "pub enum ZipError {\n    Io,\n    Parse,\n}\n\npub const HEADER_SIZE: u32 = 30;\n\nfn init() -> i32 { 0 }\n".to_string();
+        let mod_b = "pub enum ZipError {\n    Io,\n    Parse,\n}\n\npub const HEADER_SIZE: u32 = 30;\n\nfn process() -> i32 { 1 }\n".to_string();
+        let modules = vec![
+            ("base".to_string(), mod_a, true),
+            ("ext".to_string(), mod_b, true),
+        ];
+        let result = assemble_module_outputs(&modules);
+        assert_eq!(result.matches("pub enum ZipError").count(), 1, "enum should be deduped");
+        assert_eq!(result.matches("pub const HEADER_SIZE").count(), 1, "const should be deduped");
+        assert!(result.contains("fn init()"));
+        assert!(result.contains("fn process()"));
+    }
+
+    #[test]
+    fn test_assemble_dedup_preserves_first_definition() {
+        // First module defines ZipArchive with 2 fields, second with 3 fields.
+        // First definition should win.
+        let mod_a = "pub struct ZipArchive {\n    pub data: Vec<u8>,\n    pub name: String,\n}\n".to_string();
+        let mod_b = "pub struct ZipArchive {\n    pub data: Vec<u8>,\n    pub name: String,\n    pub extra: bool,\n}\n\nfn check() -> bool { true }\n".to_string();
+        let modules = vec![
+            ("first".to_string(), mod_a, true),
+            ("second".to_string(), mod_b, true),
+        ];
+        let result = assemble_module_outputs(&modules);
+        assert_eq!(result.matches("pub struct ZipArchive").count(), 1);
+        // First definition should be kept (2 fields, no extra)
+        assert!(result.contains("pub name: String"), "first def fields should be present");
+        assert!(!result.contains("pub extra: bool"), "second def fields should be stripped");
+        assert!(result.contains("fn check()"), "functions should survive");
+    }
+
+    #[test]
+    fn test_skip_braced_block_basic() {
+        let lines = vec!["pub struct Foo {", "    x: i32,", "}", "fn bar() {}"];
+        let end = skip_braced_block(&lines, 0);
+        assert_eq!(end, 3, "should skip past closing brace");
+    }
+
+    #[test]
+    fn test_extract_definition_name() {
+        assert_eq!(extract_definition_name("pub struct ZipArchive {"), Some("ZipArchive".to_string()));
+        assert_eq!(extract_definition_name("pub enum ZipError {"), Some("ZipError".to_string()));
+        assert_eq!(extract_definition_name("pub const HEADER: u32 = 30;"), Some("HEADER".to_string()));
+        assert_eq!(extract_definition_name("pub type Result = std::result::Result;"), Some("Result".to_string()));
+        assert_eq!(extract_definition_name("fn foo() {}"), None);
+        assert_eq!(extract_definition_name("let x = 5;"), None);
     }
 
     #[test]
@@ -3005,10 +3431,19 @@ fn main() {
             "module B with A should compile"
         );
 
-        // build_assembly_context helper
-        let outputs = vec![("mod_a".to_string(), module_a.to_string())];
+        // build_assembly_context helper — only includes compiling modules
+        let outputs = vec![("mod_a".to_string(), module_a.to_string(), true)];
         let ctx = build_assembly_context(&outputs);
         assert!(ctx.contains("ZipArchive"));
+
+        // P26: non-compiling modules are filtered from assembly context
+        let outputs_with_broken = vec![
+            ("mod_a".to_string(), module_a.to_string(), true),
+            ("mod_broken".to_string(), "fn broken( {".to_string(), false),
+        ];
+        let ctx = build_assembly_context(&outputs_with_broken);
+        assert!(ctx.contains("ZipArchive"), "compiling module should be included");
+        assert!(!ctx.contains("broken"), "non-compiling module should be filtered");
     }
 
     #[test]

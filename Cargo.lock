@@ -1245,6 +1245,7 @@ name = "noricum-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures",
  "noricum-agents",
  "noricum-ir",
  "noricum-tools",

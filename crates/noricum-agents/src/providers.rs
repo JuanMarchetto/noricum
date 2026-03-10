@@ -69,6 +69,7 @@ pub enum ProviderKind {
 /// All providers share the same `run_prompt` interface via rig-rs's
 /// `CompletionClient` trait. Adding a new provider requires only a new
 /// enum variant and extending the match in `run_prompt`.
+#[derive(Clone)]
 pub enum LlmClient {
     /// Anthropic (Claude) backend.
     Anthropic(anthropic::Client),

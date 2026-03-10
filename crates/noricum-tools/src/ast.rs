@@ -1066,6 +1066,67 @@ pub fn extract_rust_signatures(rust_source: &str) -> Vec<String> {
         .collect()
 }
 
+/// P27: Extract complete type definitions (struct, enum, const, type alias) from Rust source.
+///
+/// Returns the full definition text for each type, including the body.
+/// Used by P9 foundation context to propagate canonical type definitions to later modules.
+pub fn extract_rust_type_definitions(rust_source: &str) -> Vec<String> {
+    let lines: Vec<&str> = rust_source.lines().collect();
+    let mut definitions = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+
+        // Match type definitions (pub or not)
+        let is_def = trimmed.starts_with("pub struct ")
+            || trimmed.starts_with("struct ")
+            || trimmed.starts_with("pub enum ")
+            || trimmed.starts_with("enum ")
+            || trimmed.starts_with("pub const ")
+            || trimmed.starts_with("const ")
+            || trimmed.starts_with("pub type ")
+            || trimmed.starts_with("type ");
+
+        // Also match impl blocks
+        let is_impl = trimmed.starts_with("impl ");
+
+        if is_def || is_impl {
+            let start = i;
+            // Count braces to find end of block
+            let mut depth: i32 = 0;
+            for ch in lines[i].chars() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            i += 1;
+
+            if depth > 0 {
+                // Multi-line: track until braces balance
+                while i < lines.len() && depth > 0 {
+                    for ch in lines[i].chars() {
+                        match ch {
+                            '{' => depth += 1,
+                            '}' => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            // Collect the full definition
+            let def_text: String = lines[start..i].join("\n");
+            definitions.push(def_text);
+        } else {
+            i += 1;
+        }
+    }
+    definitions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1398,6 +1459,44 @@ fn helper(x: i32) -> i32 {
     fn test_extract_rust_signatures_empty() {
         let sigs = extract_rust_signatures("let x = 5;\nstruct Foo { bar: i32 }");
         assert!(sigs.is_empty());
+    }
+
+    #[test]
+    fn test_extract_rust_type_definitions() {
+        let rust = "\
+use std::io;
+
+pub struct ZipArchive {
+    pub data: Vec<u8>,
+    pub name: String,
+}
+
+pub enum ZipError {
+    Io,
+    Parse,
+}
+
+pub const HEADER_SIZE: u32 = 30;
+
+impl ZipArchive {
+    pub fn new() -> Self {
+        Self { data: Vec::new(), name: String::new() }
+    }
+}
+
+pub fn read_archive(a: &ZipArchive) -> usize {
+    a.data.len()
+}
+";
+        let defs = extract_rust_type_definitions(rust);
+        assert_eq!(defs.len(), 4, "should extract struct, enum, const, impl: {:?}", defs);
+        assert!(defs[0].contains("pub struct ZipArchive"));
+        assert!(defs[0].contains("pub name: String"));
+        assert!(defs[1].contains("pub enum ZipError"));
+        assert!(defs[2].contains("pub const HEADER_SIZE"));
+        assert!(defs[3].contains("impl ZipArchive"));
+        // Functions should NOT be captured
+        assert!(!defs.iter().any(|d| d.contains("fn read_archive")));
     }
 
     #[test]
