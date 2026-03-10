@@ -9,6 +9,7 @@ pub mod harness_gen;
 pub mod mixed_build;
 pub mod multi_input_test;
 pub mod preprocessor;
+pub mod repair_rules;
 pub mod rig_tools;
 pub mod rule_translate;
 
