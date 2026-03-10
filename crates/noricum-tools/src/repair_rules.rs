@@ -25,23 +25,69 @@ pub struct CompilerError {
 ///   --> file.rs:12:5
 /// ```
 pub fn parse_rustc_errors(stderr: &str) -> Vec<CompilerError> {
-    let error_re =
+    let mut results = Vec::new();
+
+    // Pattern 1: coded errors — error[E0499]: message \n  --> file:line:col
+    let coded_re =
         Regex::new(r"error\[(?P<code>E\d+)\]: (?P<message>[^\n]+)\n\s*--> [^:]+:(?P<line>\d+):\d+")
             .expect("static regex is valid");
 
-    error_re
-        .captures_iter(stderr)
-        .filter_map(|cap| {
-            let code = cap.name("code")?.as_str().to_string();
-            let message = cap.name("message")?.as_str().to_string();
-            let line: usize = cap.name("line")?.as_str().parse().ok()?;
-            Some(CompilerError {
-                code,
-                line,
-                message,
-            })
-        })
-        .collect()
+    for cap in coded_re.captures_iter(stderr) {
+        let Some(code) = cap.name("code") else {
+            continue;
+        };
+        let Some(message) = cap.name("message") else {
+            continue;
+        };
+        let line: usize = cap
+            .name("line")
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        results.push(CompilerError {
+            code: code.as_str().to_string(),
+            line,
+            message: message.as_str().to_string(),
+        });
+    }
+
+    // Pattern 2: syntax errors — error: message \n --> file:line:col (no error code)
+    let syntax_re =
+        Regex::new(r"(?m)^error: (?P<message>[^\n]+)\n\s*--> [^:]+:(?P<line>\d+):\d+")
+            .expect("static regex is valid");
+
+    for cap in syntax_re.captures_iter(stderr) {
+        let Some(message) = cap.name("message") else {
+            continue;
+        };
+        let msg = message.as_str().to_string();
+        // Skip summary lines
+        if msg.starts_with("aborting due to") || msg.starts_with("could not compile") {
+            continue;
+        }
+        let line: usize = cap
+            .name("line")
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        results.push(CompilerError {
+            code: "SYNTAX".to_string(),
+            line,
+            message: msg,
+        });
+    }
+
+    results
+}
+
+/// R0: Strip any markdown code fences that leaked into Rust source.
+///
+/// LLM responses sometimes include `` ```rust `` / `` ``` `` markers that survive
+/// extraction. This rule removes them as a defensive measure.
+pub fn rule_strip_markdown_fences(source: &str) -> String {
+    source
+        .lines()
+        .filter(|line| !line.trim().starts_with("```"))
+        .collect::<Vec<&str>>()
+        .join("\n")
 }
 
 /// Apply all mechanical repair rules in sequence.
@@ -50,9 +96,10 @@ pub fn parse_rustc_errors(stderr: &str) -> Vec<CompilerError> {
 /// clone bounds (adds missing trait bounds), then mut option ref
 /// (fixes moved `Option<&mut T>` parameters).
 pub fn apply_all_rules(source: &str, errors: &[CompilerError]) -> String {
-    let mut result = source.to_string();
+    // R0 first: strip markdown fences (always, no error check needed)
+    let mut result = rule_strip_markdown_fences(source);
 
-    // R2 first: dedup removes duplicate definitions, which can cascade
+    // R2: dedup removes duplicate definitions, which can cascade
     result = rule_dedup_functions(&result, errors);
     // R1: add Clone bounds where needed
     result = rule_clone_bounds(&result, errors);
@@ -597,6 +644,24 @@ fn helper(x: i32) -> i32 { x * 2 }"#;
     }
 
     #[test]
+    fn test_rule_strip_markdown_fences() {
+        let source = "use std::io;\n\nfn foo() -> i32 { 1 }\n\n\
+                       // --- Module: mz_p2 ---\n\
+                       ```rust\n\
+                       fn bar() -> i32 { 2 }\n\
+                       ```\n\n\
+                       fn baz() -> i32 { 3 }\n";
+        let result = rule_strip_markdown_fences(source);
+        assert!(
+            !result.contains("```"),
+            "fences should be stripped: {result}"
+        );
+        assert!(result.contains("fn foo()"), "code before fence preserved");
+        assert!(result.contains("fn bar()"), "code inside fence preserved");
+        assert!(result.contains("fn baz()"), "code after fence preserved");
+    }
+
+    #[test]
     fn test_rules_on_real_assembly() {
         let source = include_str!("../../../tests/fixtures/repair/assembly-iter05.rs");
         let compile_result = crate::compiler::check_rust_compiles(source).unwrap();
@@ -623,6 +688,37 @@ fn helper(x: i32) -> i32 { x * 2 }"#;
             errors.len(),
             fixed_errors.len()
         );
+    }
+
+    #[test]
+    fn test_parse_rustc_errors_syntax_errors() {
+        let stderr = r#"error: unknown start of token: `
+ --> check.rs:730:1
+  |
+730 | ```rust
+  | ^
+
+error: this file contains an unclosed delimiter
+ --> check.rs:3543:1
+
+error[E0432]: unresolved import `std::io`
+  --> check.rs:11:5
+"#;
+        let errors = parse_rustc_errors(stderr);
+        assert_eq!(
+            errors.len(),
+            3,
+            "should parse both syntax and coded errors: {errors:?}"
+        );
+        // Coded error
+        let coded: Vec<_> = errors.iter().filter(|e| e.code == "E0432").collect();
+        assert_eq!(coded.len(), 1);
+        assert_eq!(coded[0].line, 11);
+        // Syntax errors
+        let syntax: Vec<_> = errors.iter().filter(|e| e.code == "SYNTAX").collect();
+        assert_eq!(syntax.len(), 2, "should have 2 syntax errors: {errors:?}");
+        assert!(syntax.iter().any(|e| e.message.contains("unknown start of token")));
+        assert!(syntax.iter().any(|e| e.message.contains("unclosed delimiter")));
     }
 
     #[test]
