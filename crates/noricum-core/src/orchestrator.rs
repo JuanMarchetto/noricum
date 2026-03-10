@@ -14,9 +14,12 @@ use noricum_agents::providers::{
     ProviderConfig, create_llm_client, select_model, select_repair_model,
 };
 use noricum_ir::pattern_store::PatternStore;
-use noricum_ir::{FunctionUnit, MigrationProject, MigrationState};
+use noricum_ir::{Difficulty, FunctionUnit, MigrationProject, MigrationState};
+use noricum_tools::repair_rules::{apply_all_rules, parse_rustc_errors};
 use std::time::Instant;
 use tracing::{debug, info, warn};
+
+use crate::surgical_repair::{extract_function_at_line, gather_context, splice_function};
 
 /// Maximum input C source file size: 5 MB.
 /// Prevents OOM on extremely large C files.
@@ -608,6 +611,162 @@ pub fn migrate_directory_sync(dir: &Path) -> Result<MigrationProject, CoreError>
 // Async pipeline (full LLM agents)
 // ---------------------------------------------------------------------------
 
+/// P30: Three-phase hybrid repair for assembled outputs (>MODULAR_FILE_LOC lines).
+///
+/// Phase 1: Mechanical rules (0 LLM cost) — Clone bounds, dedup, mut binding fixes.
+/// Phase 2: Surgical per-function repair (focused LLM, ~100 LOC per call).
+/// Phase 3 is handled by the caller falling through to the legacy repair loop.
+///
+/// Returns `true` if all errors were resolved (caller should skip legacy repair).
+async fn hybrid_repair(
+    unit: &mut FunctionUnit,
+    client: &LlmClient,
+    provider_config: &ProviderConfig,
+    difficulty: Difficulty,
+    artifacts: &Option<crate::artifacts::ArtifactStore>,
+) -> Result<bool, CoreError> {
+    let name = unit.name.clone();
+    let rust_source = unit.rust_output.as_deref().unwrap_or("");
+
+    // --- Phase 1: Rule Engine ---
+    info!(function = %name, "P30 Phase 1: applying mechanical repair rules");
+    let compile_result = noricum_tools::compiler::check_rust_compiles(rust_source)?;
+    if compile_result.success {
+        info!(function = %name, "P30: already compiles, no repair needed");
+        return Ok(true);
+    }
+
+    let errors = parse_rustc_errors(&compile_result.stderr);
+    let error_count_before = errors.len();
+    let fixed = apply_all_rules(rust_source, &errors);
+
+    // Re-compile after rules
+    let post_rules = noricum_tools::compiler::check_rust_compiles(&fixed)?;
+    let post_errors = parse_rustc_errors(&post_rules.stderr);
+    info!(
+        function = %name,
+        errors_before = error_count_before,
+        errors_after = post_errors.len(),
+        "P30 Phase 1 complete"
+    );
+
+    unit.rust_output = Some(fixed.clone());
+
+    if let Some(store) = artifacts {
+        let _ = store.save_repair_iteration(0, &fixed, "P30 Phase 1: rule engine");
+    }
+
+    if post_rules.success {
+        info!(function = %name, "P30 Phase 1: rules resolved all errors");
+        return Ok(true);
+    }
+
+    // --- Phase 2: Surgical Repair ---
+    info!(
+        function = %name,
+        remaining_errors = post_errors.len(),
+        "P30 Phase 2: surgical per-function repair"
+    );
+
+    let repair_model = select_repair_model(provider_config, difficulty)?;
+    let mut current_source = fixed;
+    let max_surgical = 5;
+
+    for cycle in 0..max_surgical {
+        let compile_check = noricum_tools::compiler::check_rust_compiles(&current_source)?;
+        if compile_check.success {
+            info!(function = %name, cycle, "P30 Phase 2: surgical repair resolved all errors");
+            unit.rust_output = Some(current_source);
+            return Ok(true);
+        }
+
+        let cycle_errors = parse_rustc_errors(&compile_check.stderr);
+        if cycle_errors.is_empty() {
+            break;
+        }
+
+        // Target the first error's function
+        let err = &cycle_errors[0];
+        let Some((fn_name, fn_body)) = extract_function_at_line(&current_source, err.line) else {
+            info!(
+                function = %name,
+                line = err.line,
+                "P30 Phase 2: could not extract function at error line, skipping"
+            );
+            break;
+        };
+
+        let context = gather_context(&current_source, &fn_name);
+
+        let prompt = format!(
+            "Fix this Rust function. The compiler error is:\n\
+             {}: {}\n\n\
+             These types and function signatures are already defined (DO NOT redefine them):\n\
+             {}\n\n\
+             Here is the function to fix:\n\
+             {}\n\n\
+             Return ONLY the fixed function, nothing else. No markdown fences.",
+            err.code, err.message, context, fn_body
+        );
+
+        info!(
+            function = %name,
+            cycle,
+            error = %err.code,
+            target_fn = %fn_name,
+            context_len = context.len(),
+            fn_len = fn_body.len(),
+            "P30 Phase 2: sending surgical repair request"
+        );
+
+        let repair_result = noricum_agents::repair::repair_with_prompt(
+            client,
+            &repair_model.model,
+            &prompt,
+        )
+        .await;
+
+        match repair_result {
+            Ok(fixed_fn) => {
+                current_source = splice_function(&current_source, &fn_name, &fixed_fn);
+                unit.metrics.llm_calls += 1;
+
+                if let Some(store) = artifacts {
+                    let _ = store.save_repair_iteration(
+                        (cycle + 1) as u32,
+                        &current_source,
+                        &format!("P30 Phase 2 cycle {cycle}: fixed {fn_name} ({} error)", err.code),
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(function = %name, error = %e, "P30 Phase 2: surgical repair LLM call failed");
+                break;
+            }
+        }
+    }
+
+    unit.rust_output = Some(current_source);
+
+    // Check if Phase 2 resolved everything
+    let final_check = noricum_tools::compiler::check_rust_compiles(
+        unit.rust_output.as_deref().unwrap_or(""),
+    )?;
+
+    if final_check.success {
+        info!(function = %name, "P30 Phase 2: all errors resolved after surgical repair");
+        return Ok(true);
+    }
+
+    let remaining = parse_rustc_errors(&final_check.stderr).len();
+    info!(
+        function = %name,
+        remaining_errors = remaining,
+        "P30 Phases 1-2 complete, falling back to Phase 3 (legacy repair)"
+    );
+    Ok(false)
+}
+
 /// Run the full async LLM migration pipeline on a single C file.
 ///
 /// Pipeline stages:
@@ -1157,9 +1316,44 @@ pub async fn migrate_file(
     // P1: Track best version (highest score with acceptable unsafe count).
     if !validation.passed {
         let repair_start = Instant::now();
+
+        // P30: Hybrid repair for assembled outputs (>MODULAR_FILE_LOC lines).
+        // Phases 1-2 run first; if they resolve all errors, skip the legacy loop.
+        // If not, Phase 3 = legacy repair with max 3 iterations.
+        let mut hybrid_resolved = false;
+        if c_lines > MODULAR_FILE_LOC {
+            info!(function = %name, c_lines, "P30: using hybrid repair for assembled output");
+            hybrid_resolved = hybrid_repair(
+                &mut unit, &client, &provider_config, difficulty, &artifacts,
+            ).await?;
+
+            if hybrid_resolved {
+                // Re-validate after hybrid repair
+                let post_hybrid = noricum_validation::validate_with_threshold(
+                    &unit, config.min_idiomatic_score,
+                )?;
+                noricum_validation::apply_validation_with_max(&mut unit, &post_hybrid, max_iters);
+                unit.metrics.repair_ms = repair_start.elapsed().as_millis() as u64;
+                info!(function = %name, "P30: hybrid repair resolved all compilation errors");
+            } else {
+                // Cap legacy repair iterations for Phase 3 fallback
+                info!(function = %name, "P30 Phase 3: entering legacy repair (max 3 iterations)");
+            }
+        }
+
+        // Skip legacy repair if hybrid resolved everything
+        if !hybrid_resolved {
+
         // P29: Use fast repair model for assembly repair (deepseek-chat instead of R1).
         // R1 is ~5 min/iter on assembly vs ~1 min for deepseek-chat.
         let repair_model_sel = select_repair_model(&provider_config, difficulty)?;
+
+        // P30: Cap legacy repair to 3 iterations if used as Phase 3 fallback
+        let max_iters = if c_lines > MODULAR_FILE_LOC {
+            max_iters.min(3)
+        } else {
+            max_iters
+        };
 
         if max_iters < config.max_repair_iterations {
             info!(
@@ -1544,6 +1738,8 @@ pub async fn migrate_file(
                 "max repair iterations reached, using graduated state (P23)"
             );
         }
+
+        } // end if !hybrid_resolved
     }
 
     // --- Stage 9: Test generation ---

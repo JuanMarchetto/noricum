@@ -218,6 +218,33 @@ pub async fn repair_function_full(
     Ok(crate::extract_rust_code(&response))
 }
 
+/// P30: Send a custom prompt for surgical per-function repair.
+///
+/// Unlike [`repair_function`] which sends the entire file + errors, this sends
+/// a focused prompt with just the failing function, its type context, and the error.
+/// Used by the hybrid repair engine's Phase 2 (surgical repair).
+pub async fn repair_with_prompt(
+    client: &LlmClient,
+    model: &str,
+    prompt: &str,
+) -> Result<String, AgentError> {
+    info!(model, prompt_len = prompt.len(), "P30: surgical repair call");
+
+    let preamble = "You are a Rust compiler error repair specialist. \
+        You receive a single function with a compilation error and its type context. \
+        Return ONLY the fixed function — no markdown fences, no explanations, no type redefinitions.";
+
+    let max_tokens = ((prompt.len() as u64 / 4) * 2).clamp(4096, 16384);
+
+    let response = client
+        .run_prompt(model, preamble, 0.2, max_tokens, prompt)
+        .await?;
+
+    debug!(response_len = response.len(), "P30: surgical repair response");
+
+    Ok(crate::extract_rust_code(&response))
+}
+
 /// Abbreviate large C source files to reduce context token usage.
 ///
 /// For files under `max_lines`, returns the full source unchanged.

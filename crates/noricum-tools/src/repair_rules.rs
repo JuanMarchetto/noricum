@@ -595,4 +595,67 @@ fn helper(x: i32) -> i32 { x * 2 }"#;
             "Dedup should remove second definition"
         );
     }
+
+    #[test]
+    fn test_rules_on_real_assembly() {
+        let source = include_str!("../../../tests/fixtures/repair/assembly-iter05.rs");
+        let compile_result = crate::compiler::check_rust_compiles(source).unwrap();
+        assert!(!compile_result.success, "fixture should have errors");
+
+        let errors = parse_rustc_errors(&compile_result.stderr);
+        assert!(!errors.is_empty(), "should parse errors from fixture");
+
+        let fixed = apply_all_rules(source, &errors);
+        assert_ne!(source, &fixed, "rules should have modified the source");
+
+        // Re-compile the fixed version and check error count reduced
+        let fixed_result = crate::compiler::check_rust_compiles(&fixed).unwrap();
+        let fixed_errors = parse_rustc_errors(&fixed_result.stderr);
+        println!(
+            "Rule engine: {} errors -> {} errors (reduced {})",
+            errors.len(),
+            fixed_errors.len(),
+            errors.len() - fixed_errors.len()
+        );
+        assert!(
+            fixed_errors.len() < errors.len(),
+            "rules should reduce error count: {} -> {}",
+            errors.len(),
+            fixed_errors.len()
+        );
+    }
+
+    #[test]
+    fn test_apply_all_rules_reduces_errors() {
+        // Synthetic fixture exercising R2 (dedup) and R1 (Clone bounds)
+        let source = r#"fn resize_array<T: Default>(arr: &mut Vec<T>, n: usize) {
+    arr.resize(n, T::default());
+}
+
+fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
+    arr.resize(n, T::default());
+}
+"#;
+        let compile_result = crate::compiler::check_rust_compiles(source).unwrap();
+        assert!(!compile_result.success, "fixture should have compile errors");
+
+        let errors = parse_rustc_errors(&compile_result.stderr);
+        assert!(!errors.is_empty(), "should parse at least one error");
+
+        let fixed = apply_all_rules(source, &errors);
+        let fixed_result = crate::compiler::check_rust_compiles(&fixed).unwrap();
+        let fixed_errors = parse_rustc_errors(&fixed_result.stderr);
+
+        println!(
+            "Multi-rule test: {} errors -> {} errors",
+            errors.len(),
+            fixed_errors.len()
+        );
+        assert!(
+            fixed_errors.len() < errors.len(),
+            "should reduce errors: {} -> {}",
+            errors.len(),
+            fixed_errors.len()
+        );
+    }
 }
