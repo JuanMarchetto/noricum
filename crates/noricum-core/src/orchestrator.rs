@@ -9,7 +9,9 @@
 use std::path::Path;
 
 use noricum_agents::LlmClient;
-use noricum_agents::providers::{ProviderConfig, create_llm_client, select_model, select_repair_model};
+use noricum_agents::providers::{
+    ProviderConfig, create_llm_client, select_model, select_repair_model,
+};
 use noricum_ir::pattern_store::PatternStore;
 use noricum_ir::{FunctionUnit, MigrationProject, MigrationState};
 use std::time::Instant;
@@ -1692,9 +1694,9 @@ async fn migrate_file_modular(
             }
         }
     });
-    let warm_manifest = warm_store.as_ref().and_then(|store| {
-        store.load_manifest().ok()
-    });
+    let warm_manifest = warm_store
+        .as_ref()
+        .and_then(|store| store.load_manifest().ok());
 
     // P18: Wave-based module iteration — modules in the same wave are independent
     // and could run in parallel (future: use JoinSet for concurrent waves).
@@ -1708,48 +1710,53 @@ async fn migrate_file_modular(
     for (wave_idx, wave) in waves.iter().enumerate() {
         info!(wave = wave_idx, modules = wave.len(), "starting wave");
 
-    for &mod_idx in wave {
-        let module = &modules[mod_idx];
-        let mod_name = format!("{name}::{}", module.name);
+        for &mod_idx in wave {
+            let module = &modules[mod_idx];
+            let mod_name = format!("{name}::{}", module.name);
 
-        info!(
-            module = %mod_name,
-            functions = module.function_names.len(),
-            lines = module.line_count,
-            "migrating module ({}/{})",
-            module_outputs.len() + 1,
-            modules.len()
-        );
+            info!(
+                module = %mod_name,
+                functions = module.function_names.len(),
+                lines = module.line_count,
+                "migrating module ({}/{})",
+                module_outputs.len() + 1,
+                modules.len()
+            );
 
-        // P19: Warm-start check
-        if let Some(ref manifest) = warm_manifest
-            && let Some(prev) = manifest.modules.iter().find(|m| m.name == module.name) {
+            // P19: Warm-start check
+            if let Some(ref manifest) = warm_manifest
+                && let Some(prev) = manifest.modules.iter().find(|m| m.name == module.name)
+            {
                 match warm_start_action(prev) {
                     WarmAction::Skip => {
                         if let Some(ref ws) = warm_store
-                            && let Ok(Some(code)) = ws.load_translation_module(&module.name) {
-                                info!(module = %mod_name, score = prev.score, "P19: warm-start skip (validated)");
-                                let sigs = noricum_tools::ast::extract_rust_signatures(&code);
-                                if !sigs.is_empty() {
-                                    accumulated_rust_context.push_str(&sigs.join("\n"));
-                                    accumulated_rust_context.push('\n');
-                                }
-                                module_outputs.push((module.name.clone(), code));
-                                any_succeeded = true;
-                                best_combined_score += prev.score as u32;
-                                module_artifacts.push(crate::artifacts::ModuleArtifact {
-                                    name: module.name.clone(),
-                                    state: "Validated".to_string(),
-                                    score: prev.score,
-                                    compiles: true,
-                                    unsafe_count: prev.unsafe_count,
-                                });
-                                // Save to new artifacts too
-                                if let Some(store) = artifacts {
-                                    let _ = store.save_translation_module(&module.name, &module_outputs.last().unwrap().1);
-                                }
-                                continue;
+                            && let Ok(Some(code)) = ws.load_translation_module(&module.name)
+                        {
+                            info!(module = %mod_name, score = prev.score, "P19: warm-start skip (validated)");
+                            let sigs = noricum_tools::ast::extract_rust_signatures(&code);
+                            if !sigs.is_empty() {
+                                accumulated_rust_context.push_str(&sigs.join("\n"));
+                                accumulated_rust_context.push('\n');
                             }
+                            module_outputs.push((module.name.clone(), code));
+                            any_succeeded = true;
+                            best_combined_score += prev.score as u32;
+                            module_artifacts.push(crate::artifacts::ModuleArtifact {
+                                name: module.name.clone(),
+                                state: "Validated".to_string(),
+                                score: prev.score,
+                                compiles: true,
+                                unsafe_count: prev.unsafe_count,
+                            });
+                            // Save to new artifacts too
+                            if let Some(store) = artifacts {
+                                let _ = store.save_translation_module(
+                                    &module.name,
+                                    &module_outputs.last().unwrap().1,
+                                );
+                            }
+                            continue;
+                        }
                     }
                     WarmAction::SeedRepair => {
                         info!(module = %mod_name, score = prev.score, "P19: warm-start seed repair");
@@ -1762,117 +1769,117 @@ async fn migrate_file_modular(
                 }
             }
 
-        // Create a FunctionUnit for this module
-        let mut mod_unit =
-            FunctionUnit::new(mod_name.clone(), String::new(), module.source.clone());
-        mod_unit.difficulty = Some(difficulty);
+            // Create a FunctionUnit for this module
+            let mut mod_unit =
+                FunctionUnit::new(mod_name.clone(), String::new(), module.source.clone());
+            mod_unit.difficulty = Some(difficulty);
 
-        // Build translation context: accumulated Rust from prior modules
-        let context_note = if !accumulated_rust_context.is_empty() {
-            format!(
-                "\n// === Already migrated modules (use these types/functions) ===\n{}\n// === End migrated context ===\n",
-                accumulated_rust_context
-            )
-        } else {
-            String::new()
-        };
-
-        // P19: Check if warm-start provides a seed for this module (SeedRepair)
-        let warm_seed = if let (Some(manifest), Some(ws)) = (&warm_manifest, &warm_store) {
-            manifest
-                .modules
-                .iter()
-                .find(|m| m.name == module.name)
-                .and_then(|prev| {
-                    if warm_start_action(prev) == WarmAction::SeedRepair {
-                        ws.load_translation_module(&module.name).ok().flatten()
-                    } else {
-                        None
-                    }
-                })
-        } else {
-            None
-        };
-
-        // Translate this module
-        let translation_start = Instant::now();
-        let translation_model_sel = select_model(provider_config, difficulty, "translation")?;
-        let relevant_patterns = pattern_store.find_relevant(&module.source, 3);
-
-        // Inject accumulated context as a prefix hint in the C source
-        let augmented_c = if context_note.is_empty() {
-            module.source.clone()
-        } else {
-            format!(
-                "/* MIGRATION CONTEXT: The following Rust code has already been migrated from earlier modules in this file. \
-                 Use compatible types and function signatures.\n{}\n*/\n\n{}",
-                accumulated_rust_context, module.source
-            )
-        };
-
-        // P19: Use warm-start seed if available, skip translation
-        if let Some(seed_code) = warm_seed {
-            info!(module = %mod_name, "P19: using warm-start seed, skipping translation");
-            mod_unit.rust_output = Some(seed_code);
-            mod_unit.state = MigrationState::Refined;
-            // Save warm-seeded code as module artifact
-            if let Some(store) = artifacts
-                && let Some(rust) = &mod_unit.rust_output
-            {
-                let _ = store.save_translation_module(&module.name, rust);
-            }
-            // Skip to validation (after the translation block)
-        } else {
-        // P12: Sub-chunk large modules — if a module exceeds MEDIUM_FILE_LOC, use
-        // chunked translation instead of single-pass to avoid LLM context overflow.
-        let module_lines = module.line_count;
-        let rust_code = if module_lines > MEDIUM_FILE_LOC {
-            let chunk_target = if module_lines > MASSIVE_FILE_LOC {
-                600
-            } else if module_lines > VERY_LARGE_FILE_LOC {
-                500
+            // Build translation context: accumulated Rust from prior modules
+            let context_note = if !accumulated_rust_context.is_empty() {
+                format!(
+                    "\n// === Already migrated modules (use these types/functions) ===\n{}\n// === End migrated context ===\n",
+                    accumulated_rust_context
+                )
             } else {
-                400
+                String::new()
             };
-            info!(
-                module = %mod_name,
-                lines = module_lines,
-                chunk_target,
-                "P12: module exceeds {} LOC, using chunked translation",
-                MEDIUM_FILE_LOC
-            );
 
-            let chunks = noricum_tools::ast::chunk_c_source(&augmented_c, chunk_target);
-            match noricum_agents::translation::translate_chunked(
-                client,
-                &translation_model_sel.model,
-                &chunks,
-                None, // No c2rust context for modular
-                analysis,
-                &relevant_patterns,
-                config.translation_temperature,
-            )
-            .await
-            {
-                Ok(chunked_result) => {
-                    total_metrics.llm_calls += chunked_result.chunks.len() as u32;
-                    for chunk in &chunked_result.chunks {
-                        total_metrics.input_tokens +=
-                            noricum_agents::estimate_tokens(&chunk.rust_source);
+            // P19: Check if warm-start provides a seed for this module (SeedRepair)
+            let warm_seed = if let (Some(manifest), Some(ws)) = (&warm_manifest, &warm_store) {
+                manifest
+                    .modules
+                    .iter()
+                    .find(|m| m.name == module.name)
+                    .and_then(|prev| {
+                        if warm_start_action(prev) == WarmAction::SeedRepair {
+                            ws.load_translation_module(&module.name).ok().flatten()
+                        } else {
+                            None
+                        }
+                    })
+            } else {
+                None
+            };
+
+            // Translate this module
+            let translation_start = Instant::now();
+            let translation_model_sel = select_model(provider_config, difficulty, "translation")?;
+            let relevant_patterns = pattern_store.find_relevant(&module.source, 3);
+
+            // Inject accumulated context as a prefix hint in the C source
+            let augmented_c = if context_note.is_empty() {
+                module.source.clone()
+            } else {
+                format!(
+                    "/* MIGRATION CONTEXT: The following Rust code has already been migrated from earlier modules in this file. \
+                 Use compatible types and function signatures.\n{}\n*/\n\n{}",
+                    accumulated_rust_context, module.source
+                )
+            };
+
+            // P19: Use warm-start seed if available, skip translation
+            if let Some(seed_code) = warm_seed {
+                info!(module = %mod_name, "P19: using warm-start seed, skipping translation");
+                mod_unit.rust_output = Some(seed_code);
+                mod_unit.state = MigrationState::Refined;
+                // Save warm-seeded code as module artifact
+                if let Some(store) = artifacts
+                    && let Some(rust) = &mod_unit.rust_output
+                {
+                    let _ = store.save_translation_module(&module.name, rust);
+                }
+                // Skip to validation (after the translation block)
+            } else {
+                // P12: Sub-chunk large modules — if a module exceeds MEDIUM_FILE_LOC, use
+                // chunked translation instead of single-pass to avoid LLM context overflow.
+                let module_lines = module.line_count;
+                let rust_code = if module_lines > MEDIUM_FILE_LOC {
+                    let chunk_target = if module_lines > MASSIVE_FILE_LOC {
+                        600
+                    } else if module_lines > VERY_LARGE_FILE_LOC {
+                        500
+                    } else {
+                        400
+                    };
+                    info!(
+                        module = %mod_name,
+                        lines = module_lines,
+                        chunk_target,
+                        "P12: module exceeds {} LOC, using chunked translation",
+                        MEDIUM_FILE_LOC
+                    );
+
+                    let chunks = noricum_tools::ast::chunk_c_source(&augmented_c, chunk_target);
+                    match noricum_agents::translation::translate_chunked(
+                        client,
+                        &translation_model_sel.model,
+                        &chunks,
+                        None, // No c2rust context for modular
+                        analysis,
+                        &relevant_patterns,
+                        config.translation_temperature,
+                    )
+                    .await
+                    {
+                        Ok(chunked_result) => {
+                            total_metrics.llm_calls += chunked_result.chunks.len() as u32;
+                            for chunk in &chunked_result.chunks {
+                                total_metrics.input_tokens +=
+                                    noricum_agents::estimate_tokens(&chunk.rust_source);
+                            }
+                            total_metrics.translation_ms +=
+                                translation_start.elapsed().as_millis() as u64;
+                            chunked_result.combined
+                        }
+                        Err(e) => {
+                            warn!(module = %mod_name, error = %e, "chunked module translation failed");
+                            all_validated = false;
+                            continue;
+                        }
                     }
-                    total_metrics.translation_ms +=
-                        translation_start.elapsed().as_millis() as u64;
-                    chunked_result.combined
-                }
-                Err(e) => {
-                    warn!(module = %mod_name, error = %e, "chunked module translation failed");
-                    all_validated = false;
-                    continue;
-                }
-            }
-        } else {
-            // Small module — single-pass translation
-            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                } else {
+                    // Small module — single-pass translation
+                    match noricum_agents::translation::translate_function_with_patterns_and_temperature(
                 client,
                 &translation_model_sel.model,
                 &augmented_c,
@@ -1897,14 +1904,14 @@ async fn migrate_file_modular(
                     continue;
                 }
             }
-        };
+                };
 
-        // Substance check
-        let is_stub = !has_substance(&rust_code, &module.source);
-        let rust_code = if is_stub {
-            warn!(module = %mod_name, "P6: module translation produced stubs, re-translating");
-            total_metrics.llm_calls += 1;
-            match noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                // Substance check
+                let is_stub = !has_substance(&rust_code, &module.source);
+                let rust_code = if is_stub {
+                    warn!(module = %mod_name, "P6: module translation produced stubs, re-translating");
+                    total_metrics.llm_calls += 1;
+                    match noricum_agents::translation::translate_function_with_patterns_and_temperature(
                 client,
                 &translation_model_sel.model,
                 &augmented_c,
@@ -1918,65 +1925,69 @@ async fn migrate_file_modular(
                 Ok(retranslated) if has_substance(&retranslated, &module.source) => retranslated,
                 _ => rust_code,
             }
-        } else {
-            rust_code
-        };
+                } else {
+                    rust_code
+                };
 
-        mod_unit.rust_output = Some(rust_code);
-        mod_unit.state = MigrationState::Refined;
+                mod_unit.rust_output = Some(rust_code);
+                mod_unit.state = MigrationState::Refined;
 
-        // Save per-module artifact
-        if let Some(store) = artifacts
-            && let Some(rust) = &mod_unit.rust_output
-        {
-            let _ = store.save_translation_module(&module.name, rust);
-        }
-        } // end of else (non-warm-start translation path)
+                // Save per-module artifact
+                if let Some(store) = artifacts
+                    && let Some(rust) = &mod_unit.rust_output
+                {
+                    let _ = store.save_translation_module(&module.name, rust);
+                }
+            } // end of else (non-warm-start translation path)
 
-        // Validate this module (compile check + scoring, no diff test for modules)
-        let mod_validation =
-            noricum_validation::validate_with_threshold(&mod_unit, config.min_idiomatic_score)?;
-        noricum_validation::apply_validation_with_max(
-            &mut mod_unit,
-            &mod_validation,
-            config.max_repair_iterations,
-        );
-
-        info!(
-            module = %mod_name,
-            compiles = mod_validation.compiles,
-            score = mod_validation.idiomatic_score,
-            unsafe_count = mod_validation.unsafe_count,
-            "module validation"
-        );
-
-        // P13: Re-translate if error count is catastrophically high
-        let mut mod_validation = mod_validation;
-        if !mod_validation.passed && should_retranslate(mod_validation.compiler_errors.len(), 0) {
-            let error_count = mod_validation.compiler_errors.len();
-            warn!(
-                module = %mod_name,
-                errors = error_count,
-                "P13: error count exceeds threshold, re-translating with higher temperature"
+            // Validate this module (compile check + scoring, no diff test for modules)
+            let mod_validation =
+                noricum_validation::validate_with_threshold(&mod_unit, config.min_idiomatic_score)?;
+            noricum_validation::apply_validation_with_max(
+                &mut mod_unit,
+                &mod_validation,
+                config.max_repair_iterations,
             );
-            if let Some(store) = artifacts
-                && let Some(rust) = &mod_unit.rust_output {
+
+            info!(
+                module = %mod_name,
+                compiles = mod_validation.compiles,
+                score = mod_validation.idiomatic_score,
+                unsafe_count = mod_validation.unsafe_count,
+                "module validation"
+            );
+
+            // P13: Re-translate if error count is catastrophically high
+            let mut mod_validation = mod_validation;
+            if !mod_validation.passed && should_retranslate(mod_validation.compiler_errors.len(), 0)
+            {
+                let error_count = mod_validation.compiler_errors.len();
+                warn!(
+                    module = %mod_name,
+                    errors = error_count,
+                    "P13: error count exceeds threshold, re-translating with higher temperature"
+                );
+                if let Some(store) = artifacts
+                    && let Some(rust) = &mod_unit.rust_output
+                {
                     let _ = store.save_repair_rejected(0, rust);
                 }
-            // Re-translate with temperature 0.5
-            let retranslated = noricum_agents::translation::translate_function_with_patterns_and_temperature(
-                client,
-                &translation_model_sel.model,
-                &augmented_c,
-                None,
-                analysis,
-                &relevant_patterns,
-                Some(0.5),
-            )
-            .await;
-            total_metrics.llm_calls += 1;
-            if let Ok(new_code) = retranslated
-                && has_substance(&new_code, &module.source) {
+                // Re-translate with temperature 0.5
+                let retranslated =
+                    noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                        client,
+                        &translation_model_sel.model,
+                        &augmented_c,
+                        None,
+                        analysis,
+                        &relevant_patterns,
+                        Some(0.5),
+                    )
+                    .await;
+                total_metrics.llm_calls += 1;
+                if let Ok(new_code) = retranslated
+                    && has_substance(&new_code, &module.source)
+                {
                     mod_unit.rust_output = Some(new_code);
                     // Re-validate
                     let re_val = noricum_validation::validate_with_threshold(
@@ -1997,176 +2008,180 @@ async fn migrate_file_modular(
                     );
                     mod_validation = re_val;
                 }
-        }
+            }
 
-        // Repair loop for this module (each module is small enough for effective repair)
-        if !mod_validation.passed {
-            let repair_start = Instant::now();
-            let repair_model_sel = select_repair_model(provider_config, difficulty)?;
-            let max_iters = config.max_repair_iterations.min(5);
-            let baseline_unsafe = mod_validation.unsafe_count;
-            let mut best_version = mod_unit.rust_output.clone();
-            let mut best_score = mod_validation.idiomatic_score;
-            let mut best_compiles = mod_validation.compiles;
+            // Repair loop for this module (each module is small enough for effective repair)
+            if !mod_validation.passed {
+                let repair_start = Instant::now();
+                let repair_model_sel = select_repair_model(provider_config, difficulty)?;
+                let max_iters = config.max_repair_iterations.min(5);
+                let baseline_unsafe = mod_validation.unsafe_count;
+                let mut best_version = mod_unit.rust_output.clone();
+                let mut best_score = mod_validation.idiomatic_score;
+                let mut best_compiles = mod_validation.compiles;
 
-            for iter in 1..=max_iters {
-                let current_rust = mod_unit.rust_output.as_deref().unwrap_or("");
-                let errors = &mod_unit.last_errors;
-                let diff_feedback = &mod_unit.last_diff_feedback;
+                for iter in 1..=max_iters {
+                    let current_rust = mod_unit.rust_output.as_deref().unwrap_or("");
+                    let errors = &mod_unit.last_errors;
+                    let diff_feedback = &mod_unit.last_diff_feedback;
 
-                let idiomatic_hints = if errors.is_empty()
-                    && diff_feedback.is_empty()
-                    && mod_unit.idiomatic_score.unwrap_or(0) < config.min_idiomatic_score
-                {
-                    noricum_validation::generate_idiomatic_hints(current_rust)
-                } else {
-                    Vec::new()
-                };
-                let effective_feedback = if idiomatic_hints.is_empty() {
-                    diff_feedback.clone()
-                } else {
-                    idiomatic_hints
-                };
+                    let idiomatic_hints = if errors.is_empty()
+                        && diff_feedback.is_empty()
+                        && mod_unit.idiomatic_score.unwrap_or(0) < config.min_idiomatic_score
+                    {
+                        noricum_validation::generate_idiomatic_hints(current_rust)
+                    } else {
+                        Vec::new()
+                    };
+                    let effective_feedback = if idiomatic_hints.is_empty() {
+                        diff_feedback.clone()
+                    } else {
+                        idiomatic_hints
+                    };
 
-                if errors.is_empty()
-                    && effective_feedback.is_empty()
-                    && mod_unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
-                {
-                    break;
-                }
-
-                let repaired = match noricum_agents::repair::repair_function_full(
-                    client,
-                    &repair_model_sel.model,
-                    current_rust,
-                    errors,
-                    &effective_feedback,
-                    &module.source,
-                    iter,
-                    max_iters,
-                    config.repair_base_temperature,
-                    None, // No abbreviation needed — modules are small
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(module = %mod_name, iter, error = %e, "module repair failed");
+                    if errors.is_empty()
+                        && effective_feedback.is_empty()
+                        && mod_unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
+                    {
                         break;
                     }
-                };
 
-                total_metrics.llm_calls += 1;
-                total_metrics.input_tokens += noricum_agents::estimate_tokens(current_rust);
-                total_metrics.output_tokens += noricum_agents::estimate_tokens(&repaired);
+                    let repaired = match noricum_agents::repair::repair_function_full(
+                        client,
+                        &repair_model_sel.model,
+                        current_rust,
+                        errors,
+                        &effective_feedback,
+                        &module.source,
+                        iter,
+                        max_iters,
+                        config.repair_base_temperature,
+                        None, // No abbreviation needed — modules are small
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(module = %mod_name, iter, error = %e, "module repair failed");
+                            break;
+                        }
+                    };
 
-                // P0: Quality floor
-                let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
-                if repaired_unsafe > baseline_unsafe {
-                    warn!(module = %mod_name, iter, "P0: repair rejected — unsafe increased");
-                    if let Some(store) = artifacts {
-                        let _ = store.save_repair_rejected(iter, &repaired);
+                    total_metrics.llm_calls += 1;
+                    total_metrics.input_tokens += noricum_agents::estimate_tokens(current_rust);
+                    total_metrics.output_tokens += noricum_agents::estimate_tokens(&repaired);
+
+                    // P0: Quality floor
+                    let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
+                    if repaired_unsafe > baseline_unsafe {
+                        warn!(module = %mod_name, iter, "P0: repair rejected — unsafe increased");
+                        if let Some(store) = artifacts {
+                            let _ = store.save_repair_rejected(iter, &repaired);
+                        }
+                        continue;
                     }
-                    continue;
+
+                    mod_unit.rust_output = Some(repaired);
+                    mod_unit.state = MigrationState::Repairing(iter);
+
+                    let re_validation = noricum_validation::validate_with_threshold(
+                        &mod_unit,
+                        config.min_idiomatic_score,
+                    )?;
+                    noricum_validation::apply_validation_with_max(
+                        &mut mod_unit,
+                        &re_validation,
+                        max_iters,
+                    );
+
+                    info!(
+                        module = %mod_name,
+                        iter,
+                        compiles = re_validation.compiles,
+                        score = re_validation.idiomatic_score,
+                        "module repair iteration"
+                    );
+
+                    // Save repair artifact for this module
+                    if let Some(store) = artifacts
+                        && let Some(rust) = &mod_unit.rust_output
+                    {
+                        let val_json = format!(
+                            "{{\"module\":\"{}\",\"iter\":{},\"compiles\":{},\"score\":{},\"unsafe\":{}}}",
+                            module.name,
+                            iter,
+                            re_validation.compiles,
+                            re_validation.idiomatic_score,
+                            re_validation.unsafe_count
+                        );
+                        let _ = store.save_repair_iteration(iter, rust, &val_json);
+                    }
+
+                    // P1: Best-version tracking
+                    if re_validation.unsafe_count <= baseline_unsafe
+                        && (re_validation.idiomatic_score > best_score
+                            || (re_validation.compiles && !best_compiles))
+                    {
+                        best_version = mod_unit.rust_output.clone();
+                        best_score = re_validation.idiomatic_score;
+                        best_compiles = re_validation.compiles;
+                    }
+
+                    if re_validation.passed {
+                        info!(module = %mod_name, "module repair succeeded");
+                        break;
+                    }
+
+                    check_budget(&effective_config, &total_metrics)?;
                 }
 
-                mod_unit.rust_output = Some(repaired);
-                mod_unit.state = MigrationState::Repairing(iter);
+                total_metrics.repair_ms += repair_start.elapsed().as_millis() as u64;
 
-                let re_validation = noricum_validation::validate_with_threshold(
-                    &mod_unit,
-                    config.min_idiomatic_score,
-                )?;
-                noricum_validation::apply_validation_with_max(
-                    &mut mod_unit,
-                    &re_validation,
-                    max_iters,
-                );
+                // Use best version if repair didn't fully pass
+                if mod_unit.state != MigrationState::Validated {
+                    if let Some(best) = best_version {
+                        mod_unit.rust_output = Some(best);
+                        mod_unit.idiomatic_score = Some(best_score);
+                    }
+                    if !best_compiles {
+                        all_validated = false;
+                        warn!(module = %mod_name, "module did not reach Validated state");
+                    }
+                }
+            }
+
+            // Accumulate this module's output for context
+            if let Some(ref rust_output) = mod_unit.rust_output {
+                let sigs = noricum_tools::ast::extract_rust_signatures(rust_output);
+                if !sigs.is_empty() {
+                    accumulated_rust_context.push_str(&sigs.join("\n"));
+                    accumulated_rust_context.push('\n');
+                }
+
+                module_outputs.push((module.name.clone(), rust_output.clone()));
+                any_succeeded = true;
+                best_combined_score += mod_unit.idiomatic_score.unwrap_or(0);
+
+                // Track per-module result for v2 manifest
+                module_artifacts.push(crate::artifacts::ModuleArtifact {
+                    name: module.name.clone(),
+                    state: format!("{:?}", mod_unit.state),
+                    score: mod_unit.idiomatic_score.unwrap_or(0) as f64,
+                    compiles: mod_unit.state == MigrationState::Validated
+                        || mod_unit.last_errors.is_empty(),
+                    unsafe_count: mod_unit.unsafe_count.unwrap_or(0),
+                });
 
                 info!(
                     module = %mod_name,
-                    iter,
-                    compiles = re_validation.compiles,
-                    score = re_validation.idiomatic_score,
-                    "module repair iteration"
+                    state = ?mod_unit.state,
+                    score = mod_unit.idiomatic_score.unwrap_or(0),
+                    "module migration complete"
                 );
-
-                // Save repair artifact for this module
-                if let Some(store) = artifacts
-                    && let Some(rust) = &mod_unit.rust_output
-                {
-                    let val_json = format!(
-                        "{{\"module\":\"{}\",\"iter\":{},\"compiles\":{},\"score\":{},\"unsafe\":{}}}",
-                        module.name, iter, re_validation.compiles, re_validation.idiomatic_score, re_validation.unsafe_count
-                    );
-                    let _ = store.save_repair_iteration(iter, rust, &val_json);
-                }
-
-                // P1: Best-version tracking
-                if re_validation.unsafe_count <= baseline_unsafe
-                    && (re_validation.idiomatic_score > best_score
-                        || (re_validation.compiles && !best_compiles))
-                {
-                    best_version = mod_unit.rust_output.clone();
-                    best_score = re_validation.idiomatic_score;
-                    best_compiles = re_validation.compiles;
-                }
-
-                if re_validation.passed {
-                    info!(module = %mod_name, "module repair succeeded");
-                    break;
-                }
-
-                check_budget(&effective_config, &total_metrics)?;
             }
 
-            total_metrics.repair_ms += repair_start.elapsed().as_millis() as u64;
-
-            // Use best version if repair didn't fully pass
-            if mod_unit.state != MigrationState::Validated {
-                if let Some(best) = best_version {
-                    mod_unit.rust_output = Some(best);
-                    mod_unit.idiomatic_score = Some(best_score);
-                }
-                if !best_compiles {
-                    all_validated = false;
-                    warn!(module = %mod_name, "module did not reach Validated state");
-                }
-            }
-        }
-
-        // Accumulate this module's output for context
-        if let Some(ref rust_output) = mod_unit.rust_output {
-            let sigs = noricum_tools::ast::extract_rust_signatures(rust_output);
-            if !sigs.is_empty() {
-                accumulated_rust_context.push_str(&sigs.join("\n"));
-                accumulated_rust_context.push('\n');
-            }
-
-            module_outputs.push((module.name.clone(), rust_output.clone()));
-            any_succeeded = true;
-            best_combined_score += mod_unit.idiomatic_score.unwrap_or(0);
-
-            // Track per-module result for v2 manifest
-            module_artifacts.push(crate::artifacts::ModuleArtifact {
-                name: module.name.clone(),
-                state: format!("{:?}", mod_unit.state),
-                score: mod_unit.idiomatic_score.unwrap_or(0) as f64,
-                compiles: mod_unit.state == MigrationState::Validated
-                    || mod_unit.last_errors.is_empty(),
-                unsafe_count: mod_unit.unsafe_count.unwrap_or(0),
-            });
-
-            info!(
-                module = %mod_name,
-                state = ?mod_unit.state,
-                score = mod_unit.idiomatic_score.unwrap_or(0),
-                "module migration complete"
-            );
-        }
-
-        check_budget(&effective_config, &total_metrics)?;
-    } // end for mod_idx in wave
+            check_budget(&effective_config, &total_metrics)?;
+        } // end for mod_idx in wave
     } // end for wave in waves
 
     if !any_succeeded {

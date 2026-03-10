@@ -333,7 +333,11 @@ pub fn select_repair_model(
     difficulty: Difficulty,
 ) -> Result<ModelSelection, crate::AgentError> {
     if config.primary_provider == "deepseek" && config.deepseek_api_key.is_some() {
-        info!(provider = "deepseek", model = models::DEEPSEEK_CHAT, "P16: using fast model for repair");
+        info!(
+            provider = "deepseek",
+            model = models::DEEPSEEK_CHAT,
+            "P16: using fast model for repair"
+        );
         return Ok(ModelSelection {
             provider: ProviderKind::DeepSeek,
             model: models::DEEPSEEK_CHAT.to_string(),
