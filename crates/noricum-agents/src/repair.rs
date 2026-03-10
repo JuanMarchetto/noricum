@@ -179,15 +179,41 @@ pub async fn repair_function_full(
         diff_count, max_tokens, "sending repair prompt to LLM"
     );
 
-    let response = client
-        .run_prompt(
-            model,
-            REPAIR_PREAMBLE,
-            temperature,
-            max_tokens,
-            &user_message,
-        )
-        .await?;
+    let response = {
+        let retry_delays: &[u64] = &[5, 15, 30];
+        let mut last_err = None;
+        let mut result = None;
+        for attempt in 0..=retry_delays.len() {
+            match client
+                .run_prompt(
+                    model,
+                    REPAIR_PREAMBLE,
+                    temperature,
+                    max_tokens,
+                    &user_message,
+                )
+                .await
+            {
+                Ok(r) => {
+                    result = Some(r);
+                    break;
+                }
+                Err(e) => {
+                    if attempt < retry_delays.len()
+                        && crate::translation::is_transient_error(&e)
+                    {
+                        let delay = retry_delays[attempt];
+                        warn!(attempt = attempt + 1, delay_s = delay, error = %e, "P14: transient error, retrying repair");
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        result.ok_or_else(|| last_err.unwrap())?
+    };
 
     debug!(response_len = response.len(), "received repair response");
 

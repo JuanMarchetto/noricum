@@ -5,11 +5,27 @@
 /// When relevant patterns are available from the PatternStore, they are included
 /// as few-shot examples in the prompt.
 use noricum_ir::pattern_store::MigrationPattern;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::AgentError;
 use crate::analysis::AnalysisResult;
 use crate::providers::LlmClient;
+
+/// Retry delays in seconds for transient API errors: [5, 15, 30]
+const RETRY_DELAYS: &[u64] = &[5, 15, 30];
+
+/// Check if an error is transient (retryable).
+pub fn is_transient_error(err: &AgentError) -> bool {
+    let msg = format!("{err:?}");
+    msg.contains("502")
+        || msg.contains("503")
+        || msg.contains("504")
+        || msg.contains("Bad Gateway")
+        || msg.contains("Service Unavailable")
+        || msg.contains("error decoding response body")
+        || msg.contains("connection reset")
+        || msg.contains("timed out")
+}
 
 /// Output from a single chunk's translation.
 #[derive(Debug, Clone)]
@@ -154,9 +170,32 @@ pub async fn translate_function_with_patterns_and_temperature(
 
     debug!(max_tokens, "sending translation prompt to LLM");
 
-    let response = client
-        .run_prompt(model, TRANSLATION_PREAMBLE, temp, max_tokens, &user_message)
-        .await?;
+    let response = {
+        let mut last_err = None;
+        let mut result = None;
+        for attempt in 0..=RETRY_DELAYS.len() {
+            match client
+                .run_prompt(model, TRANSLATION_PREAMBLE, temp, max_tokens, &user_message)
+                .await
+            {
+                Ok(r) => {
+                    result = Some(r);
+                    break;
+                }
+                Err(e) => {
+                    if attempt < RETRY_DELAYS.len() && is_transient_error(&e) {
+                        let delay = RETRY_DELAYS[attempt];
+                        warn!(attempt = attempt + 1, delay_s = delay, error = %e, "P14: transient error, retrying translation");
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        result.ok_or_else(|| last_err.unwrap())?
+    };
 
     debug!(
         response_len = response.len(),
@@ -1060,5 +1099,18 @@ pub unsafe extern \"C\" fn add(a: i32, b: i32) -> i32 {\n\
         assert!(result.contains("use std::io;"));
         assert!(result.contains("fn a()"));
         assert!(result.contains("fn b()"));
+    }
+
+    #[test]
+    fn test_is_transient_error() {
+        let e502 = AgentError::Provider("HttpError: 502 Bad Gateway".to_string());
+        assert!(is_transient_error(&e502));
+        let decode =
+            AgentError::Provider("Http client error: error decoding response body".to_string());
+        assert!(is_transient_error(&decode));
+        let auth = AgentError::Provider("401 Unauthorized".to_string());
+        assert!(!is_transient_error(&auth));
+        let budget = AgentError::Provider("token budget exceeded".to_string());
+        assert!(!is_transient_error(&budget));
     }
 }
