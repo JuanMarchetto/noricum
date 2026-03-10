@@ -1157,7 +1157,9 @@ pub async fn migrate_file(
     // P1: Track best version (highest score with acceptable unsafe count).
     if !validation.passed {
         let repair_start = Instant::now();
-        let repair_model_sel = select_model(&provider_config, difficulty, "repair")?;
+        // P29: Use fast repair model for assembly repair (deepseek-chat instead of R1).
+        // R1 is ~5 min/iter on assembly vs ~1 min for deepseek-chat.
+        let repair_model_sel = select_repair_model(&provider_config, difficulty)?;
 
         if max_iters < config.max_repair_iterations {
             info!(
@@ -1274,7 +1276,11 @@ pub async fn migrate_file(
             // --- Re-translate on stall ---
             // If repair is stuck for STALL_THRESHOLD iterations, try a fresh translation
             // with higher temperature instead of continuing to patch the same broken code.
-            if stall_count >= STALL_THRESHOLD && !retranslated_on_stall {
+            // P28: Skip retranslation for assembled outputs (>MODULAR_FILE_LOC lines).
+            // Assembly repair combines 17+ modules (~6000 LOC) but retranslation can only
+            // generate ~1000 LOC, destroying most of the assembled content.
+            let is_assembly = c_lines > MODULAR_FILE_LOC;
+            if stall_count >= STALL_THRESHOLD && !retranslated_on_stall && !is_assembly {
                 retranslated_on_stall = true;
                 warn!(
                     function = %name,
