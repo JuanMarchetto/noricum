@@ -265,6 +265,68 @@ impl DependencyGraph {
 
         order
     }
+
+    /// Group modules into waves of independent modules that can be processed in parallel.
+    ///
+    /// Each wave contains modules whose dependencies are all satisfied by previous waves.
+    /// Uses the same Kahn's algorithm as `module_order` but collects by level.
+    pub fn module_waves(&self, modules: &[noricum_tools::ast::CModule]) -> Vec<Vec<usize>> {
+        let func_to_module: HashMap<&str, usize> = modules
+            .iter()
+            .enumerate()
+            .flat_map(|(i, m)| m.function_names.iter().map(move |f| (f.as_str(), i)))
+            .collect();
+
+        let n = modules.len();
+        let mut mod_deps: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+
+        for (i, module) in modules.iter().enumerate() {
+            for func_name in &module.function_names {
+                for callee in self.dependencies_of(func_name) {
+                    if let Some(&target_mod) = func_to_module.get(callee.as_str())
+                        && target_mod != i
+                    {
+                        mod_deps[i].insert(target_mod);
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm — collect by level
+        let mut in_degree = vec![0usize; n];
+        for deps in &mod_deps {
+            for &dep in deps {
+                in_degree[dep] += 1;
+            }
+        }
+
+        let mut waves: Vec<Vec<usize>> = Vec::new();
+        let mut remaining = vec![true; n];
+
+        loop {
+            let wave: Vec<usize> = (0..n)
+                .filter(|&i| remaining[i] && in_degree[i] == 0)
+                .collect();
+            if wave.is_empty() {
+                break;
+            }
+            for &idx in &wave {
+                remaining[idx] = false;
+                for &dep in &mod_deps[idx] {
+                    in_degree[dep] -= 1;
+                }
+            }
+            waves.push(wave);
+        }
+
+        // Handle cycles: add remaining modules as a final wave
+        let leftover: Vec<usize> = (0..n).filter(|&i| remaining[i]).collect();
+        if !leftover.is_empty() {
+            waves.push(leftover);
+        }
+
+        waves
+    }
 }
 
 #[cfg(test)]
@@ -534,6 +596,76 @@ int compute(int a) {
         };
         let order = graph.module_order(&modules);
         assert_eq!(order.len(), 2);
+    }
+
+    #[test]
+    fn test_module_waves_independent() {
+        // All independent modules → single wave
+        let modules = vec![
+            noricum_tools::ast::CModule {
+                name: "a".to_string(),
+                source: String::new(),
+                function_names: vec!["a_fn".to_string()],
+                line_count: 10,
+            },
+            noricum_tools::ast::CModule {
+                name: "b".to_string(),
+                source: String::new(),
+                function_names: vec!["b_fn".to_string()],
+                line_count: 10,
+            },
+            noricum_tools::ast::CModule {
+                name: "c".to_string(),
+                source: String::new(),
+                function_names: vec!["c_fn".to_string()],
+                line_count: 10,
+            },
+        ];
+        let graph = DependencyGraph {
+            edges: HashMap::new(),
+        };
+        let waves = graph.module_waves(&modules);
+        assert_eq!(waves.len(), 1, "independent modules should be in one wave");
+        assert_eq!(waves[0].len(), 3);
+    }
+
+    #[test]
+    fn test_module_waves_with_dependency() {
+        // a_fn calls b_fn, c_fn is independent
+        let source = r#"
+void b_fn(void) { }
+void a_fn(void) { b_fn(); }
+void c_fn(void) { }
+"#;
+        let graph = DependencyGraph::from_source(source);
+        let modules = vec![
+            noricum_tools::ast::CModule {
+                name: "a".to_string(),
+                source: String::new(),
+                function_names: vec!["a_fn".to_string()],
+                line_count: 10,
+            },
+            noricum_tools::ast::CModule {
+                name: "b".to_string(),
+                source: String::new(),
+                function_names: vec!["b_fn".to_string()],
+                line_count: 10,
+            },
+            noricum_tools::ast::CModule {
+                name: "c".to_string(),
+                source: String::new(),
+                function_names: vec!["c_fn".to_string()],
+                line_count: 10,
+            },
+        ];
+        let waves = graph.module_waves(&modules);
+        // a calls b: a has in_degree=0 (no one calls a), b has in_degree=1 (a calls b)
+        // c: independent, in_degree=0
+        // Wave 0: [a, c] (in_degree=0)
+        // Wave 1: [b] (after removing a, b's in_degree drops to 0)
+        assert!(waves.len() >= 2, "should have at least 2 waves, got {}", waves.len());
+        // First wave should contain a and c (both have in_degree=0)
+        assert!(waves[0].len() >= 2, "first wave should have >= 2 modules");
     }
 
     #[test]

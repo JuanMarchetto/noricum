@@ -228,7 +228,7 @@ impl ArtifactStore {
     /// Save a v2 manifest with per-module metadata (`manifest.json`).
     pub fn save_manifest_v2(&self, manifest: &ArtifactManifest) -> io::Result<()> {
         let json = serde_json::to_string_pretty(manifest)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         self.write_artifact(Path::new("manifest.json"), &json)
     }
 
@@ -237,7 +237,7 @@ impl ArtifactStore {
         let path = self.run_dir.join("manifest.json");
         let content = fs::read_to_string(&path)?;
         serde_json::from_str(&content)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 
     /// Load a previously saved module translation (`03-translation/module-{name}.rs`).
