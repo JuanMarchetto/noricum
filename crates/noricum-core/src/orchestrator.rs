@@ -33,6 +33,15 @@ const MODULAR_FILE_LOC: usize = 2000;
 use crate::CoreError;
 use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit};
 
+/// Number of compilation errors above which we re-translate instead of repairing.
+const RETRANSLATE_ERROR_THRESHOLD: usize = 100;
+
+/// Returns true if the module should be re-translated instead of repaired.
+/// Criteria: more than 100 compilation errors AND hasn't been re-translated yet.
+fn should_retranslate(error_count: usize, retranslation_attempts: u32) -> bool {
+    error_count > RETRANSLATE_ERROR_THRESHOLD && retranslation_attempts == 0
+}
+
 /// Compute adaptive LLM call budget based on module count.
 /// Formula: modules * 7 + 10 (1 translate + up to 5 repairs + 1 buffer per module, plus 10 global).
 /// If user specified a limit, use max(adaptive, user_limit).
@@ -1808,6 +1817,57 @@ async fn migrate_file_modular(
             "module validation"
         );
 
+        // P13: Re-translate if error count is catastrophically high
+        let mut mod_validation = mod_validation;
+        if !mod_validation.passed && should_retranslate(mod_validation.compiler_errors.len(), 0) {
+            let error_count = mod_validation.compiler_errors.len();
+            warn!(
+                module = %mod_name,
+                errors = error_count,
+                "P13: error count exceeds threshold, re-translating with higher temperature"
+            );
+            if let Some(store) = artifacts {
+                if let Some(rust) = &mod_unit.rust_output {
+                    let _ = store.save_repair_rejected(0, rust);
+                }
+            }
+            // Re-translate with temperature 0.5
+            let retranslated = noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                client,
+                &translation_model_sel.model,
+                &augmented_c,
+                None,
+                analysis,
+                &relevant_patterns,
+                Some(0.5),
+            )
+            .await;
+            total_metrics.llm_calls += 1;
+            if let Ok(new_code) = retranslated {
+                if has_substance(&new_code, &module.source) {
+                    mod_unit.rust_output = Some(new_code);
+                    // Re-validate
+                    let re_val = noricum_validation::validate_with_threshold(
+                        &mod_unit,
+                        config.min_idiomatic_score,
+                    )?;
+                    noricum_validation::apply_validation_with_max(
+                        &mut mod_unit,
+                        &re_val,
+                        config.max_repair_iterations,
+                    );
+                    info!(
+                        module = %mod_name,
+                        compiles = re_val.compiles,
+                        score = re_val.idiomatic_score,
+                        errors = re_val.compiler_errors.len(),
+                        "P13: re-translation validation"
+                    );
+                    mod_validation = re_val;
+                }
+            }
+        }
+
         // Repair loop for this module (each module is small enough for effective repair)
         if !mod_validation.passed {
             let repair_start = Instant::now();
@@ -2493,6 +2553,16 @@ fn main() {
         let modules: Vec<(String, String)> = vec![];
         let result = assemble_module_outputs(&modules);
         assert_eq!(result.trim(), "");
+    }
+
+    #[test]
+    fn test_should_retranslate_on_high_errors() {
+        assert!(should_retranslate(150, 0)); // 150 errors, no retranslation yet
+        assert!(should_retranslate(101, 0));
+        assert!(!should_retranslate(100, 0)); // exactly 100 = try repair
+        assert!(!should_retranslate(50, 0)); // low errors = repair
+        assert!(!should_retranslate(200, 1)); // already retranslated once = don't loop
+        assert!(!should_retranslate(200, 2)); // max 1 retranslation
     }
 
     #[test]
