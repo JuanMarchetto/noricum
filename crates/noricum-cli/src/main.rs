@@ -180,6 +180,9 @@ struct MigrateOpts {
     /// Warm-start from previous artifact directory (skip validated modules, seed repairs)
     #[arg(long)]
     warm_start: Option<PathBuf>,
+    /// Maximum allowed unsafe blocks in output (default: 0 = use translation baseline)
+    #[arg(long)]
+    max_unsafe: Option<u32>,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -224,6 +227,7 @@ async fn main() {
                 artifacts_dir: opts.artifacts_dir,
                 module_target_loc: opts.module_target_loc,
                 warm_start: opts.warm_start,
+                max_unsafe: opts.max_unsafe,
             })
             .await
         }

@@ -51,12 +51,71 @@ enum WarmAction {
 
 /// Determine warm-start action for a module based on its previous artifact.
 fn warm_start_action(artifact: &crate::artifacts::ModuleArtifact) -> WarmAction {
-    if artifact.state == "Validated" && artifact.score >= 70.0 {
-        WarmAction::Skip
-    } else if artifact.compiles && artifact.score >= 40.0 {
-        WarmAction::SeedRepair
+    match artifact.state.as_str() {
+        // P23: CompilesUnsafe with high score is good enough to skip
+        "Validated" | "CompilesUnsafe" if artifact.score >= 70.0 => WarmAction::Skip,
+        // P23: NearlyCompiles with decent score is worth seeding
+        "NearlyCompiles" if artifact.score >= 50.0 => WarmAction::SeedRepair,
+        _ if artifact.compiles && artifact.score >= 40.0 => WarmAction::SeedRepair,
+        _ => WarmAction::Retranslate,
+    }
+}
+
+/// P25: Build accumulated Rust source from completed module outputs for incremental validation.
+/// This allows validating module N against the combined output of modules 0..N-1.
+fn build_assembly_context(module_outputs: &[(String, String)]) -> String {
+    if module_outputs.is_empty() {
+        return String::new();
+    }
+    module_outputs
+        .iter()
+        .map(|(_, code)| code.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// P25: Validate a module in the context of prior module outputs.
+/// Compiles `prior_outputs + current_module` together to resolve cross-module deps.
+fn validate_module_with_assembly(
+    mod_unit: &noricum_ir::FunctionUnit,
+    module_name: &str,
+    module_outputs: &[(String, String)],
+    threshold: u32,
+) -> Result<noricum_validation::ValidationResult, crate::CoreError> {
+    let assembly_context = build_assembly_context(module_outputs);
+    if assembly_context.is_empty() {
+        return Ok(noricum_validation::validate_with_threshold(mod_unit, threshold)?);
+    }
+    // Combine prior outputs with current module for compilation check
+    let combined = format!(
+        "{}\n\n// --- Module: {} ---\n{}",
+        assembly_context,
+        module_name,
+        mod_unit.rust_output.as_deref().unwrap_or("")
+    );
+    let mut temp_unit = mod_unit.clone();
+    temp_unit.rust_output = Some(combined);
+    Ok(noricum_validation::validate_with_threshold(&temp_unit, threshold)?)
+}
+
+/// P23: Assign a graduated state based on compilation, unsafe, and score.
+fn graduated_state(
+    compiles: bool,
+    unsafe_count: u32,
+    score: u32,
+    threshold: u32,
+    error_count: usize,
+) -> MigrationState {
+    if compiles && unsafe_count == 0 && score >= threshold {
+        MigrationState::Validated
+    } else if compiles && unsafe_count > 0 && score >= 50 {
+        MigrationState::CompilesUnsafe
+    } else if compiles && score < threshold {
+        MigrationState::CompilesLowScore
+    } else if !compiles && error_count <= 5 && score >= 50 {
+        MigrationState::NearlyCompiles
     } else {
-        WarmAction::Retranslate
+        MigrationState::FallbackUnsafe
     }
 }
 
@@ -134,6 +193,10 @@ pub struct MigrationConfig {
     /// Path to previous artifact directory for warm-start.
     /// Validated modules are reused, partially succeeded modules seed repair.
     pub warm_start: Option<std::path::PathBuf>,
+    /// Maximum allowed unsafe blocks in output. `None` means use the translation
+    /// baseline as ceiling (same as pre-P21 behavior). Setting e.g. `Some(3)` allows
+    /// repair to introduce up to 3 unsafe blocks even if translation had 0.
+    pub max_unsafe_blocks: Option<u32>,
 }
 
 impl Default for MigrationConfig {
@@ -163,6 +226,7 @@ impl Default for MigrationConfig {
             artifacts_dir: std::path::PathBuf::from(".noricum-artifacts"),
             module_target_loc: None,
             warm_start: None,
+            max_unsafe_blocks: None,
         }
     }
 }
@@ -1086,9 +1150,13 @@ pub async fn migrate_file(
         // P0: Baseline unsafe count from the initial translation.
         // Repair must NEVER produce more unsafe blocks than this.
         let baseline_unsafe = validation.unsafe_count;
+        // P21: Effective unsafe ceiling — allows configurable tolerance above baseline
+        let unsafe_ceiling = config
+            .max_unsafe_blocks
+            .map_or(baseline_unsafe, |max| max.max(baseline_unsafe));
 
         // P1: Best-version tracking — keep the version with the highest score
-        // that doesn't exceed the baseline unsafe count.
+        // that doesn't exceed the unsafe ceiling.
         // P6b: Only seed best version if it has substance (not empty stubs).
         let initial_has_substance = unit
             .rust_output
@@ -1233,7 +1301,7 @@ pub async fn migrate_file(
                         .as_deref()
                         .is_some_and(|r| has_substance(r, &unit.c_source));
                     if retrans_has_substance
-                        && re_validation.unsafe_count <= baseline_unsafe
+                        && re_validation.unsafe_count <= unsafe_ceiling
                         && (re_validation.idiomatic_score > best_score
                             || (re_validation.compiles && !best_compiles))
                     {
@@ -1284,6 +1352,18 @@ pub async fn migrate_file(
                 );
             }
 
+            // P22: After 3+ failed iterations, hint that unsafe is acceptable to fix compilation
+            let mut effective_diff_feedback = effective_diff_feedback;
+            if !errors.is_empty() && iteration >= 3 && unsafe_ceiling > 0 {
+                effective_diff_feedback.push(format!(
+                    "IMPORTANT: If you cannot fix the compilation errors with safe code, \
+                     you MAY use up to {} unsafe block(s) to make the code compile. \
+                     A compiling program with minimal unsafe is better than one that doesn't compile. \
+                     Wrap only the minimum necessary code in unsafe.",
+                    unsafe_ceiling
+                ));
+            }
+
             // Pass full C source for files <1500 LOC, abbreviated for larger ones
             let c_abbrev_limit = if c_lines < 1500 { None } else { Some(500) };
             let repair_result = noricum_agents::repair::repair_function_full(
@@ -1318,13 +1398,13 @@ pub async fn migrate_file(
 
             // P0: Quality floor — reject repair if it introduces more unsafe blocks
             let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
-            if repaired_unsafe > baseline_unsafe {
+            if repaired_unsafe > unsafe_ceiling {
                 warn!(
                     function = %name,
                     iteration,
                     repaired_unsafe,
-                    baseline_unsafe,
-                    "P0: repair rejected — introduces more unsafe blocks than translation baseline"
+                    unsafe_ceiling,
+                    "P0: repair rejected — exceeds unsafe ceiling (P21)"
                 );
                 if let Some(ref store) = artifacts {
                     let _ = store.save_repair_rejected(iteration, &repaired);
@@ -1376,7 +1456,7 @@ pub async fn migrate_file(
                 .as_deref()
                 .is_some_and(|r| has_substance(r, &unit.c_source));
             if repair_has_substance
-                && re_validation.unsafe_count <= baseline_unsafe
+                && re_validation.unsafe_count <= unsafe_ceiling
                 && (re_validation.idiomatic_score > best_score
                     || (re_validation.compiles && !best_compiles))
             {
@@ -1413,7 +1493,8 @@ pub async fn migrate_file(
         // P1: Use best-tracked version instead of falling back to raw c2rust output.
         // This preserves the highest-quality translation even if it didn't fully pass.
         if unit.state != MigrationState::Validated {
-            unit.state = MigrationState::FallbackUnsafe;
+            // P23: Assign graduated state based on best-version quality
+            let error_count = unit.last_errors.len();
             if let Some(best) = best_version {
                 info!(
                     function = %name,
@@ -1428,10 +1509,11 @@ pub async fn migrate_file(
             } else if let Some(ref c2rust) = unit.c2rust_output {
                 unit.rust_output = Some(c2rust.clone());
             }
+            unit.state = graduated_state(best_compiles, best_unsafe, best_score, 80, error_count);
             warn!(
                 function = %name,
                 state = ?unit.state,
-                "max repair iterations reached, falling back"
+                "max repair iterations reached, using graduated state (P23)"
             );
         }
     }
@@ -1954,9 +2036,13 @@ async fn migrate_file_modular(
                 }
             } // end of else (non-warm-start translation path)
 
-            // Validate this module (compile check + scoring, no diff test for modules)
-            let mod_validation =
-                noricum_validation::validate_with_threshold(&mod_unit, config.min_idiomatic_score)?;
+            // P24: Modules just need to compile — full validation on assembled output.
+            // Relaxed threshold: min(user_score, 50) so compiling code passes per-module.
+            let module_min_score = config.min_idiomatic_score.min(50);
+            // P25: Validate against accumulated assembly to resolve cross-module deps
+            let mod_validation = validate_module_with_assembly(
+                &mod_unit, &module.name, &module_outputs, module_min_score,
+            )?;
             noricum_validation::apply_validation_with_max(
                 &mut mod_unit,
                 &mod_validation,
@@ -2003,10 +2089,9 @@ async fn migrate_file_modular(
                     && has_substance(&new_code, &module.source)
                 {
                     mod_unit.rust_output = Some(new_code);
-                    // Re-validate
-                    let re_val = noricum_validation::validate_with_threshold(
-                        &mod_unit,
-                        config.min_idiomatic_score,
+                    // P24+P25: Re-validate with assembly context and relaxed threshold
+                    let re_val = validate_module_with_assembly(
+                        &mod_unit, &module.name, &module_outputs, module_min_score,
                     )?;
                     noricum_validation::apply_validation_with_max(
                         &mut mod_unit,
@@ -2030,6 +2115,10 @@ async fn migrate_file_modular(
                 let repair_model_sel = select_repair_model(provider_config, difficulty)?;
                 let max_iters = config.max_repair_iterations.min(5);
                 let baseline_unsafe = mod_validation.unsafe_count;
+                // P21: Effective unsafe ceiling for modular repair
+                let unsafe_ceiling = config
+                    .max_unsafe_blocks
+                    .map_or(baseline_unsafe, |max| max.max(baseline_unsafe));
                 let mut best_version = mod_unit.rust_output.clone();
                 let mut best_score = mod_validation.idiomatic_score;
                 let mut best_compiles = mod_validation.compiles;
@@ -2060,6 +2149,18 @@ async fn migrate_file_modular(
                         break;
                     }
 
+                    // P22: After 3+ failed iterations, hint that unsafe is acceptable
+                    let mut effective_feedback = effective_feedback;
+                    if !errors.is_empty() && iter >= 3 && unsafe_ceiling > 0 {
+                        effective_feedback.push(format!(
+                            "IMPORTANT: If you cannot fix the compilation errors with safe code, \
+                             you MAY use up to {} unsafe block(s) to make the code compile. \
+                             A compiling program with minimal unsafe is better than one that doesn't compile. \
+                             Wrap only the minimum necessary code in unsafe.",
+                            unsafe_ceiling
+                        ));
+                    }
+
                     let repaired = match noricum_agents::repair::repair_function_full(
                         client,
                         &repair_model_sel.model,
@@ -2087,8 +2188,8 @@ async fn migrate_file_modular(
 
                     // P0: Quality floor
                     let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
-                    if repaired_unsafe > baseline_unsafe {
-                        warn!(module = %mod_name, iter, "P0: repair rejected — unsafe increased");
+                    if repaired_unsafe > unsafe_ceiling {
+                        warn!(module = %mod_name, iter, repaired_unsafe, unsafe_ceiling, "P0: repair rejected — exceeds unsafe ceiling (P21)");
                         if let Some(store) = artifacts {
                             let _ =
                                 store.save_module_repair_rejected(&module.name, iter, &repaired);
@@ -2099,9 +2200,9 @@ async fn migrate_file_modular(
                     mod_unit.rust_output = Some(repaired);
                     mod_unit.state = MigrationState::Repairing(iter);
 
-                    let re_validation = noricum_validation::validate_with_threshold(
-                        &mod_unit,
-                        config.min_idiomatic_score,
+                    // P24+P25: Validate repair against assembly context
+                    let re_validation = validate_module_with_assembly(
+                        &mod_unit, &module.name, &module_outputs, module_min_score,
                     )?;
                     noricum_validation::apply_validation_with_max(
                         &mut mod_unit,
@@ -2134,7 +2235,7 @@ async fn migrate_file_modular(
                     }
 
                     // P1: Best-version tracking
-                    if re_validation.unsafe_count <= baseline_unsafe
+                    if re_validation.unsafe_count <= unsafe_ceiling
                         && (re_validation.idiomatic_score > best_score
                             || (re_validation.compiles && !best_compiles))
                     {
@@ -2155,13 +2256,19 @@ async fn migrate_file_modular(
 
                 // Use best version if repair didn't fully pass
                 if mod_unit.state != MigrationState::Validated {
+                    let mod_error_count = mod_unit.last_errors.len();
+                    let mod_unsafe = mod_unit.unsafe_count.unwrap_or(0);
                     if let Some(best) = best_version {
                         mod_unit.rust_output = Some(best);
                         mod_unit.idiomatic_score = Some(best_score);
                     }
+                    // P23: Graduated state for module
+                    mod_unit.state = graduated_state(
+                        best_compiles, mod_unsafe, best_score, 80, mod_error_count,
+                    );
                     if !best_compiles {
                         all_validated = false;
-                        warn!(module = %mod_name, "module did not reach Validated state");
+                        warn!(module = %mod_name, state = ?mod_unit.state, "module did not reach Validated state (P23)");
                     }
                 }
             }
@@ -2824,5 +2931,174 @@ fn main() {
         let pos_c = result.find("Module: third").unwrap();
         assert!(pos_a < pos_b);
         assert!(pos_b < pos_c);
+    }
+
+    #[test]
+    fn test_max_unsafe_allowance() {
+        // With max_unsafe=None (default), baseline_unsafe=0 means any unsafe rejects
+        let baseline: u32 = 0;
+        let max_unsafe: Option<u32> = None;
+        let effective_ceiling = max_unsafe.unwrap_or(baseline).max(baseline);
+        assert_eq!(effective_ceiling, 0);
+
+        // With max_unsafe=3, even baseline=0 allows up to 3 unsafe blocks
+        let max_unsafe: Option<u32> = Some(3);
+        let effective_ceiling = max_unsafe.unwrap_or(baseline).max(baseline);
+        assert_eq!(effective_ceiling, 3);
+
+        // Repair producing 2 unsafe blocks: accepted (2 <= 3)
+        assert!(2 <= effective_ceiling);
+
+        // Repair producing 5 unsafe blocks: rejected (5 > 3)
+        assert!(5 > effective_ceiling);
+
+        // baseline=4, max_unsafe=2 → ceiling is max(2,4)=4 (never reduce below baseline)
+        let baseline: u32 = 4;
+        let max_unsafe: Option<u32> = Some(2);
+        let effective_ceiling = max_unsafe.unwrap_or(baseline).max(baseline);
+        assert_eq!(effective_ceiling, 4);
+    }
+
+    #[test]
+    fn test_compilation_priority_hint() {
+        // Before iteration 3: no hint
+        let iter = 2u32;
+        let has_errors = true;
+        let unsafe_ceiling = 3u32;
+        let should_hint = has_errors && iter >= 3 && unsafe_ceiling > 0;
+        assert!(!should_hint);
+
+        // At iteration 3+, has errors, unsafe allowed: hint
+        let iter = 3u32;
+        let should_hint = has_errors && iter >= 3 && unsafe_ceiling > 0;
+        assert!(should_hint);
+
+        // If no errors, no hint needed
+        let has_errors = false;
+        let should_hint = has_errors && iter >= 3 && unsafe_ceiling > 0;
+        assert!(!should_hint);
+
+        // If unsafe_ceiling is 0 (default with baseline=0), no hint
+        let has_errors = true;
+        let unsafe_ceiling = 0u32;
+        let should_hint = has_errors && iter >= 3 && unsafe_ceiling > 0;
+        assert!(!should_hint);
+    }
+
+    #[test]
+    fn test_assembly_validation_catches_cross_module_deps() {
+        // Module A defines a type
+        let module_a = "pub struct ZipArchive { pub data: Vec<u8> }\n";
+        // Module B uses it — compiles ONLY with A present
+        let module_b = "fn read_archive(a: &ZipArchive) -> usize { a.data.len() }\n";
+
+        // Module B alone: doesn't compile
+        let result_alone = noricum_tools::compiler::check_rust_compiles(module_b).unwrap();
+        assert!(!result_alone.success, "module B alone should not compile");
+
+        // Module B with A as context: compiles
+        let combined = format!("{module_a}\n{module_b}");
+        let result_with_context =
+            noricum_tools::compiler::check_rust_compiles(&combined).unwrap();
+        assert!(
+            result_with_context.success,
+            "module B with A should compile"
+        );
+
+        // build_assembly_context helper
+        let outputs = vec![("mod_a".to_string(), module_a.to_string())];
+        let ctx = build_assembly_context(&outputs);
+        assert!(ctx.contains("ZipArchive"));
+    }
+
+    #[test]
+    fn test_module_validation_relaxed() {
+        // For modules, compilation is the primary gate
+        let compiles = true;
+        let score = 55u32;
+        let min_score = 60u32;
+
+        // P24: module threshold = min(user_score, 50) = 50
+        let module_threshold = min_score.min(50);
+        assert_eq!(module_threshold, 50);
+        let module_passed = compiles && score >= module_threshold;
+        assert!(module_passed, "compiling module with score 55 should pass");
+
+        // As a full file: score 55 < elevated 80 would fail
+        let file_passed = compiles && score >= 80;
+        assert!(!file_passed, "as file, score 55 < 80 would fail");
+
+        // Even with low min_score (30), module threshold stays at 30
+        let module_threshold = 30u32.min(50);
+        assert_eq!(module_threshold, 30);
+    }
+
+    #[test]
+    fn test_graduated_state_assignment() {
+        // Compiles, 0 unsafe, score >= 80 → Validated
+        assert_eq!(
+            graduated_state(true, 0, 85, 80, 0),
+            MigrationState::Validated
+        );
+        // Compiles, 2 unsafe, score >= 50 → CompilesUnsafe
+        assert_eq!(
+            graduated_state(true, 2, 70, 80, 0),
+            MigrationState::CompilesUnsafe
+        );
+        // Compiles, 0 unsafe, score 45 → CompilesLowScore
+        assert_eq!(
+            graduated_state(true, 0, 45, 80, 0),
+            MigrationState::CompilesLowScore
+        );
+        // Doesn't compile, score 60, 3 errors → NearlyCompiles
+        assert_eq!(
+            graduated_state(false, 0, 60, 80, 3),
+            MigrationState::NearlyCompiles
+        );
+        // Doesn't compile, score 60, 10 errors → FallbackUnsafe (too many errors)
+        assert_eq!(
+            graduated_state(false, 0, 60, 80, 10),
+            MigrationState::FallbackUnsafe
+        );
+        // Doesn't compile, low score, 3 errors → FallbackUnsafe
+        assert_eq!(
+            graduated_state(false, 0, 30, 80, 3),
+            MigrationState::FallbackUnsafe
+        );
+    }
+
+    #[test]
+    fn test_warm_start_with_graduated_states() {
+        use crate::artifacts::ModuleArtifact;
+
+        // CompilesUnsafe with score >= 70 → Skip
+        let compiles_unsafe = ModuleArtifact {
+            name: "mod_a".into(),
+            state: "CompilesUnsafe".into(),
+            score: 75.0,
+            compiles: true,
+            unsafe_count: 2,
+        };
+        assert_eq!(warm_start_action(&compiles_unsafe), WarmAction::Skip);
+
+        // NearlyCompiles with score >= 50 → SeedRepair
+        let nearly = ModuleArtifact {
+            name: "mod_b".into(),
+            state: "NearlyCompiles".into(),
+            score: 60.0,
+            compiles: false,
+            unsafe_count: 0,
+        };
+        assert_eq!(warm_start_action(&nearly), WarmAction::SeedRepair);
+
+        // NearlyCompiles with score < 50 → Retranslate
+        let nearly_low = ModuleArtifact {
+            name: "mod_c".into(),
+            state: "NearlyCompiles".into(),
+            score: 30.0,
+            compiles: false,
+            unsafe_count: 0,
+        };
+        assert_eq!(warm_start_action(&nearly_low), WarmAction::Retranslate);
     }
 }

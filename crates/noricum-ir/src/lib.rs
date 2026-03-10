@@ -26,6 +26,12 @@ pub enum MigrationState {
     Validated,
     /// In repair loop (iteration count)
     Repairing(u32),
+    /// Compiles with unsafe blocks, score >= 50 (P23)
+    CompilesUnsafe,
+    /// Compiles but below score threshold (P23)
+    CompilesLowScore,
+    /// Doesn't compile but very close (<=5 errors, score >= 50) (P23)
+    NearlyCompiles,
     /// Gave up on safe Rust, keeping unsafe as fallback
     FallbackUnsafe,
 }
@@ -197,7 +203,15 @@ impl MigrationProject {
         let failed = self
             .units
             .iter()
-            .filter(|u| u.state == MigrationState::FallbackUnsafe)
+            .filter(|u| {
+                matches!(
+                    u.state,
+                    MigrationState::FallbackUnsafe
+                        | MigrationState::CompilesUnsafe
+                        | MigrationState::CompilesLowScore
+                        | MigrationState::NearlyCompiles
+                )
+            })
             .count();
         let in_progress = total - validated - failed;
 
