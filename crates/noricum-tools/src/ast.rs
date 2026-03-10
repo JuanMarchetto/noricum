@@ -817,7 +817,7 @@ pub struct CModule {
 /// Groups functions by common prefix (e.g., `hash_` functions go in "hash" module,
 /// `parse_` functions go in "parse" module). Functions without a common prefix
 /// go into a "misc" module. Shared context (types, includes) is prepended to each.
-pub fn split_into_modules(c_source: &str) -> Vec<CModule> {
+pub fn split_into_modules(c_source: &str, target_module_loc: Option<usize>) -> Vec<CModule> {
     let functions = extract_c_functions(c_source);
     if functions.len() < 4 {
         // Too few functions to split into modules
@@ -864,8 +864,9 @@ pub fn split_into_modules(c_source: &str) -> Vec<CModule> {
         groups.entry(prefix).or_default().push(func);
     }
 
-    // Maximum LOC per module before sub-splitting
-    const MAX_MODULE_LOC: usize = 1000;
+    // Maximum LOC per module before sub-splitting (configurable, default 1000)
+    let max_module_loc = target_module_loc.unwrap_or(1000);
+    let sub_target = (max_module_loc * 3) / 5; // 60% of max, e.g. 600 for 1000, 300 for 500
 
     // Merge small groups (< 2 functions) into "misc"
     let mut modules = Vec::new();
@@ -881,10 +882,10 @@ pub fn split_into_modules(c_source: &str) -> Vec<CModule> {
                 .map(|f| c_source[f.start_byte..f.end_byte].lines().count())
                 .sum();
 
-            if total_func_lines > MAX_MODULE_LOC {
-                // Sub-split large prefix groups into ~600 LOC sub-modules
+            if total_func_lines > max_module_loc {
+                // Sub-split large prefix groups into smaller sub-modules
                 let sub_modules =
-                    sub_split_function_group(prefix, funcs, c_source, &shared_context, 600);
+                    sub_split_function_group(prefix, funcs, c_source, &shared_context, sub_target);
                 modules.extend(sub_modules);
             } else {
                 let mut source = shared_context.clone();
@@ -914,9 +915,9 @@ pub fn split_into_modules(c_source: &str) -> Vec<CModule> {
             .map(|f| c_source[f.start_byte..f.end_byte].lines().count())
             .sum();
 
-        if total_misc_lines > MAX_MODULE_LOC {
+        if total_misc_lines > max_module_loc {
             let sub_modules =
-                sub_split_function_group("misc", &misc_funcs, c_source, &shared_context, 600);
+                sub_split_function_group("misc", &misc_funcs, c_source, &shared_context, sub_target);
             modules.extend(sub_modules);
         } else {
             let mut source = shared_context;
@@ -1494,7 +1495,7 @@ void parse_expr(const char *s) { }
 void parse_stmt(const char *s) { }
 int main() { return 0; }
 ";
-        let modules = split_into_modules(source);
+        let modules = split_into_modules(source, None);
         let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
         assert!(
             names.contains(&"hash"),
@@ -1517,7 +1518,7 @@ int main() { return 0; }
 int add(int a, int b) { return a + b; }
 int sub(int a, int b) { return a - b; }
 ";
-        let modules = split_into_modules(source);
+        let modules = split_into_modules(source, None);
         assert_eq!(
             modules.len(),
             1,
@@ -1536,7 +1537,7 @@ void parse_stmt(const char *s) { }
 void unique_function(int x) { }
 int main() { return 0; }
 ";
-        let modules = split_into_modules(source);
+        let modules = split_into_modules(source, None);
         // unique_function and main should be in misc
         let misc = modules.iter().find(|m| m.name == "misc");
         assert!(misc.is_some(), "should have misc module for singletons");
@@ -1549,7 +1550,7 @@ int main() { return 0; }
         if source.is_empty() {
             return; // skip if fixture not available
         }
-        let modules = split_into_modules(&source);
+        let modules = split_into_modules(&source, None);
         // miniz_zip.c is ~4895 LOC — should produce multiple modules
         assert!(
             modules.len() > 1,
@@ -1591,7 +1592,7 @@ int main() { return 0; }
             source.push_str(&format!("int zip_func_{i}(int x) {{ return x + {i}; }}\n"));
         }
 
-        let modules = split_into_modules(&source);
+        let modules = split_into_modules(&source, None);
         let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
 
         // The "mz" group (30 * 50 = ~1500 LOC) should be sub-split into multiple sub-modules
@@ -1620,6 +1621,28 @@ int main() { return 0; }
             zip_modules.len(),
             1,
             "zip group should remain as single module"
+        );
+    }
+
+    #[test]
+    fn test_split_into_modules_custom_target() {
+        // Create a source with many functions to test custom target sizing
+        let mut source = String::new();
+        for i in 0..20 {
+            source.push_str(&format!(
+                "void mz_func{}(int x) {{\n{}}}\n\n",
+                i,
+                "    int a = 1;\n".repeat(40) // ~40 lines each = 800 total
+            ));
+        }
+        // With target 200 lines, should produce more modules than default 1000
+        let modules_small = split_into_modules(&source, Some(200));
+        let modules_default = split_into_modules(&source, None);
+        assert!(
+            modules_small.len() > modules_default.len(),
+            "smaller target should produce more modules: {} vs {}",
+            modules_small.len(),
+            modules_default.len()
         );
     }
 

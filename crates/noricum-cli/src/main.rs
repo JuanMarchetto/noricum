@@ -174,6 +174,9 @@ struct MigrateOpts {
     /// Directory for intermediate artifact persistence (default: .noricum-artifacts)
     #[arg(long, default_value = ".noricum-artifacts")]
     artifacts_dir: PathBuf,
+    /// Target LOC per module for modular migration (default: 1000, use 500 for DeepSeek R1)
+    #[arg(long)]
+    module_target_loc: Option<usize>,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -216,6 +219,7 @@ async fn main() {
                 skip_c2rust: opts.skip_c2rust,
                 provider: opts.provider,
                 artifacts_dir: opts.artifacts_dir,
+                module_target_loc: opts.module_target_loc,
             })
             .await
         }
