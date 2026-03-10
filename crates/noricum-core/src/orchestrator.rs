@@ -104,6 +104,9 @@ pub struct MigrationConfig {
     /// Directory for pipeline artifact persistence. Every intermediate output
     /// is saved here for debugging and recovery. Defaults to `.noricum-artifacts/`.
     pub artifacts_dir: std::path::PathBuf,
+    /// Target maximum LOC per sub-module in modular migration.
+    /// Default: None (uses 1000). Use 500 for DeepSeek R1.
+    pub module_target_loc: Option<usize>,
 }
 
 impl Default for MigrationConfig {
@@ -131,6 +134,7 @@ impl Default for MigrationConfig {
             max_llm_calls: Some(50),
             skip_c2rust: false,
             artifacts_dir: std::path::PathBuf::from(".noricum-artifacts"),
+            module_target_loc: None,
         }
     }
 }
@@ -1612,7 +1616,7 @@ async fn migrate_file_modular(
     difficulty: noricum_ir::Difficulty,
     artifacts: &Option<crate::artifacts::ArtifactStore>,
 ) -> Result<ModularResult, CoreError> {
-    let modules = noricum_tools::ast::split_into_modules(c_source);
+    let modules = noricum_tools::ast::split_into_modules(c_source, config.module_target_loc);
 
     if modules.len() <= 1 {
         info!(function = %name, "modular split produced single module, falling back to chunked");
