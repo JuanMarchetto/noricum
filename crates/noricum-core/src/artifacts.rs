@@ -220,6 +220,81 @@ impl ArtifactStore {
     pub fn save_manifest(&self, manifest_json: &str) -> io::Result<()> {
         self.write_artifact(Path::new("manifest.json"), manifest_json)
     }
+
+    // ------------------------------------------------------------------
+    // V2 manifest + load methods (P20)
+    // ------------------------------------------------------------------
+
+    /// Save a v2 manifest with per-module metadata (`manifest.json`).
+    pub fn save_manifest_v2(&self, manifest: &ArtifactManifest) -> io::Result<()> {
+        let json = serde_json::to_string_pretty(manifest)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        self.write_artifact(Path::new("manifest.json"), &json)
+    }
+
+    /// Load the v2 manifest from this run's artifact directory.
+    pub fn load_manifest(&self) -> io::Result<ArtifactManifest> {
+        let path = self.run_dir.join("manifest.json");
+        let content = fs::read_to_string(&path)?;
+        serde_json::from_str(&content)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    /// Load a previously saved module translation (`03-translation/module-{name}.rs`).
+    /// Returns `None` if the module file does not exist.
+    pub fn load_translation_module(&self, module_name: &str) -> io::Result<Option<String>> {
+        let safe = sanitize_name(module_name);
+        let path = self.run_dir.join(format!("03-translation/module-{safe}.rs"));
+        if path.exists() {
+            Ok(Some(fs::read_to_string(&path)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Open an existing artifact directory (for warm-start).
+    ///
+    /// Unlike [`new`](Self::new) this does **not** create any directories —
+    /// it simply wraps an existing path for reading.
+    pub fn from_existing(path: &Path) -> io::Result<Self> {
+        if !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("artifact directory not found: {}", path.display()),
+            ));
+        }
+        Ok(Self {
+            run_dir: path.to_path_buf(),
+        })
+    }
+}
+
+/// V2 artifact manifest with per-module metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactManifest {
+    /// Manifest format version.
+    pub version: u32,
+    /// Name of the migrated function/file.
+    pub function_name: String,
+    /// ISO-ish timestamp when this run completed.
+    pub timestamp: String,
+    /// Per-module results.
+    pub modules: Vec<ModuleArtifact>,
+}
+
+/// Per-module metadata saved in the v2 manifest.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModuleArtifact {
+    /// Module name (e.g. "if", "mz_p1").
+    pub name: String,
+    /// Final state: "Validated", "FallbackUnsafe", "Skipped".
+    pub state: String,
+    /// Idiomatic score (0-100).
+    pub score: f64,
+    /// Whether the final output compiles.
+    pub compiles: bool,
+    /// Number of unsafe blocks in the final output.
+    pub unsafe_count: u32,
 }
 
 #[cfg(test)]
@@ -426,5 +501,55 @@ mod tests {
         store.save_manifest("{\"version\":1}").unwrap();
         let content = fs::read_to_string(store.run_dir().join("manifest.json")).unwrap();
         assert_eq!(content, "{\"version\":1}");
+    }
+
+    #[test]
+    fn test_artifact_manifest_roundtrip() {
+        let (store, _tmp) = make_store();
+
+        let manifest = ArtifactManifest {
+            version: 2,
+            function_name: "test_func".to_string(),
+            timestamp: "20260310-120000".to_string(),
+            modules: vec![ModuleArtifact {
+                name: "if".to_string(),
+                state: "Validated".to_string(),
+                score: 100.0,
+                compiles: true,
+                unsafe_count: 0,
+            }],
+        };
+        store.save_manifest_v2(&manifest).unwrap();
+        let loaded = store.load_manifest().unwrap();
+        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.modules.len(), 1);
+        assert_eq!(loaded.modules[0].name, "if");
+        assert_eq!(loaded.modules[0].score, 100.0);
+    }
+
+    #[test]
+    fn test_load_module_translation() {
+        let (store, _tmp) = make_store();
+        store
+            .save_translation_module("mz_p1", "fn hello() {}")
+            .unwrap();
+        let code = store.load_translation_module("mz_p1").unwrap();
+        assert_eq!(code, Some("fn hello() {}".to_string()));
+        let missing = store.load_translation_module("mz_p99").unwrap();
+        assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn test_from_existing() {
+        let (store, _tmp) = make_store();
+        let run_dir = store.run_dir().to_path_buf();
+        let loaded = ArtifactStore::from_existing(&run_dir).unwrap();
+        assert_eq!(loaded.run_dir(), run_dir);
+    }
+
+    #[test]
+    fn test_from_existing_missing() {
+        let result = ArtifactStore::from_existing(Path::new("/nonexistent/path"));
+        assert!(result.is_err());
     }
 }

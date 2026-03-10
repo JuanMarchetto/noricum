@@ -1648,6 +1648,7 @@ async fn migrate_file_modular(
     let mut all_validated = true;
     let mut any_succeeded = false;
     let mut best_combined_score: u32 = 0;
+    let mut module_artifacts: Vec<crate::artifacts::ModuleArtifact> = Vec::new();
 
     let pattern_store = PatternStore::load_seed_patterns();
 
@@ -2020,6 +2021,16 @@ async fn migrate_file_modular(
             any_succeeded = true;
             best_combined_score += mod_unit.idiomatic_score.unwrap_or(0);
 
+            // Track per-module result for v2 manifest
+            module_artifacts.push(crate::artifacts::ModuleArtifact {
+                name: module.name.clone(),
+                state: format!("{:?}", mod_unit.state),
+                score: mod_unit.idiomatic_score.unwrap_or(0) as f64,
+                compiles: mod_unit.state == MigrationState::Validated
+                    || mod_unit.last_errors.is_empty(),
+                unsafe_count: mod_unit.unsafe_count.unwrap_or(0),
+            });
+
             info!(
                 module = %mod_name,
                 state = ?mod_unit.state,
@@ -2043,6 +2054,17 @@ async fn migrate_file_modular(
     } else {
         0
     };
+
+    // P20: Save v2 manifest with per-module results
+    if let Some(store) = artifacts {
+        let manifest = crate::artifacts::ArtifactManifest {
+            version: 2,
+            function_name: name.to_string(),
+            timestamp: chrono::Local::now().format("%Y%m%d-%H%M%S").to_string(),
+            modules: module_artifacts,
+        };
+        let _ = store.save_manifest_v2(&manifest);
+    }
 
     info!(
         function = %name,
