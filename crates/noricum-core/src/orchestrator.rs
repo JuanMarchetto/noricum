@@ -33,6 +33,17 @@ const MODULAR_FILE_LOC: usize = 2000;
 use crate::CoreError;
 use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit};
 
+/// Compute adaptive LLM call budget based on module count.
+/// Formula: modules * 7 + 10 (1 translate + up to 5 repairs + 1 buffer per module, plus 10 global).
+/// If user specified a limit, use max(adaptive, user_limit).
+pub fn compute_adaptive_budget(module_count: usize, user_limit: Option<u32>) -> u32 {
+    let adaptive = (module_count as u32) * 7 + 10;
+    match user_limit {
+        Some(limit) => adaptive.max(limit),
+        None => adaptive,
+    }
+}
+
 /// Configuration for the async LLM-based migration pipeline.
 #[derive(Debug, Clone)]
 pub struct MigrationConfig {
@@ -1604,13 +1615,19 @@ async fn migrate_file_modular(
     let order = dep_graph.module_order(&modules);
 
     let module_names: Vec<&str> = order.iter().map(|&i| modules[i].name.as_str()).collect();
+
+    // P15: Adaptive LLM call budget — scale with module count
+    let effective_max_calls = compute_adaptive_budget(modules.len(), config.max_llm_calls);
     info!(
         function = %name,
         module_count = modules.len(),
         order = ?module_names,
+        budget = effective_max_calls,
         "P3: modular migration — {} modules in dependency order",
         modules.len()
     );
+    let mut effective_config = config.clone();
+    effective_config.max_llm_calls = Some(effective_max_calls);
 
     let mut module_outputs: Vec<(String, String)> = Vec::new(); // (module_name, rust_code)
     let mut accumulated_rust_context = String::new();
@@ -1909,7 +1926,7 @@ async fn migrate_file_modular(
                     break;
                 }
 
-                check_budget(config, &total_metrics)?;
+                check_budget(&effective_config, &total_metrics)?;
             }
 
             total_metrics.repair_ms += repair_start.elapsed().as_millis() as u64;
@@ -1947,7 +1964,7 @@ async fn migrate_file_modular(
             );
         }
 
-        check_budget(config, &total_metrics)?;
+        check_budget(&effective_config, &total_metrics)?;
     }
 
     if !any_succeeded {
@@ -2476,6 +2493,18 @@ fn main() {
         let modules: Vec<(String, String)> = vec![];
         let result = assemble_module_outputs(&modules);
         assert_eq!(result.trim(), "");
+    }
+
+    #[test]
+    fn test_adaptive_llm_budget() {
+        // 10 modules: each needs ~1 translate + up to 5 repairs + 1 analysis = 7 per module + 10 buffer
+        assert_eq!(compute_adaptive_budget(10, Some(50)), 80);
+        // 2 modules: 2*7 + 10 = 24, but user set 50 → use max(24, 50) = 50
+        assert_eq!(compute_adaptive_budget(2, Some(50)), 50);
+        // No user limit: use adaptive
+        assert_eq!(compute_adaptive_budget(10, None), 80);
+        // 1 module: 1*7 + 10 = 17
+        assert_eq!(compute_adaptive_budget(1, None), 17);
     }
 
     #[test]
