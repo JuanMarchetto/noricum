@@ -4,6 +4,7 @@ pub mod dependency;
 pub mod incremental;
 pub mod orchestrator;
 pub mod router;
+pub mod surgical_repair;
 
 pub use orchestrator::MigrationConfig;
 
