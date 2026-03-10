@@ -916,8 +916,13 @@ pub fn split_into_modules(c_source: &str, target_module_loc: Option<usize>) -> V
             .sum();
 
         if total_misc_lines > max_module_loc {
-            let sub_modules =
-                sub_split_function_group("misc", &misc_funcs, c_source, &shared_context, sub_target);
+            let sub_modules = sub_split_function_group(
+                "misc",
+                &misc_funcs,
+                c_source,
+                &shared_context,
+                sub_target,
+            );
             modules.extend(sub_modules);
         } else {
             let mut source = shared_context;
@@ -1560,7 +1565,14 @@ int main() { return 0; }
         // Build debug info for assertion messages
         let debug_info: Vec<String> = modules
             .iter()
-            .map(|m| format!("{}: {} LOC, {} fns", m.name, m.line_count, m.function_names.len()))
+            .map(|m| {
+                format!(
+                    "{}: {} LOC, {} fns",
+                    m.name,
+                    m.line_count,
+                    m.function_names.len()
+                )
+            })
             .collect();
         // No single module should exceed ~2500 LOC (shared context + functions)
         for m in &modules {
@@ -1596,7 +1608,10 @@ int main() { return 0; }
         let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
 
         // The "mz" group (30 * 50 = ~1500 LOC) should be sub-split into multiple sub-modules
-        let mz_modules: Vec<_> = modules.iter().filter(|m| m.name.starts_with("mz")).collect();
+        let mz_modules: Vec<_> = modules
+            .iter()
+            .filter(|m| m.name.starts_with("mz"))
+            .collect();
         assert!(
             mz_modules.len() > 1,
             "mz group should be sub-split into multiple modules, got {} module(s): {:?}",
@@ -1616,7 +1631,10 @@ int main() { return 0; }
         }
 
         // "zip" group should remain as a single module (small enough)
-        let zip_modules: Vec<_> = modules.iter().filter(|m| m.name.starts_with("zip")).collect();
+        let zip_modules: Vec<_> = modules
+            .iter()
+            .filter(|m| m.name.starts_with("zip"))
+            .collect();
         assert_eq!(
             zip_modules.len(),
             1,

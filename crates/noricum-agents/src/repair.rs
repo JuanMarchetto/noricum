@@ -199,9 +199,7 @@ pub async fn repair_function_full(
                     break;
                 }
                 Err(e) => {
-                    if attempt < retry_delays.len()
-                        && crate::translation::is_transient_error(&e)
-                    {
+                    if attempt < retry_delays.len() && crate::translation::is_transient_error(&e) {
                         let delay = retry_delays[attempt];
                         warn!(attempt = attempt + 1, delay_s = delay, error = %e, "P14: transient error, retrying repair");
                         tokio::time::sleep(std::time::Duration::from_secs(delay)).await;

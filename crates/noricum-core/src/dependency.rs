@@ -663,7 +663,11 @@ void c_fn(void) { }
         // c: independent, in_degree=0
         // Wave 0: [a, c] (in_degree=0)
         // Wave 1: [b] (after removing a, b's in_degree drops to 0)
-        assert!(waves.len() >= 2, "should have at least 2 waves, got {}", waves.len());
+        assert!(
+            waves.len() >= 2,
+            "should have at least 2 waves, got {}",
+            waves.len()
+        );
         // First wave should contain a and c (both have in_degree=0)
         assert!(waves[0].len() >= 2, "first wave should have >= 2 modules");
     }

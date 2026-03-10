@@ -227,8 +227,7 @@ impl ArtifactStore {
 
     /// Save a v2 manifest with per-module metadata (`manifest.json`).
     pub fn save_manifest_v2(&self, manifest: &ArtifactManifest) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(manifest)
-            .map_err(io::Error::other)?;
+        let json = serde_json::to_string_pretty(manifest).map_err(io::Error::other)?;
         self.write_artifact(Path::new("manifest.json"), &json)
     }
 
@@ -244,7 +243,9 @@ impl ArtifactStore {
     /// Returns `None` if the module file does not exist.
     pub fn load_translation_module(&self, module_name: &str) -> io::Result<Option<String>> {
         let safe = sanitize_name(module_name);
-        let path = self.run_dir.join(format!("03-translation/module-{safe}.rs"));
+        let path = self
+            .run_dir
+            .join(format!("03-translation/module-{safe}.rs"));
         if path.exists() {
             Ok(Some(fs::read_to_string(&path)?))
         } else {
