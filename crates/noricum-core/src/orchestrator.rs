@@ -2770,6 +2770,87 @@ enum ModularResult {
     FallbackToChunked,
 }
 
+/// Merge `use` statements that share the same base path.
+///
+/// Groups `use std::io::{Read, Write};` and `use std::io::{self, Seek};`
+/// into `use std::io::{self, Read, Seek, Write};`.
+/// Simple `use foo::Bar;` are kept as-is (deduplicated by exact match).
+fn merge_use_statements(uses: Vec<String>) -> Vec<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let brace_re =
+        regex::Regex::new(r"^use\s+(?P<path>[^{;]+)::\{(?P<items>[^}]+)\};$")
+            .expect("static regex");
+    let simple_re =
+        regex::Regex::new(r"^use\s+(?P<full>[^{]+);$").expect("static regex");
+
+    // path -> set of items
+    let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut simple_uses: BTreeSet<String> = BTreeSet::new();
+
+    for u in &uses {
+        let trimmed = u.trim();
+        if let Some(caps) = brace_re.captures(trimmed) {
+            let path = caps["path"].trim().to_string();
+            let items: Vec<String> = caps["items"]
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let entry = groups.entry(path).or_default();
+            for item in items {
+                entry.insert(item);
+            }
+        } else if simple_re.is_match(trimmed) {
+            simple_uses.insert(trimmed.to_string());
+        }
+    }
+
+    let mut result: Vec<String> = Vec::new();
+
+    // Emit merged brace imports
+    for (path, items) in &groups {
+        let sorted: Vec<&String> = {
+            let mut v: Vec<&String> = items.iter().collect();
+            // Put `self` first if present
+            v.sort_by(|a, b| {
+                if a.as_str() == "self" {
+                    std::cmp::Ordering::Less
+                } else if b.as_str() == "self" {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.cmp(b)
+                }
+            });
+            v
+        };
+        let items_str = sorted
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<&str>>()
+            .join(", ");
+        result.push(format!("use {path}::{{{items_str}}};"));
+    }
+
+    // Emit simple imports (but skip if already covered by a brace import)
+    for s in &simple_uses {
+        let covered = groups.iter().any(|(path, items)| {
+            if let Some(rest) = s.strip_prefix(&format!("use {path}::")) {
+                let name = rest.trim_end_matches(';').trim();
+                items.contains(name)
+            } else {
+                false
+            }
+        });
+        if !covered {
+            result.push(s.clone());
+        }
+    }
+
+    result.sort();
+    result
+}
+
 /// Assemble the final Rust output from individually migrated module outputs.
 ///
 /// P27: Deduplicates `use` statements and type/struct/enum/const definitions
@@ -2783,7 +2864,14 @@ fn assemble_module_outputs(modules: &[(String, String, bool)]) -> String {
     let mut defined_types: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (mod_name, rust_code, _compiles) in modules {
-        let mod_code_lines = dedup_module_definitions(rust_code, &mut all_uses, &mut defined_types);
+        // P31: Strip markdown fences before processing
+        let clean_code: String = rust_code
+            .lines()
+            .filter(|line| !line.trim().starts_with("```"))
+            .collect::<Vec<&str>>()
+            .join("\n");
+
+        let mod_code_lines = dedup_module_definitions(&clean_code, &mut all_uses, &mut defined_types);
         // Remove leading/trailing empty lines
         let trimmed_lines = trim_empty_lines(&mod_code_lines);
         if !trimmed_lines.is_empty() {
@@ -2797,8 +2885,9 @@ fn assemble_module_outputs(modules: &[(String, String, bool)]) -> String {
 
     let mut output = String::new();
     if !all_uses.is_empty() {
-        all_uses.sort();
-        output.push_str(&all_uses.join("\n"));
+        // P31: Merge use statements that share the same base path
+        let merged = merge_use_statements(all_uses);
+        output.push_str(&merged.join("\n"));
         output.push_str("\n\n");
     }
     output.push_str(&code_parts.join("\n\n"));
@@ -3402,6 +3491,70 @@ fn main() {
         let modules: Vec<(String, String, bool)> = vec![];
         let result = assemble_module_outputs(&modules);
         assert_eq!(result.trim(), "");
+    }
+
+    #[test]
+    fn test_assemble_strips_markdown_fences() {
+        let modules = vec![
+            (
+                "mod_a".to_string(),
+                "use std::io;\n\nfn foo() -> i32 { 1 }".to_string(),
+                true,
+            ),
+            (
+                "mod_b".to_string(),
+                "```rust\nfn bar() -> i32 { 2 }\n```".to_string(),
+                false,
+            ),
+        ];
+        let assembled = assemble_module_outputs(&modules);
+        assert!(
+            !assembled.contains("```"),
+            "fences should be stripped from assembly:\n{assembled}"
+        );
+        assert!(assembled.contains("fn foo()"));
+        assert!(assembled.contains("fn bar()"));
+    }
+
+    #[test]
+    fn test_assemble_merges_use_imports() {
+        let modules = vec![
+            (
+                "a".to_string(),
+                "use std::io::{self, Read};\nfn a() {}".to_string(),
+                true,
+            ),
+            (
+                "b".to_string(),
+                "use std::io::{self, Read, Seek, SeekFrom};\nfn b() {}".to_string(),
+                true,
+            ),
+            (
+                "c".to_string(),
+                "use std::io::{self, Write, Seek, SeekFrom};\nfn c() {}".to_string(),
+                true,
+            ),
+        ];
+        let assembled = assemble_module_outputs(&modules);
+
+        // Should have exactly ONE std::io import with all items merged
+        let io_lines: Vec<&str> = assembled
+            .lines()
+            .filter(|l| l.contains("use std::io"))
+            .collect();
+        assert_eq!(
+            io_lines.len(),
+            1,
+            "should merge into one use std::io line, got: {io_lines:?}"
+        );
+
+        let io_line = io_lines[0];
+        for item in &["Read", "Seek", "SeekFrom", "Write", "self"] {
+            assert!(
+                io_line.contains(item),
+                "merged import should contain {item}: {io_line}"
+            );
+        }
     }
 
     #[test]
