@@ -1856,6 +1856,9 @@ async fn migrate_file_modular(
                 let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
                 if repaired_unsafe > baseline_unsafe {
                     warn!(module = %mod_name, iter, "P0: repair rejected — unsafe increased");
+                    if let Some(store) = artifacts {
+                        let _ = store.save_repair_rejected(iter, &repaired);
+                    }
                     continue;
                 }
 
@@ -1879,6 +1882,17 @@ async fn migrate_file_modular(
                     score = re_validation.idiomatic_score,
                     "module repair iteration"
                 );
+
+                // Save repair artifact for this module
+                if let Some(store) = artifacts
+                    && let Some(rust) = &mod_unit.rust_output
+                {
+                    let val_json = format!(
+                        "{{\"module\":\"{}\",\"iter\":{},\"compiles\":{},\"score\":{},\"unsafe\":{}}}",
+                        module.name, iter, re_validation.compiles, re_validation.idiomatic_score, re_validation.unsafe_count
+                    );
+                    let _ = store.save_repair_iteration(iter, rust, &val_json);
+                }
 
                 // P1: Best-version tracking
                 if re_validation.unsafe_count <= baseline_unsafe
