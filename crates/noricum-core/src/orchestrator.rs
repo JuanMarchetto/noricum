@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use noricum_agents::LlmClient;
-use noricum_agents::providers::{ProviderConfig, create_llm_client, select_model};
+use noricum_agents::providers::{ProviderConfig, create_llm_client, select_model, select_repair_model};
 use noricum_ir::pattern_store::PatternStore;
 use noricum_ir::{FunctionUnit, MigrationProject, MigrationState};
 use std::time::Instant;
@@ -1875,7 +1875,7 @@ async fn migrate_file_modular(
         // Repair loop for this module (each module is small enough for effective repair)
         if !mod_validation.passed {
             let repair_start = Instant::now();
-            let repair_model_sel = select_model(provider_config, difficulty, "repair")?;
+            let repair_model_sel = select_repair_model(provider_config, difficulty)?;
             let max_iters = config.max_repair_iterations.min(5);
             let baseline_unsafe = mod_validation.unsafe_count;
             let mut best_version = mod_unit.rust_output.clone();
