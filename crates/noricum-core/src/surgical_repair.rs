@@ -35,24 +35,7 @@ pub fn extract_function_at_line(source: &str, target_line: usize) -> Option<(Str
     let fn_start_idx = fn_start_idx?;
 
     // Search forward from fn_start for balanced closing brace.
-    let mut brace_depth = 0i32;
-    let mut found_open = false;
-    let mut fn_end_idx = fn_start_idx;
-
-    for i in fn_start_idx..lines.len() {
-        for ch in lines[i].chars() {
-            if ch == '{' {
-                brace_depth += 1;
-                found_open = true;
-            } else if ch == '}' {
-                brace_depth -= 1;
-            }
-        }
-        if found_open && brace_depth == 0 {
-            fn_end_idx = i;
-            break;
-        }
-    }
+    let fn_end_idx = find_closing_brace(&lines, fn_start_idx);
 
     // The target line must be within the function body.
     if target_idx > fn_end_idx {
@@ -75,14 +58,11 @@ pub fn gather_context(source: &str, fn_name: &str) -> String {
     // Step 1: Find the target function body.
     let fn_re = Regex::new(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)").expect("valid regex");
     let mut fn_start = None;
-    let mut fn_end = None;
 
     for (i, line) in lines.iter().enumerate() {
-        if let Some(caps) = fn_re.captures(line) {
-            if &caps[1] == fn_name {
-                fn_start = Some(i);
-                break;
-            }
+        if let Some(caps) = fn_re.captures(line) && &caps[1] == fn_name {
+            fn_start = Some(i);
+            break;
         }
     }
 
@@ -92,27 +72,10 @@ pub fn gather_context(source: &str, fn_name: &str) -> String {
     };
 
     // Find closing brace for this function.
-    let mut brace_depth = 0i32;
-    let mut found_open = false;
-    for i in fn_start..lines.len() {
-        for ch in lines[i].chars() {
-            if ch == '{' {
-                brace_depth += 1;
-                found_open = true;
-            } else if ch == '}' {
-                brace_depth -= 1;
-            }
-        }
-        if found_open && brace_depth == 0 {
-            fn_end = Some(i);
-            break;
-        }
+    let fn_end = find_closing_brace(&lines, fn_start);
+    if fn_end == fn_start {
+        return String::new();
     }
-
-    let fn_end = match fn_end {
-        Some(e) => e,
-        None => return String::new(),
-    };
 
     let fn_body: String = lines[fn_start..=fn_end].join("\n");
 
@@ -144,26 +107,7 @@ pub fn gather_context(source: &str, fn_name: &str) -> String {
         if let Some(caps) = struct_enum_re.captures(line) {
             let name = &caps[1];
             if referenced_types.contains(&name.to_string()) {
-                // Extract the full definition (with braces).
-                let mut depth = 0i32;
-                let mut opened = false;
-                let mut end = i;
-
-                for j in i..lines.len() {
-                    for ch in lines[j].chars() {
-                        if ch == '{' {
-                            depth += 1;
-                            opened = true;
-                        } else if ch == '}' {
-                            depth -= 1;
-                        }
-                    }
-                    if opened && depth == 0 {
-                        end = j;
-                        break;
-                    }
-                }
-
+                let end = find_closing_brace(&lines, i);
                 let def: String = lines[i..=end].join("\n");
                 context_parts.push(def);
             }
@@ -171,7 +115,6 @@ pub fn gather_context(source: &str, fn_name: &str) -> String {
     }
 
     // Step 4: Extract signatures of sibling functions called from the target function.
-    // Find all function names called in the body: identifier followed by `(`.
     let call_re = Regex::new(r"\b(\w+)\s*\(").expect("valid regex");
     let mut called_fns: Vec<String> = call_re
         .captures_iter(&fn_body)
@@ -179,7 +122,6 @@ pub fn gather_context(source: &str, fn_name: &str) -> String {
         .collect();
     called_fns.sort();
     called_fns.dedup();
-    // Remove the target function itself and common keywords/macros.
     let keywords = [
         "if", "for", "while", "match", "loop", "return", "let", "mut", "fn", "pub", "use",
         "impl", "struct", "enum", "type", "where", "as", "in", "ref", "self", "super", "crate",
@@ -193,21 +135,18 @@ pub fn gather_context(source: &str, fn_name: &str) -> String {
         if let Some(caps) = fn_re.captures(line) {
             let name = caps[1].to_string();
             if called_fns.contains(&name) {
-                // Extract only the signature (up to and including the opening `{`), not the body.
-                // If the signature spans multiple lines (e.g., params), collect until `{`.
+                // Extract only the signature (up to `{`), not the body.
                 let mut sig = String::new();
-                for j in i..lines.len() {
-                    sig.push_str(lines[j]);
-                    if lines[j].contains('{') {
+                for line in lines.iter().skip(i) {
+                    sig.push_str(line);
+                    if line.contains('{') {
                         break;
                     }
                     sig.push('\n');
                 }
-                // Trim the body part — keep up to `{` but replace it with `;`.
                 if let Some(brace_pos) = sig.find('{') {
                     sig.truncate(brace_pos);
                     sig = sig.trim_end().to_string();
-                    // Remove trailing where clause formatting issues.
                 }
                 context_parts.push(format!("{sig};"));
             }
@@ -227,11 +166,9 @@ pub fn splice_function(source: &str, fn_name: &str, new_fn: &str) -> String {
 
     let mut fn_start = None;
     for (i, line) in lines.iter().enumerate() {
-        if let Some(caps) = fn_re.captures(line) {
-            if &caps[1] == fn_name {
-                fn_start = Some(i);
-                break;
-            }
+        if let Some(caps) = fn_re.captures(line) && &caps[1] == fn_name {
+            fn_start = Some(i);
+            break;
         }
     }
 
@@ -240,25 +177,7 @@ pub fn splice_function(source: &str, fn_name: &str, new_fn: &str) -> String {
         None => return source.to_string(),
     };
 
-    // Find closing brace.
-    let mut brace_depth = 0i32;
-    let mut found_open = false;
-    let mut fn_end = fn_start;
-
-    for i in fn_start..lines.len() {
-        for ch in lines[i].chars() {
-            if ch == '{' {
-                brace_depth += 1;
-                found_open = true;
-            } else if ch == '}' {
-                brace_depth -= 1;
-            }
-        }
-        if found_open && brace_depth == 0 {
-            fn_end = i;
-            break;
-        }
-    }
+    let fn_end = find_closing_brace(&lines, fn_start);
 
     let mut result = Vec::new();
     if fn_start > 0 {
@@ -270,6 +189,29 @@ pub fn splice_function(source: &str, fn_name: &str, new_fn: &str) -> String {
     }
 
     result.join("\n")
+}
+
+/// Find the closing brace for a block starting at `start_idx` using brace counting.
+/// Returns the index of the line containing the closing brace, or `start_idx` if not found.
+fn find_closing_brace(lines: &[&str], start_idx: usize) -> usize {
+    let mut brace_depth = 0i32;
+    let mut found_open = false;
+
+    for (i, line) in lines.iter().enumerate().skip(start_idx) {
+        for ch in line.chars() {
+            if ch == '{' {
+                brace_depth += 1;
+                found_open = true;
+            } else if ch == '}' {
+                brace_depth -= 1;
+            }
+        }
+        if found_open && brace_depth == 0 {
+            return i;
+        }
+    }
+
+    start_idx
 }
 
 #[cfg(test)]
@@ -431,7 +373,7 @@ fn unrelated_fn() -> i32 {
         let result = splice_function(SAMPLE_SOURCE, "foo", "fn foo(x: i32) -> i32 {\n    x\n}");
         assert!(
             result.contains("use std::collections::HashMap"),
-            "use statement should be preserved"
+            "use statement should be preserved",
         );
     }
 }

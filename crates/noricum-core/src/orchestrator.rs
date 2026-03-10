@@ -2963,10 +2963,10 @@ fn extract_definition_name(line: &str) -> Option<String> {
         "pub type ", "type ",
     ];
     for prefix in &prefixes {
-        if line.starts_with(prefix) {
-            let rest = &line[prefix.len()..];
+        if let Some(rest) = line.strip_prefix(prefix) {
             // Extract the name (up to first non-alphanumeric/underscore)
-            let name: String = rest.chars()
+            let name: String = rest
+                .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
                 .collect();
             if !name.is_empty() {
