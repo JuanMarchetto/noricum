@@ -177,6 +177,9 @@ struct MigrateOpts {
     /// Target LOC per module for modular migration (default: 1000, use 500 for DeepSeek R1)
     #[arg(long)]
     module_target_loc: Option<usize>,
+    /// Warm-start from previous artifact directory (skip validated modules, seed repairs)
+    #[arg(long)]
+    warm_start: Option<PathBuf>,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -220,6 +223,7 @@ async fn main() {
                 provider: opts.provider,
                 artifacts_dir: opts.artifacts_dir,
                 module_target_loc: opts.module_target_loc,
+                warm_start: opts.warm_start,
             })
             .await
         }
