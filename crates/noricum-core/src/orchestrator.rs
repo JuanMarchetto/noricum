@@ -1874,6 +1874,13 @@ async fn migrate_file_modular(
                         Err(e) => {
                             warn!(module = %mod_name, error = %e, "chunked module translation failed");
                             all_validated = false;
+                            module_artifacts.push(crate::artifacts::ModuleArtifact {
+                                name: module.name.clone(),
+                                state: "TranslationFailed".to_string(),
+                                score: 0.0,
+                                compiles: false,
+                                unsafe_count: 0,
+                            });
                             continue;
                         }
                     }
@@ -1901,6 +1908,13 @@ async fn migrate_file_modular(
                 Err(e) => {
                     warn!(module = %mod_name, error = %e, "module translation failed");
                     all_validated = false;
+                    module_artifacts.push(crate::artifacts::ModuleArtifact {
+                        name: module.name.clone(),
+                        state: "TranslationFailed".to_string(),
+                        score: 0.0,
+                        compiles: false,
+                        unsafe_count: 0,
+                    });
                     continue;
                 }
             }
@@ -1970,7 +1984,7 @@ async fn migrate_file_modular(
                 if let Some(store) = artifacts
                     && let Some(rust) = &mod_unit.rust_output
                 {
-                    let _ = store.save_repair_rejected(0, rust);
+                    let _ = store.save_module_repair_rejected(&module.name, 0, rust);
                 }
                 // Re-translate with temperature 0.5
                 let retranslated =
@@ -2076,7 +2090,8 @@ async fn migrate_file_modular(
                     if repaired_unsafe > baseline_unsafe {
                         warn!(module = %mod_name, iter, "P0: repair rejected — unsafe increased");
                         if let Some(store) = artifacts {
-                            let _ = store.save_repair_rejected(iter, &repaired);
+                            let _ =
+                                store.save_module_repair_rejected(&module.name, iter, &repaired);
                         }
                         continue;
                     }
@@ -2114,7 +2129,8 @@ async fn migrate_file_modular(
                             re_validation.idiomatic_score,
                             re_validation.unsafe_count
                         );
-                        let _ = store.save_repair_iteration(iter, rust, &val_json);
+                        let _ =
+                            store.save_module_repair_iteration(&module.name, iter, rust, &val_json);
                     }
 
                     // P1: Best-version tracking

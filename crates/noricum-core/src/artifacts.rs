@@ -206,6 +206,36 @@ impl ArtifactStore {
         Ok(())
     }
 
+    /// Save a module-scoped repair iteration (`05-repair/{module}/iter-{iter:02}.rs`).
+    ///
+    /// Used by the modular pipeline to avoid collisions between modules.
+    pub fn save_module_repair_iteration(
+        &self,
+        module_name: &str,
+        iteration: u32,
+        rust_source: &str,
+        validation_json: &str,
+    ) -> io::Result<()> {
+        let safe = sanitize_name(module_name);
+        let rs_name = format!("05-repair/{safe}/iter-{iteration:02}.rs");
+        let json_name = format!("05-repair/{safe}/iter-{iteration:02}-validation.json");
+        self.write_artifact(Path::new(&rs_name), rust_source)?;
+        self.write_artifact(Path::new(&json_name), validation_json)?;
+        Ok(())
+    }
+
+    /// Save a module-scoped rejected repair (`05-repair/{module}/iter-{iter:02}-rejected.rs`).
+    pub fn save_module_repair_rejected(
+        &self,
+        module_name: &str,
+        iteration: u32,
+        rust_source: &str,
+    ) -> io::Result<()> {
+        let safe = sanitize_name(module_name);
+        let name = format!("05-repair/{safe}/iter-{iteration:02}-rejected.rs");
+        self.write_artifact(Path::new(&name), rust_source)
+    }
+
     /// Save the final migration output (`06-final.rs`).
     pub fn save_final_output(&self, rust_source: &str) -> io::Result<()> {
         self.write_artifact(Path::new("06-final.rs"), rust_source)
