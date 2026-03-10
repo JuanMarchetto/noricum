@@ -27,6 +27,7 @@ pub struct MigrateParams {
     pub provider: Option<String>,
     pub artifacts_dir: std::path::PathBuf,
     pub module_target_loc: Option<usize>,
+    pub warm_start: Option<std::path::PathBuf>,
 }
 
 pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
@@ -66,6 +67,7 @@ pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
         skip_c2rust: opts.skip_c2rust,
         artifacts_dir: opts.artifacts_dir,
         module_target_loc: opts.module_target_loc,
+        warm_start: opts.warm_start,
         max_tokens_budget: match opts.max_tokens {
             Some(0) => None,
             Some(n) => Some(n),

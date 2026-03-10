@@ -36,6 +36,28 @@ use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit}
 /// Number of compilation errors above which we re-translate instead of repairing.
 const RETRANSLATE_ERROR_THRESHOLD: usize = 100;
 
+/// Warm-start action for a module based on its previous run results.
+#[derive(Debug, PartialEq, Eq)]
+enum WarmAction {
+    /// Module was Validated — use directly, skip all processing.
+    Skip,
+    /// Module compiled but didn't reach threshold — start from its code, skip translation.
+    SeedRepair,
+    /// Module was garbage — re-translate from scratch.
+    Retranslate,
+}
+
+/// Determine warm-start action for a module based on its previous artifact.
+fn warm_start_action(artifact: &crate::artifacts::ModuleArtifact) -> WarmAction {
+    if artifact.state == "Validated" && artifact.score >= 70.0 {
+        WarmAction::Skip
+    } else if artifact.compiles && artifact.score >= 40.0 {
+        WarmAction::SeedRepair
+    } else {
+        WarmAction::Retranslate
+    }
+}
+
 /// Returns true if the module should be re-translated instead of repaired.
 /// Criteria: more than 100 compilation errors AND hasn't been re-translated yet.
 fn should_retranslate(error_count: usize, retranslation_attempts: u32) -> bool {
@@ -107,6 +129,9 @@ pub struct MigrationConfig {
     /// Target maximum LOC per sub-module in modular migration.
     /// Default: None (uses 1000). Use 500 for DeepSeek R1.
     pub module_target_loc: Option<usize>,
+    /// Path to previous artifact directory for warm-start.
+    /// Validated modules are reused, partially succeeded modules seed repair.
+    pub warm_start: Option<std::path::PathBuf>,
 }
 
 impl Default for MigrationConfig {
@@ -135,6 +160,7 @@ impl Default for MigrationConfig {
             skip_c2rust: false,
             artifacts_dir: std::path::PathBuf::from(".noricum-artifacts"),
             module_target_loc: None,
+            warm_start: None,
         }
     }
 }
@@ -1652,6 +1678,23 @@ async fn migrate_file_modular(
 
     let pattern_store = PatternStore::load_seed_patterns();
 
+    // P19: Load previous artifact manifest for warm-start
+    let warm_store = config.warm_start.as_ref().and_then(|path| {
+        match crate::artifacts::ArtifactStore::from_existing(path) {
+            Ok(store) => {
+                info!(path = %path.display(), "P19: loaded warm-start artifact store");
+                Some(store)
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "P19: failed to load warm-start artifacts");
+                None
+            }
+        }
+    });
+    let warm_manifest = warm_store.as_ref().and_then(|store| {
+        store.load_manifest().ok()
+    });
+
     for &mod_idx in &order {
         let module = &modules[mod_idx];
         let mod_name = format!("{name}::{}", module.name);
@@ -1664,6 +1707,49 @@ async fn migrate_file_modular(
             module_outputs.len() + 1,
             modules.len()
         );
+
+        // P19: Warm-start check
+        if let Some(ref manifest) = warm_manifest {
+            if let Some(prev) = manifest.modules.iter().find(|m| m.name == module.name) {
+                match warm_start_action(prev) {
+                    WarmAction::Skip => {
+                        if let Some(ref ws) = warm_store {
+                            if let Ok(Some(code)) = ws.load_translation_module(&module.name) {
+                                info!(module = %mod_name, score = prev.score, "P19: warm-start skip (validated)");
+                                let sigs = noricum_tools::ast::extract_rust_signatures(&code);
+                                if !sigs.is_empty() {
+                                    accumulated_rust_context.push_str(&sigs.join("\n"));
+                                    accumulated_rust_context.push('\n');
+                                }
+                                module_outputs.push((module.name.clone(), code));
+                                any_succeeded = true;
+                                best_combined_score += prev.score as u32;
+                                module_artifacts.push(crate::artifacts::ModuleArtifact {
+                                    name: module.name.clone(),
+                                    state: "Validated".to_string(),
+                                    score: prev.score,
+                                    compiles: true,
+                                    unsafe_count: prev.unsafe_count,
+                                });
+                                // Save to new artifacts too
+                                if let Some(store) = artifacts {
+                                    let _ = store.save_translation_module(&module.name, &module_outputs.last().unwrap().1);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    WarmAction::SeedRepair => {
+                        info!(module = %mod_name, score = prev.score, "P19: warm-start seed repair");
+                        // Will seed the translation from warm-start code below
+                    }
+                    WarmAction::Retranslate => {
+                        info!(module = %mod_name, score = prev.score, "P19: warm-start retranslate");
+                        // Proceed with normal translation
+                    }
+                }
+            }
+        }
 
         // Create a FunctionUnit for this module
         let mut mod_unit =
@@ -1678,6 +1764,23 @@ async fn migrate_file_modular(
             )
         } else {
             String::new()
+        };
+
+        // P19: Check if warm-start provides a seed for this module (SeedRepair)
+        let warm_seed = if let (Some(manifest), Some(ws)) = (&warm_manifest, &warm_store) {
+            manifest
+                .modules
+                .iter()
+                .find(|m| m.name == module.name)
+                .and_then(|prev| {
+                    if warm_start_action(prev) == WarmAction::SeedRepair {
+                        ws.load_translation_module(&module.name).ok().flatten()
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
         };
 
         // Translate this module
@@ -1696,6 +1799,19 @@ async fn migrate_file_modular(
             )
         };
 
+        // P19: Use warm-start seed if available, skip translation
+        if let Some(seed_code) = warm_seed {
+            info!(module = %mod_name, "P19: using warm-start seed, skipping translation");
+            mod_unit.rust_output = Some(seed_code);
+            mod_unit.state = MigrationState::Refined;
+            // Save warm-seeded code as module artifact
+            if let Some(store) = artifacts
+                && let Some(rust) = &mod_unit.rust_output
+            {
+                let _ = store.save_translation_module(&module.name, rust);
+            }
+            // Skip to validation (after the translation block)
+        } else {
         // P12: Sub-chunk large modules — if a module exceeds MEDIUM_FILE_LOC, use
         // chunked translation instead of single-pass to avoid LLM context overflow.
         let module_lines = module.line_count;
@@ -1804,6 +1920,7 @@ async fn migrate_file_modular(
         {
             let _ = store.save_translation_module(&module.name, rust);
         }
+        } // end of else (non-warm-start translation path)
 
         // Validate this module (compile check + scoring, no diff test for modules)
         let mod_validation =
@@ -2579,6 +2696,56 @@ fn main() {
         let modules: Vec<(String, String)> = vec![];
         let result = assemble_module_outputs(&modules);
         assert_eq!(result.trim(), "");
+    }
+
+    #[test]
+    fn test_warm_start_strategy() {
+        use crate::artifacts::ModuleArtifact;
+
+        let validated = ModuleArtifact {
+            name: "if".into(),
+            state: "Validated".into(),
+            score: 100.0,
+            compiles: true,
+            unsafe_count: 0,
+        };
+        assert_eq!(warm_start_action(&validated), WarmAction::Skip);
+
+        let good_fallback = ModuleArtifact {
+            name: "mz_p6".into(),
+            state: "FallbackUnsafe".into(),
+            score: 87.0,
+            compiles: true,
+            unsafe_count: 0,
+        };
+        assert_eq!(warm_start_action(&good_fallback), WarmAction::SeedRepair);
+
+        let mid_fallback = ModuleArtifact {
+            name: "mz_p3".into(),
+            state: "FallbackUnsafe".into(),
+            score: 50.0,
+            compiles: true,
+            unsafe_count: 0,
+        };
+        assert_eq!(warm_start_action(&mid_fallback), WarmAction::SeedRepair);
+
+        let bad_fallback = ModuleArtifact {
+            name: "mz_p8".into(),
+            state: "FallbackUnsafe".into(),
+            score: 5.0,
+            compiles: false,
+            unsafe_count: 0,
+        };
+        assert_eq!(warm_start_action(&bad_fallback), WarmAction::Retranslate);
+
+        let skipped = ModuleArtifact {
+            name: "mz_p2".into(),
+            state: "Skipped".into(),
+            score: 0.0,
+            compiles: false,
+            unsafe_count: 0,
+        };
+        assert_eq!(warm_start_action(&skipped), WarmAction::Retranslate);
     }
 
     #[test]
