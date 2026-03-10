@@ -1651,6 +1651,7 @@ async fn migrate_file_modular(
 
     // Build intra-file dependency graph and order modules
     let dep_graph = crate::dependency::DependencyGraph::from_source(c_source);
+    let waves = dep_graph.module_waves(&modules);
     let order = dep_graph.module_order(&modules);
 
     let module_names: Vec<&str> = order.iter().map(|&i| modules[i].name.as_str()).collect();
@@ -1695,7 +1696,19 @@ async fn migrate_file_modular(
         store.load_manifest().ok()
     });
 
-    for &mod_idx in &order {
+    // P18: Wave-based module iteration — modules in the same wave are independent
+    // and could run in parallel (future: use JoinSet for concurrent waves).
+    info!(
+        function = %name,
+        wave_count = waves.len(),
+        wave_sizes = ?waves.iter().map(|w| w.len()).collect::<Vec<_>>(),
+        "P18: wave-based module migration"
+    );
+
+    for (wave_idx, wave) in waves.iter().enumerate() {
+        info!(wave = wave_idx, modules = wave.len(), "starting wave");
+
+    for &mod_idx in wave {
         let module = &modules[mod_idx];
         let mod_name = format!("{name}::{}", module.name);
 
@@ -2157,7 +2170,8 @@ async fn migrate_file_modular(
         }
 
         check_budget(&effective_config, &total_metrics)?;
-    }
+    } // end for mod_idx in wave
+    } // end for wave in waves
 
     if !any_succeeded {
         warn!(function = %name, "no modules produced output, falling back to chunked");

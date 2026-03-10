@@ -170,6 +170,7 @@ pub async fn translate_function_with_patterns_and_temperature(
 
     debug!(max_tokens, "sending translation prompt to LLM");
 
+    #[allow(clippy::needless_range_loop)] // attempt goes 0..=len to include initial try + retries
     let response = {
         let mut last_err = None;
         let mut result = None;
