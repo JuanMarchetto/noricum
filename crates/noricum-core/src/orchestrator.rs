@@ -1722,12 +1722,12 @@ async fn migrate_file_modular(
         );
 
         // P19: Warm-start check
-        if let Some(ref manifest) = warm_manifest {
-            if let Some(prev) = manifest.modules.iter().find(|m| m.name == module.name) {
+        if let Some(ref manifest) = warm_manifest
+            && let Some(prev) = manifest.modules.iter().find(|m| m.name == module.name) {
                 match warm_start_action(prev) {
                     WarmAction::Skip => {
-                        if let Some(ref ws) = warm_store {
-                            if let Ok(Some(code)) = ws.load_translation_module(&module.name) {
+                        if let Some(ref ws) = warm_store
+                            && let Ok(Some(code)) = ws.load_translation_module(&module.name) {
                                 info!(module = %mod_name, score = prev.score, "P19: warm-start skip (validated)");
                                 let sigs = noricum_tools::ast::extract_rust_signatures(&code);
                                 if !sigs.is_empty() {
@@ -1750,7 +1750,6 @@ async fn migrate_file_modular(
                                 }
                                 continue;
                             }
-                        }
                     }
                     WarmAction::SeedRepair => {
                         info!(module = %mod_name, score = prev.score, "P19: warm-start seed repair");
@@ -1762,7 +1761,6 @@ async fn migrate_file_modular(
                     }
                 }
             }
-        }
 
         // Create a FunctionUnit for this module
         let mut mod_unit =
@@ -1961,11 +1959,10 @@ async fn migrate_file_modular(
                 errors = error_count,
                 "P13: error count exceeds threshold, re-translating with higher temperature"
             );
-            if let Some(store) = artifacts {
-                if let Some(rust) = &mod_unit.rust_output {
+            if let Some(store) = artifacts
+                && let Some(rust) = &mod_unit.rust_output {
                     let _ = store.save_repair_rejected(0, rust);
                 }
-            }
             // Re-translate with temperature 0.5
             let retranslated = noricum_agents::translation::translate_function_with_patterns_and_temperature(
                 client,
@@ -1978,8 +1975,8 @@ async fn migrate_file_modular(
             )
             .await;
             total_metrics.llm_calls += 1;
-            if let Ok(new_code) = retranslated {
-                if has_substance(&new_code, &module.source) {
+            if let Ok(new_code) = retranslated
+                && has_substance(&new_code, &module.source) {
                     mod_unit.rust_output = Some(new_code);
                     // Re-validate
                     let re_val = noricum_validation::validate_with_threshold(
@@ -2000,7 +1997,6 @@ async fn migrate_file_modular(
                     );
                     mod_validation = re_val;
                 }
-            }
         }
 
         // Repair loop for this module (each module is small enough for effective repair)
