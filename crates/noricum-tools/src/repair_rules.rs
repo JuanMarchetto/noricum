@@ -90,6 +90,56 @@ pub fn rule_strip_markdown_fences(source: &str) -> String {
         .join("\n")
 }
 
+/// Check brace balance of Rust source code.
+///
+/// Returns the final brace depth: 0 means balanced, >0 means unclosed braces,
+/// <0 means extra closing braces. Ignores braces inside string literals and
+/// line comments.
+pub fn check_brace_balance(source: &str) -> i32 {
+    let mut depth: i32 = 0;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        // Skip line comments entirely
+        if trimmed.starts_with("//") {
+            continue;
+        }
+
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut chars = trimmed.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            if ch == '\\' && in_string {
+                escape_next = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if in_string {
+                continue;
+            }
+            // Skip rest of line after //
+            if ch == '/' && chars.peek() == Some(&'/') {
+                break;
+            }
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+
+    depth
+}
+
 /// Apply all mechanical repair rules in sequence.
 ///
 /// Order matters: dedup first (removes duplicate definitions), then
@@ -753,5 +803,54 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
             errors.len(),
             fixed_errors.len()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // check_brace_balance tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_check_brace_balance_balanced() {
+        let source = "fn foo() {\n    let x = 1;\n}\n\nfn bar() {\n    if true {\n        return;\n    }\n}";
+        assert_eq!(check_brace_balance(source), 0);
+    }
+
+    #[test]
+    fn test_check_brace_balance_unclosed() {
+        let source = "fn foo() {\n    let x = 1;\n\nfn bar() {\n    if true {\n        return;\n    }\n}";
+        assert_eq!(check_brace_balance(source), 1, "foo is never closed");
+    }
+
+    #[test]
+    fn test_check_brace_balance_extra_close() {
+        let source = "fn foo() {\n    let x = 1;\n}\n}\n";
+        assert_eq!(check_brace_balance(source), -1);
+    }
+
+    #[test]
+    fn test_check_brace_balance_ignores_strings() {
+        let source = r#"fn foo() {
+    let s = "hello { world }";
+    let t = "nested { { } }";
+}"#;
+        assert_eq!(check_brace_balance(source), 0, "braces in strings should be ignored");
+    }
+
+    #[test]
+    fn test_check_brace_balance_ignores_comments() {
+        let source = "fn foo() {\n    // this { is a comment\n    let x = 1;\n}";
+        assert_eq!(check_brace_balance(source), 0, "braces in line comments should be ignored");
+    }
+
+    #[test]
+    fn test_check_brace_balance_inline_comment() {
+        let source = "fn foo() {\n    let x = 1; // { brace in comment\n}";
+        assert_eq!(check_brace_balance(source), 0, "inline comment braces ignored");
+    }
+
+    #[test]
+    fn test_check_brace_balance_empty() {
+        assert_eq!(check_brace_balance(""), 0);
+        assert_eq!(check_brace_balance("let x = 1;"), 0);
     }
 }
