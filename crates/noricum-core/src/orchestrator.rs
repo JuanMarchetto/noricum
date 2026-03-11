@@ -2734,18 +2734,54 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
     }
 
     // P32: Brace-balance validation — detect truncated LLM output
-    if let Some(ref rust_code) = mod_unit.rust_output {
-        let brace_depth = noricum_tools::repair_rules::check_brace_balance(rust_code);
+    let p32_rust_code = mod_unit.rust_output.clone();
+    if let Some(rust_code) = p32_rust_code {
+        let brace_depth = noricum_tools::repair_rules::check_brace_balance(&rust_code);
         if brace_depth > 0 {
             warn!(
                 module = %mod_name,
                 depth = brace_depth,
-                "P32: module output has unclosed braces, auto-closing"
+                "P32: module output has unclosed braces, attempting re-translate"
             );
-            let fixed = noricum_tools::repair_rules::auto_close_braces(rust_code);
-            mod_unit.rust_output = Some(fixed);
-            // Mark as non-compiling so it doesn't pollute assembly context (P26)
-            mod_unit.last_errors.push(format!("P32: auto-closed {brace_depth} unclosed brace(s)"));
+
+            // Step 1: Re-translate once with truncation hint
+            let retranslated = noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                client,
+                &select_model(provider_config, difficulty, "translation")?.model,
+                &format!(
+                    "/* IMPORTANT: Your previous translation of this code was TRUNCATED. \
+                    Ensure ALL function bodies have matching closing braces. \
+                    Output the COMPLETE translation. */\n\n{}",
+                    module.source
+                ),
+                None,
+                analysis,
+                &PatternStore::load_seed_patterns().find_relevant(&module.source, 3),
+                Some(0.3), // Lower temperature for more deterministic output
+            )
+            .await;
+
+            let mut fixed = false;
+            if let Ok(retrans_code) = retranslated {
+                let retrans_depth = noricum_tools::repair_rules::check_brace_balance(&retrans_code);
+                if retrans_depth == 0 {
+                    info!(module = %mod_name, "P32: re-translate produced balanced output");
+                    mod_unit.rust_output = Some(retrans_code);
+                    local_metrics.llm_calls += 1;
+                    fixed = true;
+                } else {
+                    warn!(module = %mod_name, depth = retrans_depth, "P32: re-translate still truncated");
+                    local_metrics.llm_calls += 1;
+                }
+            }
+
+            // Step 2: Smart truncate — cut at last balanced point
+            if !fixed {
+                let truncated = noricum_tools::repair_rules::auto_close_braces(&rust_code);
+                mod_unit.rust_output = Some(truncated);
+                // Mark as non-compiling so it doesn't pollute assembly context (P26)
+                mod_unit.last_errors.push(format!("P32: truncated {brace_depth} unclosed brace(s)"));
+            }
         }
     }
 

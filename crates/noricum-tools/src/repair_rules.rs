@@ -140,16 +140,85 @@ pub fn check_brace_balance(source: &str) -> i32 {
     depth
 }
 
-/// Auto-close unclosed braces at the end of truncated Rust source.
+/// Fix unclosed braces in truncated Rust source by truncating at the last balanced point.
 ///
-/// If `check_brace_balance()` returns depth > 0, appends that many `}` lines
-/// with a marker comment. Returns source unchanged if balanced or has extra closes.
+/// Strategy: scan through the source tracking brace depth. Remember the last line
+/// where depth returned to 0 (i.e., a complete top-level item ended). If the source
+/// has unclosed braces, truncate everything after that last balanced point.
+/// This removes incomplete function bodies rather than blindly appending `}`.
+///
+/// Falls back to appending `}` only if no balanced point is found (e.g., the very
+/// first function is truncated).
 pub fn auto_close_braces(source: &str) -> String {
     let depth = check_brace_balance(source);
     if depth <= 0 {
         return source.to_string();
     }
 
+    // Find the last line where cumulative brace depth was 0
+    let lines: Vec<&str> = source.lines().collect();
+    let mut running_depth: i32 = 0;
+    let mut last_balanced_line: Option<usize> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            // Line comments don't affect depth; if we're at 0, this is still balanced
+            if running_depth == 0 {
+                last_balanced_line = Some(i);
+            }
+            continue;
+        }
+
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut chars = trimmed.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            if ch == '\\' && in_string {
+                escape_next = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if in_string {
+                continue;
+            }
+            if ch == '/' && chars.peek() == Some(&'/') {
+                break;
+            }
+            match ch {
+                '{' => running_depth += 1,
+                '}' => running_depth -= 1,
+                _ => {}
+            }
+        }
+
+        if running_depth == 0 {
+            last_balanced_line = Some(i);
+        }
+    }
+
+    if let Some(cut_line) = last_balanced_line {
+        if cut_line + 1 < lines.len() {
+            let truncated_count = lines.len() - cut_line - 1;
+            debug!(
+                cut_line = cut_line + 1,
+                truncated_lines = truncated_count,
+                "P32: truncating at last balanced brace point"
+            );
+            let kept: String = lines[..=cut_line].join("\n");
+            return format!("{kept}\n// P32: truncated {truncated_count} lines of incomplete code");
+        }
+    }
+
+    // Fallback: no balanced point found, just close braces
     let closes = "}".repeat(depth as usize);
     format!("{source}\n{closes} // auto-closed: truncated output")
 }
@@ -712,14 +781,16 @@ fn helper(x: i32) -> i32 { x * 2 }"#;
     }
 
     #[test]
-    fn test_apply_all_rules_closes_braces() {
-        let source = "fn foo() {\n    let x = 1;";
+    fn test_apply_all_rules_fixes_braces() {
+        // Two fns, second truncated — R4 should truncate the incomplete one
+        let source = "fn foo() {\n    1\n}\n\nfn bar() {\n    let x = 1;";
         let result = apply_all_rules(source, &[]);
         assert_eq!(
             check_brace_balance(&result),
             0,
-            "apply_all_rules should auto-close braces via R4"
+            "apply_all_rules should fix braces via R4"
         );
+        assert!(result.contains("fn foo()"), "complete fn preserved");
     }
 
     #[test]
@@ -895,19 +966,35 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
     }
 
     #[test]
-    fn test_auto_close_braces_one_unclosed() {
+    fn test_auto_close_braces_truncates_at_last_balanced() {
+        // Two functions, second one is truncated
+        let source = "fn foo() {\n    1\n}\n\nfn bar() {\n    if true {\n        let x = 1;";
+        let result = auto_close_braces(source);
+        // Should keep foo() and truncate the incomplete bar()
+        assert!(result.contains("fn foo()"), "complete fn preserved: {result}");
+        assert!(!result.contains("fn bar()"), "incomplete fn truncated: {result}");
+        assert!(result.contains("P32: truncated"), "truncation marker: {result}");
+        assert_eq!(check_brace_balance(&result), 0, "result should be balanced");
+    }
+
+    #[test]
+    fn test_auto_close_braces_fallback_when_first_fn_truncated() {
+        // Only one function and it's truncated — no balanced point to cut at
         let source = "fn foo() {\n    let x = 1;";
         let result = auto_close_braces(source);
+        // Falls back to appending }
         assert!(result.ends_with("} // auto-closed: truncated output"), "got: {result}");
         assert_eq!(check_brace_balance(&result), 0, "should be balanced after auto-close");
     }
 
     #[test]
-    fn test_auto_close_braces_multiple_unclosed() {
-        let source = "fn foo() {\n    if true {\n        let x = 1;";
+    fn test_auto_close_braces_multiple_complete_then_truncated() {
+        let source = "use std::io;\n\nfn a() {\n    1\n}\n\nfn b() {\n    2\n}\n\nfn c() {\n    if true {";
         let result = auto_close_braces(source);
-        assert_eq!(check_brace_balance(&result), 0, "should be balanced after auto-close");
-        assert_eq!(result.matches("// auto-closed: truncated output").count(), 1, "single marker");
+        assert!(result.contains("fn a()"), "a preserved");
+        assert!(result.contains("fn b()"), "b preserved");
+        assert!(!result.contains("fn c()"), "incomplete c truncated");
+        assert_eq!(check_brace_balance(&result), 0, "balanced");
     }
 
     #[test]
