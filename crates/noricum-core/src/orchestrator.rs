@@ -2733,6 +2733,22 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
         }
     }
 
+    // P32: Brace-balance validation — detect truncated LLM output
+    if let Some(ref rust_code) = mod_unit.rust_output {
+        let brace_depth = noricum_tools::repair_rules::check_brace_balance(rust_code);
+        if brace_depth > 0 {
+            warn!(
+                module = %mod_name,
+                depth = brace_depth,
+                "P32: module output has unclosed braces, auto-closing"
+            );
+            let fixed = noricum_tools::repair_rules::auto_close_braces(rust_code);
+            mod_unit.rust_output = Some(fixed);
+            // Mark as non-compiling so it doesn't pollute assembly context (P26)
+            mod_unit.last_errors.push(format!("P32: auto-closed {brace_depth} unclosed brace(s)"));
+        }
+    }
+
     // Build the result — unit contains the FunctionUnit with rust_output
     let validated = mod_unit.state == MigrationState::Validated
         || mod_unit.state == MigrationState::CompilesUnsafe;
@@ -3555,6 +3571,20 @@ fn main() {
                 "merged import should contain {item}: {io_line}"
             );
         }
+    }
+
+    #[test]
+    fn test_assemble_truncated_module_auto_closed() {
+        let modules = vec![
+            ("mod_a".to_string(), "use std::io;\n\nfn foo() {\n    1\n}".to_string(), true),
+            ("mod_b".to_string(), "fn bar() {\n    if true {\n        let x = 1;".to_string(), false),
+            ("mod_c".to_string(), "fn baz() {\n    2\n}".to_string(), true),
+        ];
+        let result = assemble_module_outputs(&modules);
+        // All modules should be present in assembly (truncated ones included)
+        assert!(result.contains("fn foo()"), "mod_a present");
+        assert!(result.contains("fn bar()"), "mod_b present");
+        assert!(result.contains("fn baz()"), "mod_c present");
     }
 
     #[test]
