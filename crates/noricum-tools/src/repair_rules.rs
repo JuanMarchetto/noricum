@@ -140,6 +140,20 @@ pub fn check_brace_balance(source: &str) -> i32 {
     depth
 }
 
+/// Auto-close unclosed braces at the end of truncated Rust source.
+///
+/// If `check_brace_balance()` returns depth > 0, appends that many `}` lines
+/// with a marker comment. Returns source unchanged if balanced or has extra closes.
+pub fn auto_close_braces(source: &str) -> String {
+    let depth = check_brace_balance(source);
+    if depth <= 0 {
+        return source.to_string();
+    }
+
+    let closes = "}".repeat(depth as usize);
+    format!("{source}\n{closes} // auto-closed: truncated output")
+}
+
 /// Apply all mechanical repair rules in sequence.
 ///
 /// Order matters: dedup first (removes duplicate definitions), then
@@ -852,5 +866,39 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
     fn test_check_brace_balance_empty() {
         assert_eq!(check_brace_balance(""), 0);
         assert_eq!(check_brace_balance("let x = 1;"), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // auto_close_braces tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_auto_close_braces_balanced() {
+        let source = "fn foo() {\n    1\n}";
+        let result = auto_close_braces(source);
+        assert_eq!(result, source, "balanced source should be unchanged");
+    }
+
+    #[test]
+    fn test_auto_close_braces_one_unclosed() {
+        let source = "fn foo() {\n    let x = 1;";
+        let result = auto_close_braces(source);
+        assert!(result.ends_with("} // auto-closed: truncated output"), "got: {result}");
+        assert_eq!(check_brace_balance(&result), 0, "should be balanced after auto-close");
+    }
+
+    #[test]
+    fn test_auto_close_braces_multiple_unclosed() {
+        let source = "fn foo() {\n    if true {\n        let x = 1;";
+        let result = auto_close_braces(source);
+        assert_eq!(check_brace_balance(&result), 0, "should be balanced after auto-close");
+        assert_eq!(result.matches("// auto-closed: truncated output").count(), 1, "single marker");
+    }
+
+    #[test]
+    fn test_auto_close_braces_extra_close() {
+        let source = "fn foo() {\n    1\n}\n}";
+        let result = auto_close_braces(source);
+        assert_eq!(result, source, "extra closes should not be modified");
     }
 }
