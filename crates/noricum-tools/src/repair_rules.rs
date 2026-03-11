@@ -156,9 +156,10 @@ pub fn auto_close_braces(source: &str) -> String {
 
 /// Apply all mechanical repair rules in sequence.
 ///
-/// Order matters: dedup first (removes duplicate definitions), then
-/// clone bounds (adds missing trait bounds), then mut option ref
-/// (fixes moved `Option<&mut T>` parameters).
+/// Order matters: R0 fence strip, R2 dedup (removes duplicate definitions),
+/// R1 clone bounds (adds missing trait bounds), R3 mut option ref
+/// (fixes moved `Option<&mut T>` parameters), R4 auto-close braces
+/// (safety net for truncated LLM output).
 pub fn apply_all_rules(source: &str, errors: &[CompilerError]) -> String {
     // R0 first: strip markdown fences (always, no error check needed)
     let mut result = rule_strip_markdown_fences(source);
@@ -169,6 +170,9 @@ pub fn apply_all_rules(source: &str, errors: &[CompilerError]) -> String {
     result = rule_clone_bounds(&result, errors);
     // R3: fix Option<&mut T> move errors
     result = rule_mut_option_ref(&result, errors);
+
+    // R4: auto-close unclosed braces from truncated LLM output
+    result = auto_close_braces(&result);
 
     result
 }
@@ -704,6 +708,17 @@ fn helper(x: i32) -> i32 { x * 2 }"#;
             result.matches("fn helper").count(),
             1,
             "Dedup should remove second definition"
+        );
+    }
+
+    #[test]
+    fn test_apply_all_rules_closes_braces() {
+        let source = "fn foo() {\n    let x = 1;";
+        let result = apply_all_rules(source, &[]);
+        assert_eq!(
+            check_brace_balance(&result),
+            0,
+            "apply_all_rules should auto-close braces via R4"
         );
     }
 
