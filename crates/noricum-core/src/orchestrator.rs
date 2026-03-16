@@ -1950,7 +1950,9 @@ async fn migrate_file_modular(
     difficulty: noricum_ir::Difficulty,
     artifacts: &Option<crate::artifacts::ArtifactStore>,
 ) -> Result<ModularResult, CoreError> {
-    let modules = noricum_tools::ast::split_into_modules(c_source, config.module_target_loc);
+    let module_split = noricum_tools::ast::split_into_modules(c_source, config.module_target_loc);
+    let modules = module_split.modules;
+    let _shared_context = module_split.shared_context;
 
     if modules.len() <= 1 {
         info!(function = %name, "modular split produced single module, falling back to chunked");

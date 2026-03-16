@@ -812,21 +812,33 @@ pub struct CModule {
     pub line_count: usize,
 }
 
+/// Result of splitting C source into modules.
+#[derive(Debug, Clone)]
+pub struct ModuleSplit {
+    /// The individual modules.
+    pub modules: Vec<CModule>,
+    /// Shared context extracted from the C source (includes, typedefs, structs, enums, globals).
+    pub shared_context: String,
+}
+
 /// P3: Split a large C source into logical modules for incremental migration.
 ///
 /// Groups functions by common prefix (e.g., `hash_` functions go in "hash" module,
 /// `parse_` functions go in "parse" module). Functions without a common prefix
 /// go into a "misc" module. Shared context (types, includes) is prepended to each.
-pub fn split_into_modules(c_source: &str, target_module_loc: Option<usize>) -> Vec<CModule> {
+pub fn split_into_modules(c_source: &str, target_module_loc: Option<usize>) -> ModuleSplit {
     let functions = extract_c_functions(c_source);
     if functions.len() < 4 {
         // Too few functions to split into modules
-        return vec![CModule {
-            name: "main".to_string(),
-            source: c_source.to_string(),
-            function_names: functions.iter().map(|f| f.name.clone()).collect(),
-            line_count: c_source.lines().count(),
-        }];
+        return ModuleSplit {
+            modules: vec![CModule {
+                name: "main".to_string(),
+                source: c_source.to_string(),
+                function_names: functions.iter().map(|f| f.name.clone()).collect(),
+                line_count: c_source.lines().count(),
+            }],
+            shared_context: String::new(),
+        };
     }
 
     // Extract shared context (everything outside function bodies)
@@ -925,7 +937,7 @@ pub fn split_into_modules(c_source: &str, target_module_loc: Option<usize>) -> V
             );
             modules.extend(sub_modules);
         } else {
-            let mut source = shared_context;
+            let mut source = shared_context.clone();
             source.push_str("\n\n// === Miscellaneous functions ===\n");
             let mut names = Vec::new();
             for func in &misc_funcs {
@@ -944,7 +956,10 @@ pub fn split_into_modules(c_source: &str, target_module_loc: Option<usize>) -> V
         }
     }
 
-    modules
+    ModuleSplit {
+        modules,
+        shared_context,
+    }
 }
 
 /// Sub-split a large function group into smaller sub-modules of ~`target_lines` LOC each.
@@ -1599,7 +1614,7 @@ void parse_expr(const char *s) { }
 void parse_stmt(const char *s) { }
 int main() { return 0; }
 ";
-        let modules = split_into_modules(source, None);
+        let modules = split_into_modules(source, None).modules;
         let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
         assert!(
             names.contains(&"hash"),
@@ -1622,7 +1637,7 @@ int main() { return 0; }
 int add(int a, int b) { return a + b; }
 int sub(int a, int b) { return a - b; }
 ";
-        let modules = split_into_modules(source, None);
+        let modules = split_into_modules(source, None).modules;
         assert_eq!(
             modules.len(),
             1,
@@ -1641,7 +1656,7 @@ void parse_stmt(const char *s) { }
 void unique_function(int x) { }
 int main() { return 0; }
 ";
-        let modules = split_into_modules(source, None);
+        let modules = split_into_modules(source, None).modules;
         // unique_function and main should be in misc
         let misc = modules.iter().find(|m| m.name == "misc");
         assert!(misc.is_some(), "should have misc module for singletons");
@@ -1654,7 +1669,7 @@ int main() { return 0; }
         if source.is_empty() {
             return; // skip if fixture not available
         }
-        let modules = split_into_modules(&source, None);
+        let modules = split_into_modules(&source, None).modules;
         // miniz_zip.c is ~4895 LOC — should produce multiple modules
         assert!(
             modules.len() > 1,
@@ -1703,7 +1718,7 @@ int main() { return 0; }
             source.push_str(&format!("int zip_func_{i}(int x) {{ return x + {i}; }}\n"));
         }
 
-        let modules = split_into_modules(&source, None);
+        let modules = split_into_modules(&source, None).modules;
         let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
 
         // The "mz" group (30 * 50 = ~1500 LOC) should be sub-split into multiple sub-modules
@@ -1753,8 +1768,8 @@ int main() { return 0; }
             ));
         }
         // With target 200 lines, should produce more modules than default 1000
-        let modules_small = split_into_modules(&source, Some(200));
-        let modules_default = split_into_modules(&source, None);
+        let modules_small = split_into_modules(&source, Some(200)).modules;
+        let modules_default = split_into_modules(&source, None).modules;
         assert!(
             modules_small.len() > modules_default.len(),
             "smaller target should produce more modules: {} vs {}",
@@ -1788,5 +1803,27 @@ int main() { return 0; }
         let chunks = chunk_c_source(source, 400);
         assert!(!chunks.is_empty());
         assert!(!chunks[0].is_data_chunk, "normal chunk should not be data");
+    }
+
+    #[test]
+    fn test_split_into_modules_returns_shared_context() {
+        let c_source = r#"
+#include <stdio.h>
+typedef struct { int x; int y; } Point;
+enum Color { RED, GREEN, BLUE };
+#define MAX_SIZE 100
+
+void point_create(Point* p) { p->x = 0; p->y = 0; }
+void point_move(Point* p, int dx, int dy) { p->x += dx; p->y += dy; }
+void color_print(enum Color c) { printf("%d\n", c); }
+void color_name(enum Color c) { printf("color\n"); }
+int misc_helper() { return 42; }
+"#;
+        let split = split_into_modules(c_source, None);
+        assert!(!split.shared_context.is_empty());
+        assert!(split.shared_context.contains("Point"));
+        assert!(split.shared_context.contains("Color"));
+        assert!(split.shared_context.contains("MAX_SIZE"));
+        assert!(!split.modules.is_empty());
     }
 }
