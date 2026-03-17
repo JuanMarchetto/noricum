@@ -181,7 +181,8 @@ fn build_type_contract_prompt(
             - T* + length → Vec<T>\n\
             - Nullable pointer (T*) → Option<Box<T>> or Option<Vec<T>>\n\
             - Function pointers → Option<fn(...) -> ...> (nullable) or fn(...) -> ... (non-null)\n\
-            - FILE* → Option<Box<dyn std::io::Write + std::io::Read + std::io::Seek>>\n\
+            - FILE* → Option<std::fs::File> (use concrete type, NOT trait objects with multiple traits)\n\
+            - NEVER use Box<dyn TraitA + TraitB> — Rust only allows ONE non-auto trait in trait objects\n\
             - mz_uint/mz_uint32/etc → use Rust native types (u32, u64, etc.) DIRECTLY in struct fields\n\
          3. Do NOT create C-style type aliases like `type MzBool = i32` — use bool directly.\n\
          4. Do NOT create aliases for basic integer types — use u8, u16, u32, u64, usize directly.\n\
