@@ -2415,9 +2415,13 @@ async fn migrate_single_module(
     let augmented_c = if let Some(tc) = type_contract {
         // P33: Type contract provides canonical types. accumulated_rust_context has only function sigs.
         format!(
-            "/* P33 TYPE CONTRACT: The following Rust types are ALREADY DEFINED and MUST be used exactly as-is.\n\
-             Do NOT redefine ANY struct, enum, const, or type alias below. They are final.\n\
-             Only write functions and impl blocks that USE these types.\n\n\
+            "/* P33 TYPE CONTRACT: The Rust types below are ALREADY DEFINED. Use them EXACTLY.\n\
+             CRITICAL:\n\
+             - Do NOT redefine ANY struct, enum, or const.\n\
+             - Use the EXACT field names from the structs below (e.g., archive_size, NOT m_archive_size).\n\
+             - Access struct fields using the EXACT names shown. If the contract says `pub archive_size: u64`, \
+               write `zip.archive_size`, NOT `zip.m_archive_size` or `zip.size`.\n\
+             - Only write functions and impl blocks that USE these types.\n\n\
              ```rust\n{}\n```\n*/\n\n\
              {}\n\n{}",
             tc,
