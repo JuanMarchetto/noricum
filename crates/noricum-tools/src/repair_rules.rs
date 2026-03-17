@@ -256,6 +256,9 @@ pub fn apply_all_rules(source: &str, errors: &[CompilerError]) -> String {
     // R3: fix Option<&mut T> move errors
     result = rule_mut_option_ref(&result, errors);
 
+    // R12: fix truncated functions at module boundaries (must come before R4)
+    result = rule_fix_truncated_module_boundary(&result);
+
     // R4: auto-close unclosed braces from truncated LLM output
     result = auto_close_braces(&result);
 
@@ -1001,6 +1004,85 @@ pub fn rule_strip_windows_imports(source: &str, errors: &[CompilerError]) -> Str
     result_lines.join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// R12: Fix truncated functions at module boundaries
+// ---------------------------------------------------------------------------
+
+/// Detect functions truncated at module boundaries (pattern: `pub fn name(\n...\n// --- Module:`)
+/// and close them with a stub body.
+///
+/// This recurring issue happens when module mz_p7's last function gets cut off
+/// at the `// --- Module: mz_p8 ---` boundary during assembly.
+pub fn rule_fix_truncated_module_boundary(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut result_lines: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+
+        // Detect module boundary marker
+        if trimmed.starts_with("// --- Module:") || trimmed.starts_with("// ---Module:") {
+            // Look backwards for an incomplete function signature (has `(` but no `{`)
+            let mut j = i.saturating_sub(1);
+            let mut found_incomplete = false;
+            while j > 0 && j > i.saturating_sub(10) {
+                let prev = lines[j].trim();
+                // Skip empty lines and comments
+                if prev.is_empty() || prev.starts_with("//") {
+                    j -= 1;
+                    continue;
+                }
+                // Check if this is a function parameter or signature line without `{`
+                if (prev.contains("pub fn ") || prev.contains("fn "))
+                    && !prev.contains('{')
+                {
+                    found_incomplete = true;
+                    break;
+                }
+                // If we hit a line that ends with `,` it's likely a parameter continuation
+                if prev.ends_with(',') {
+                    j -= 1;
+                    continue;
+                }
+                // If we see a line with types but no braces, could be return type
+                if !prev.contains('{') && !prev.contains('}') && !prev.ends_with(';') {
+                    j -= 1;
+                    continue;
+                }
+                break;
+            }
+
+            if found_incomplete {
+                // Remove the incomplete function lines (from fn signature to here)
+                // and replace with a stub
+                let fn_line = lines[j].trim();
+                // Extract function name for the stub
+                let fn_name = fn_line
+                    .split('(')
+                    .next()
+                    .unwrap_or(fn_line)
+                    .trim();
+                debug!(line = j + 1, "R12: fixing truncated function at module boundary");
+
+                // Remove lines from j to i-1 (the incomplete function)
+                while result_lines.len() > j {
+                    result_lines.pop();
+                }
+                // Add stub
+                result_lines.push(format!("// R12: truncated function stubbed at module boundary"));
+                result_lines.push(format!("{fn_name}() -> bool {{ false }}"));
+                result_lines.push(String::new());
+            }
+        }
+
+        result_lines.push(lines[i].to_string());
+        i += 1;
+    }
+
+    result_lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1230,6 +1312,48 @@ fn compute(
     }
 
     // -----------------------------------------------------------------------
+    // R12 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r12_fixes_truncated_function_at_module_boundary() {
+        let input = r#"pub fn good_fn() -> bool {
+    true
+}
+
+/// Adds a C file to a zip archive
+pub fn mz_zip_writer_add_cfile(
+    p_zip: &mut MzZipArchive,
+    p_archive_name: &str,
+    p_src_file: Option<std::fs::File>,
+
+// --- Module: mz_p8 ---
+pub fn next_fn() -> bool {
+    false
+}"#;
+        let result = rule_fix_truncated_module_boundary(input);
+        assert!(result.contains("R12: truncated function"));
+        assert!(result.contains("// --- Module: mz_p8 ---"));
+        assert!(result.contains("pub fn next_fn"));
+        // The truncated function should be replaced with a stub
+        assert!(!result.contains("p_archive_name"));
+    }
+
+    #[test]
+    fn test_r12_no_false_positive() {
+        let input = r#"pub fn complete_fn(x: i32) -> bool {
+    x > 0
+}
+
+// --- Module: mz_p2 ---
+pub fn other_fn() -> bool {
+    true
+}"#;
+        let result = rule_fix_truncated_module_boundary(input);
+        // Complete function before boundary should not be modified
+        assert!(result.contains("pub fn complete_fn(x: i32) -> bool {"));
+    }
+
     // apply_all_rules tests
     // -----------------------------------------------------------------------
 
