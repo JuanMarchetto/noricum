@@ -1373,12 +1373,17 @@ pub async fn migrate_file(
                 unit.metrics.repair_ms = repair_start.elapsed().as_millis() as u64;
                 info!(function = %name, "P30: hybrid repair resolved all compilation errors");
             } else {
-                // Cap legacy repair iterations for Phase 3 fallback
-                info!(function = %name, "P30 Phase 3: entering legacy repair (max 3 iterations)");
+                // P34b: Skip Phase 3 for assembly — legacy repair destroys assembled output
+                // (5408 LOC → 239 LOC observed in Run 12). Use P1 best-version instead.
+                warn!(
+                    function = %name,
+                    "P34b: skipping Phase 3 legacy repair for assembled output (preserving best version)"
+                );
+                hybrid_resolved = true; // Force skip of legacy repair
             }
         }
 
-        // Skip legacy repair if hybrid resolved everything
+        // Skip legacy repair if hybrid resolved everything or P34b skipped Phase 3
         if !hybrid_resolved {
 
         // P29: Use fast repair model for assembly repair (deepseek-chat instead of R1).
