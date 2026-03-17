@@ -89,9 +89,10 @@ pub async fn generate_type_contract(
             }
         };
 
-        // Post-process
+        // Post-process: strip fences, impls, and fix common LLM errors
         let cleaned = strip_markdown_fences(&raw);
-        let contract = strip_impl_blocks(&cleaned);
+        let no_impls = strip_impl_blocks(&cleaned);
+        let contract = fix_contract_compilation_issues(&no_impls);
 
         if contract.trim().is_empty() {
             tracing::warn!(
@@ -172,31 +173,28 @@ fn build_type_contract_prompt(
     };
 
     format!(
-        "Translate ALL type definitions from this C code to idiomatic, safe Rust.\n\n\
-         CRITICAL RULES:\n\
-         1. Every struct MUST have ALL its fields — never use empty structs or forward declarations.\n\
-         2. Use IDIOMATIC Rust types everywhere:\n\
-            - void* opaque handles → Box<dyn std::any::Any> or a concrete wrapper type\n\
-            - char* → String (owned) or &str (borrowed)\n\
-            - T* + length → Vec<T>\n\
-            - Nullable pointer (T*) → Option<Box<T>> or Option<Vec<T>>\n\
-            - Function pointers → Option<fn(...) -> ...> (nullable) or fn(...) -> ... (non-null)\n\
-            - FILE* → Option<std::fs::File> (use concrete type, NOT trait objects with multiple traits)\n\
-            - NEVER use Box<dyn TraitA + TraitB> — Rust only allows ONE non-auto trait in trait objects\n\
-            - mz_uint/mz_uint32/etc → use Rust native types (u32, u64, etc.) DIRECTLY in struct fields\n\
-         3. Do NOT create C-style type aliases like `type MzBool = i32` — use bool directly.\n\
-         4. Do NOT create aliases for basic integer types — use u8, u16, u32, u64, usize directly.\n\
-         5. Do NOT use raw pointers (*mut, *const) — use owned types (Box, Vec, Option).\n\
-         6. Convert typedef struct → pub struct with pub fields using idiomatic Rust names (CamelCase).\n\
-         7. Convert enum → pub enum with CamelCase variant names.\n\
-         8. Convert #define numeric constants → pub const with appropriate Rust type.\n\
-         9. Add #[derive(Debug, Clone)] where appropriate.\n\
-         10. NO function bodies, NO impl blocks, NO standalone fn definitions.\n\
-         11. Include brief doc comments for each type.\n\n\
-         Output ONLY valid Rust code. No markdown fences. No explanations.\n\n\
-         C source definitions (macros, includes):\n```c\n{shared_context}\n```\n\
+        "Translate the C type definitions below to Rust. Output ONLY valid, compilable Rust code.\n\n\
+         RULES (follow exactly to ensure compilation):\n\
+         1. Every struct must have ALL fields from the C definition. No empty structs.\n\
+         2. Field types — use these EXACT mappings:\n\
+            - void* → usize (opaque handle, cast later)\n\
+            - char* → String\n\
+            - T* with length → Vec<T>\n\
+            - Nullable T* → Option<Box<T>>\n\
+            - FILE* → usize (opaque file handle)\n\
+            - Function pointers → Option<usize> (opaque callback, cast later)\n\
+            - Integer types → use u8/u16/u32/u64/usize/i32/i64 directly\n\
+            - bool → bool\n\
+         3. Do NOT use: trait objects (dyn), raw pointers (*mut/*const), type aliases, Box<dyn Any>.\n\
+         4. Do NOT add #[derive(Clone)] on structs that contain usize handles. Use #[derive(Debug)] only.\n\
+         5. Struct names: CamelCase (e.g., MzZipArchive). Field names: snake_case.\n\
+         6. Enum variants: CamelCase. Use #[repr(i32)] if C enum has explicit values.\n\
+         7. Size/offset constants: pub const NAME: usize = value;\n\
+         8. NO impl blocks, NO fn definitions, NO type aliases.\n\
+         9. No markdown fences. No explanations. ONLY Rust code.\n\n\
+         C source definitions:\n```c\n{shared_context}\n```\n\
          {header_section}\n\
-         Full C source (for context on how types are used):\n```c\n{c_source_abbreviated}\n```",
+         C source (for field usage context):\n```c\n{c_source_abbreviated}\n```",
         shared_context = shared_context,
         header_section = header_section,
         c_source_abbreviated = c_source_abbreviated,
@@ -378,6 +376,71 @@ fn skip_braced_block_lines(lines: &[&str], start: usize) -> usize {
     i
 }
 
+/// Fix common LLM compilation errors in type contracts:
+/// - Replace `dyn TraitA + TraitB` with `usize` (E0225)
+/// - Replace bare `dyn Trait` without `Box` (E0782)
+/// - Remove `Clone` from derive when struct might not be Clone-safe
+/// - Replace `*mut T` / `*const T` with `usize`
+/// - Remove `type Alias = ...` lines
+fn fix_contract_compilation_issues(source: &str) -> String {
+    let mut result = String::with_capacity(source.len());
+    for line in source.lines() {
+        let trimmed = line.trim();
+
+        // Strip type aliases (e.g., `type MzBool = i32;`)
+        if (trimmed.starts_with("pub type ") || trimmed.starts_with("type "))
+            && trimmed.contains('=')
+            && trimmed.ends_with(';')
+        {
+            result.push_str(&format!("// P33: stripped alias: {trimmed}\n"));
+            continue;
+        }
+
+        let mut fixed = line.to_string();
+
+        // Replace Box<dyn TraitA + TraitB> → usize (E0225)
+        if fixed.contains("dyn ") && fixed.contains(" + ") {
+            // Multi-trait objects are invalid — replace entire type with usize
+            let re_pattern = regex::Regex::new(r"(?:Box<|Option<Box<)?dyn\s+[\w:]+(?:\s*\+\s*[\w:]+)+>?>?").ok();
+            if let Some(re) = re_pattern {
+                fixed = re.replace_all(&fixed, "usize").to_string();
+            }
+        }
+
+        // Replace bare `dyn Trait` (without Box) → usize (E0782)
+        if fixed.contains(": dyn ") || fixed.contains("(dyn ") {
+            let re_pattern = regex::Regex::new(r"(?<![<(])dyn\s+[\w:]+").ok();
+            if let Some(re) = re_pattern {
+                fixed = re.replace_all(&fixed, "usize").to_string();
+            }
+        }
+
+        // Replace raw pointers → usize
+        if fixed.contains("*mut ") || fixed.contains("*const ") {
+            fixed = fixed.replace("*mut std::ffi::c_void", "usize");
+            fixed = fixed.replace("*const std::ffi::c_void", "usize");
+            fixed = fixed.replace("*mut c_void", "usize");
+            fixed = fixed.replace("*const c_void", "usize");
+            // Generic pointer patterns
+            let re_pattern = regex::Regex::new(r"\*(?:mut|const)\s+[\w:]+").ok();
+            if let Some(re) = re_pattern {
+                fixed = re.replace_all(&fixed, "usize").to_string();
+            }
+        }
+
+        // Replace derive(Debug, Clone) → derive(Debug) to avoid E0277 on non-Clone fields
+        if trimmed.starts_with("#[derive(") && fixed.contains("Clone") {
+            fixed = fixed.replace(", Clone", "").replace("Clone, ", "").replace("Clone", "Debug");
+            // Deduplicate Debug
+            fixed = fixed.replace("Debug, Debug", "Debug").replace("(Debug, )", "(Debug)");
+        }
+
+        result.push_str(&fixed);
+        result.push('\n');
+    }
+    result
+}
+
 /// Strip markdown fences from LLM output.
 fn strip_markdown_fences(source: &str) -> String {
     source
@@ -401,8 +464,8 @@ mod tests {
         assert!(prompt.contains("typedef struct { int x; } Foo;"));
         assert!(prompt.contains("void bar() {}"));
         assert!(prompt.contains("NO impl blocks"));
-        assert!(prompt.contains("IDIOMATIC Rust types"));
-        assert!(prompt.contains("Do NOT create C-style type aliases"));
+        assert!(prompt.contains("EXACT mappings"));
+        assert!(prompt.contains("Do NOT use: trait objects"));
     }
 
     #[test]
@@ -603,5 +666,40 @@ pub type MzUint = u32;
             "Stripped contract should compile: {}",
             compile_result.stderr
         );
+    }
+
+    #[test]
+    fn test_fix_contract_compilation_issues() {
+        let input = r#"
+#[derive(Debug, Clone)]
+pub struct MzZipArchive {
+    pub m_p_file: Option<Box<dyn std::io::Read + std::io::Write>>,
+    pub m_p_state: *mut MzZipInternalState,
+    pub m_archive_size: u64,
+}
+
+pub type MzBool = i32;
+pub type MzUint = u32;
+"#;
+        let result = fix_contract_compilation_issues(input);
+
+        // Clone should be stripped (struct has usize handles)
+        assert!(!result.contains("Clone"), "Clone should be stripped");
+        assert!(result.contains("Debug"), "Debug should remain");
+
+        // dyn multi-trait → usize
+        assert!(!result.contains("dyn std::io::Read"), "trait objects should be replaced");
+        assert!(result.contains("usize"), "should have usize replacements");
+
+        // raw pointers → usize
+        assert!(!result.contains("*mut"), "raw pointers should be replaced");
+
+        // type aliases commented out (not active code)
+        assert!(result.contains("// P33: stripped alias"), "aliases should be commented out");
+        assert!(!result.contains("\npub type MzBool"), "aliases should not be active");
+
+        // Should compile
+        let compile = noricum_tools::compiler::check_rust_compiles(&result).unwrap();
+        assert!(compile.success, "Fixed contract should compile: {}", compile.stderr);
     }
 }
