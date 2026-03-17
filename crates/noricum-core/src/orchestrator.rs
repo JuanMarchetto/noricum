@@ -1952,11 +1952,27 @@ async fn migrate_file_modular(
 ) -> Result<ModularResult, CoreError> {
     let module_split = noricum_tools::ast::split_into_modules(c_source, config.module_target_loc);
     let modules = module_split.modules;
-    let _shared_context = module_split.shared_context;
+    let shared_context = module_split.shared_context;
 
     if modules.len() <= 1 {
         info!(function = %name, "modular split produced single module, falling back to chunked");
         return Ok(ModularResult::FallbackToChunked);
+    }
+
+    // P33: Generate type contract
+    let type_contract = crate::type_contract::generate_type_contract(
+        client,
+        provider_config,
+        &shared_context,
+        c_source,
+        artifacts.as_ref(),
+    )
+    .await?;
+
+    if let Some(ref tc) = type_contract {
+        tracing::info!("P33: type contract generated ({} lines)", tc.lines().count());
+    } else {
+        tracing::info!("P33: no type contract (will use per-module type discovery)");
     }
 
     // Build intra-file dependency graph and order modules
@@ -2045,6 +2061,7 @@ async fn migrate_file_modular(
                 &pre_wave_module_outputs,
                 pre_wave_module_number,
                 modules.len(),
+                type_contract.as_deref(),
             )
             .await;
             vec![result]
@@ -2068,6 +2085,7 @@ async fn migrate_file_modular(
                     let module_number = pre_wave_module_number + i;
                     let total = modules.len();
                     let parent_name = name;
+                    let tc = type_contract.as_deref();
 
                     async move {
                         migrate_single_module(
@@ -2087,6 +2105,7 @@ async fn migrate_file_modular(
                             pre_wave_outs,
                             module_number,
                             total,
+                            tc,
                         )
                         .await
                     }
@@ -2135,14 +2154,16 @@ async fn migrate_file_modular(
             if let Some(ref unit) = result.unit
                 && let Some(ref rust_output) = unit.rust_output
             {
-                // P27: Propagate complete type definitions (struct, enum, const, impl)
-                // so later modules use the same types instead of redefining them.
-                let type_defs = noricum_tools::ast::extract_rust_type_definitions(rust_output);
-                if !type_defs.is_empty() {
-                    accumulated_rust_context.push_str(&type_defs.join("\n\n"));
-                    accumulated_rust_context.push('\n');
+                // P33: When type contract active, only accumulate function signatures
+                // (types already in contract). Without contract, use P27 behavior.
+                if type_contract.is_none() {
+                    let type_defs =
+                        noricum_tools::ast::extract_rust_type_definitions(rust_output);
+                    if !type_defs.is_empty() {
+                        accumulated_rust_context.push_str(&type_defs.join("\n\n"));
+                        accumulated_rust_context.push('\n');
+                    }
                 }
-                // Also propagate function signatures for cross-module calls
                 let sigs = noricum_tools::ast::extract_rust_signatures(rust_output);
                 if !sigs.is_empty() {
                     accumulated_rust_context.push_str(&sigs.join("\n"));
@@ -2171,7 +2192,7 @@ async fn migrate_file_modular(
     }
 
     // Assemble final output from all module outputs
-    let combined = assemble_module_outputs(&module_outputs);
+    let combined = assemble_module_outputs(&module_outputs, type_contract.as_deref());
     let avg_score = if !module_outputs.is_empty() {
         best_combined_score / module_outputs.len() as u32
     } else {
@@ -2228,6 +2249,7 @@ async fn migrate_single_module(
     module_outputs: &[(String, String, bool)],
     module_number: usize,
     total_modules: usize,
+    type_contract: Option<&str>,
 ) -> Result<ModuleMigrationResult, CoreError> {
     let mod_name = format!("{name}::{}", module.name);
 
@@ -2300,16 +2322,6 @@ async fn migrate_single_module(
         FunctionUnit::new(mod_name.clone(), String::new(), module.source.clone());
     mod_unit.difficulty = Some(difficulty);
 
-    // Build translation context: accumulated Rust from prior modules
-    let context_note = if !accumulated_rust_context.is_empty() {
-        format!(
-            "\n// === Already migrated modules (use these types/functions) ===\n{}\n// === End migrated context ===\n",
-            accumulated_rust_context
-        )
-    } else {
-        String::new()
-    };
-
     // P19: Check if warm-start provides a seed for this module (SeedRepair)
     let warm_seed = if let (Some(manifest), Some(ws)) = (warm_manifest, warm_store) {
         manifest
@@ -2332,11 +2344,28 @@ async fn migrate_single_module(
     let translation_model_sel = select_model(provider_config, difficulty, "translation")?;
     let relevant_patterns = pattern_store.find_relevant(&module.source, 3);
 
-    // P27: Inject accumulated context as a prefix hint in the C source.
-    // The prompt strongly instructs the LLM to reuse existing types, not redefine them.
-    let augmented_c = if context_note.is_empty() {
-        module.source.clone()
-    } else {
+    // P33/P27: Inject type contract or accumulated context as a prefix hint in the C source.
+    let augmented_c = if let Some(tc) = type_contract {
+        // P33: Type contract provides canonical types. accumulated_rust_context has only function sigs.
+        format!(
+            "/* P33 TYPE CONTRACT: The following Rust types are ALREADY DEFINED and MUST be used exactly as-is.\n\
+             Do NOT redefine ANY struct, enum, const, or type alias below. They are final.\n\
+             Only write functions and impl blocks that USE these types.\n\n\
+             ```rust\n{}\n```\n*/\n\n\
+             {}\n\n{}",
+            tc,
+            if accumulated_rust_context.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "/* Already migrated function signatures (use these, do not redefine):\n{}\n*/",
+                    accumulated_rust_context
+                )
+            },
+            module.source
+        )
+    } else if !accumulated_rust_context.is_empty() {
+        // Existing P27 behavior (no type contract)
         format!(
             "/* MIGRATION CONTEXT: The following Rust types and functions have already been migrated \
 from earlier modules in this same file.\n\
@@ -2348,6 +2377,8 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
 \n{}\n*/\n\n{}",
             accumulated_rust_context, module.source
         )
+    } else {
+        module.source.clone()
     };
 
     // P19: Use warm-start seed if available, skip translation
@@ -2911,11 +2942,27 @@ fn merge_use_statements(uses: Vec<String>) -> Vec<String> {
 /// across modules. The first module to define a name wins; subsequent modules
 /// have their duplicate definitions stripped. This prevents compilation errors
 /// from modules that independently translate the same C types.
-fn assemble_module_outputs(modules: &[(String, String, bool)]) -> String {
+fn assemble_module_outputs(modules: &[(String, String, bool)], type_contract: Option<&str>) -> String {
     let mut all_uses: Vec<String> = Vec::new();
     let mut code_parts: Vec<String> = Vec::new();
     // P27: Track which type names have already been defined
     let mut defined_types: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // P33: If type contract provided, seed defined_types so P27 dedup strips module redefinitions
+    let contract_block = if let Some(contract) = type_contract {
+        for cline in contract.lines() {
+            let trimmed = cline.trim();
+            if let Some(type_name) = extract_definition_name(trimmed) {
+                defined_types.insert(type_name);
+            }
+        }
+        format!(
+            "// === P33: Type Contract (shared types) ===\n{}\n// === End Type Contract ===\n\n",
+            contract
+        )
+    } else {
+        String::new()
+    };
 
     for (mod_name, rust_code, _compiles) in modules {
         // P31: Strip markdown fences before processing
@@ -2943,6 +2990,10 @@ fn assemble_module_outputs(modules: &[(String, String, bool)]) -> String {
         let merged = merge_use_statements(all_uses);
         output.push_str(&merged.join("\n"));
         output.push_str("\n\n");
+    }
+    // P33: Prepend type contract before module code
+    if !contract_block.is_empty() {
+        output.push_str(&contract_block);
     }
     output.push_str(&code_parts.join("\n\n"));
     output.push('\n');
@@ -3526,7 +3577,7 @@ fn main() {
                 true,
             ),
         ];
-        let result = assemble_module_outputs(&modules);
+        let result = assemble_module_outputs(&modules, None);
         // Each use should appear exactly once
         assert_eq!(
             result.matches("use std::collections::HashMap;").count(),
@@ -3543,7 +3594,7 @@ fn main() {
     #[test]
     fn test_assemble_module_outputs_empty() {
         let modules: Vec<(String, String, bool)> = vec![];
-        let result = assemble_module_outputs(&modules);
+        let result = assemble_module_outputs(&modules, None);
         assert_eq!(result.trim(), "");
     }
 
@@ -3561,7 +3612,7 @@ fn main() {
                 false,
             ),
         ];
-        let assembled = assemble_module_outputs(&modules);
+        let assembled = assemble_module_outputs(&modules, None);
         assert!(
             !assembled.contains("```"),
             "fences should be stripped from assembly:\n{assembled}"
@@ -3589,7 +3640,7 @@ fn main() {
                 true,
             ),
         ];
-        let assembled = assemble_module_outputs(&modules);
+        let assembled = assemble_module_outputs(&modules, None);
 
         // Should have exactly ONE std::io import with all items merged
         let io_lines: Vec<&str> = assembled
@@ -3618,7 +3669,7 @@ fn main() {
             ("mod_b".to_string(), "fn bar() {\n    if true {\n        let x = 1;".to_string(), false),
             ("mod_c".to_string(), "fn baz() {\n    2\n}".to_string(), true),
         ];
-        let result = assemble_module_outputs(&modules);
+        let result = assemble_module_outputs(&modules, None);
         // All modules should be present in assembly (truncated ones included)
         assert!(result.contains("fn foo()"), "mod_a present");
         assert!(result.contains("fn bar()"), "mod_b present");
@@ -3704,7 +3755,7 @@ fn main() {
             ("second".to_string(), "fn b() {}\n".to_string(), true),
             ("third".to_string(), "fn c() {}\n".to_string(), true),
         ];
-        let result = assemble_module_outputs(&modules);
+        let result = assemble_module_outputs(&modules, None);
         let pos_a = result.find("Module: first").unwrap();
         let pos_b = result.find("Module: second").unwrap();
         let pos_c = result.find("Module: third").unwrap();
@@ -3721,7 +3772,7 @@ fn main() {
             ("types".to_string(), mod_a, true),
             ("ops".to_string(), mod_b, true),
         ];
-        let result = assemble_module_outputs(&modules);
+        let result = assemble_module_outputs(&modules, None);
         // ZipArchive struct should appear exactly once
         assert_eq!(
             result.matches("pub struct ZipArchive").count(), 1,
@@ -3740,7 +3791,7 @@ fn main() {
             ("base".to_string(), mod_a, true),
             ("ext".to_string(), mod_b, true),
         ];
-        let result = assemble_module_outputs(&modules);
+        let result = assemble_module_outputs(&modules, None);
         assert_eq!(result.matches("pub enum ZipError").count(), 1, "enum should be deduped");
         assert_eq!(result.matches("pub const HEADER_SIZE").count(), 1, "const should be deduped");
         assert!(result.contains("fn init()"));
@@ -3757,7 +3808,7 @@ fn main() {
             ("first".to_string(), mod_a, true),
             ("second".to_string(), mod_b, true),
         ];
-        let result = assemble_module_outputs(&modules);
+        let result = assemble_module_outputs(&modules, None);
         assert_eq!(result.matches("pub struct ZipArchive").count(), 1);
         // First definition should be kept (2 fields, no extra)
         assert!(result.contains("pub name: String"), "first def fields should be present");
@@ -3958,5 +4009,78 @@ fn main() {
             unsafe_count: 0,
         };
         assert_eq!(warm_start_action(&nearly_low), WarmAction::Retranslate);
+    }
+
+    #[test]
+    fn test_assemble_with_type_contract() {
+        let contract = "pub struct Foo { pub x: i32 }\npub enum Bar { A, B }\n";
+        let modules = vec![
+            (
+                "mod1".to_string(),
+                "pub fn create_foo() -> Foo { Foo { x: 1 } }".to_string(),
+                true,
+            ),
+            (
+                "mod2".to_string(),
+                "pub fn get_bar() -> Bar { Bar::A }".to_string(),
+                true,
+            ),
+        ];
+        let result = assemble_module_outputs(&modules, Some(contract));
+        let contract_pos = result.find("pub struct Foo").unwrap();
+        let fn_pos = result.find("pub fn create_foo").unwrap();
+        assert!(
+            contract_pos < fn_pos,
+            "Type contract should precede module code"
+        );
+        assert!(result.contains("pub fn get_bar"));
+        assert!(
+            result.contains("P33: Type Contract"),
+            "should contain contract header"
+        );
+    }
+
+    #[test]
+    fn test_assemble_with_type_contract_dedup() {
+        // P33: Module redefines a type from the contract — should be stripped
+        let contract = "pub struct Foo { pub x: i32 }\n";
+        let modules = vec![(
+            "mod1".to_string(),
+            "pub struct Foo { pub x: i32 }\npub fn use_foo(f: &Foo) -> i32 { f.x }".to_string(),
+            true,
+        )];
+        let result = assemble_module_outputs(&modules, Some(contract));
+        // Foo from the contract block + module's Foo stripped = exactly 1 occurrence
+        assert_eq!(
+            result.matches("pub struct Foo").count(),
+            1,
+            "contract types should not be duplicated by module redefinitions: {result}"
+        );
+        assert!(result.contains("pub fn use_foo"));
+    }
+
+    #[test]
+    fn test_assemble_without_type_contract() {
+        // None contract = legacy behavior
+        let modules = vec![
+            (
+                "a".to_string(),
+                "pub struct X { pub v: i32 }\nfn a() {}".to_string(),
+                true,
+            ),
+            (
+                "b".to_string(),
+                "pub struct X { pub v: i32 }\nfn b() {}".to_string(),
+                true,
+            ),
+        ];
+        let result = assemble_module_outputs(&modules, None);
+        assert!(!result.contains("P33: Type Contract"));
+        // P27 dedup still works
+        assert_eq!(
+            result.matches("pub struct X").count(),
+            1,
+            "P27 dedup should still work without contract"
+        );
     }
 }
