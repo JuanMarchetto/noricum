@@ -597,16 +597,12 @@ impl MzZipInternalState {
 }
 
 // --- Module: mz_p1 ---
-fn main() {
-}
 
 // --- Module: mz_p2 ---
 
 // --- Module: mz_p3 ---
 
 // --- Module: mz_p4 ---
-// This module provides additional methods on types defined elsewhere.
-// No duplicate definitions.
 
 // --- Module: mz_p5 ---
 
@@ -1367,90 +1363,6 @@ const MZ_UBER_COMPRESSION: u32 = 10;
 // --- Module: mz_p8 ---
 
 // --- Module: mz_p9 ---
-// Helper function to check if pointer is NULL
-fn ptr_is_null<T>(ptr: *const T) -> bool {
-    ptr.is_null()
-}
-
-// Helper for conditional compilation - we'll use std::fs instead
-#[cfg(not(feature = "no_std_io"))]
-fn open_zip_file(path: &str, flags: u32) -> Result<std::fs::File, MzZipError> {
-    std::fs::File::open(path).map_err(|_| MzZipError::FileOpenFailed)
-}
-
-pub fn mz_zip_extract_archive_file_to_heap_v2(
-    pZip_filename: &str,
-    pArchive_name: &str,
-    pComment: Option<&str>,
-    pSize: &mut usize,
-    flags: u32,
-    pErr: &mut Option<MzZipError>,
-) -> Result<Vec<u8>, MzZipError> {
-    *pSize = 0;
-    
-    if pZip_filename.is_empty() || pArchive_name.is_empty() {
-        if let Some(err) = pErr {
-            *err = MzZipError::InvalidParameter;
-        }
-        return Err(MzZipError::InvalidParameter);
-    }
-    
-    // Initialize zip archive
-    let mut zip_archive = MzZipArchive::default();
-    
-    // Initialize file reader
-    #[cfg(not(feature = "no_std_io"))]
-    {
-        let file = open_zip_file(pZip_filename, flags | MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY)?;
-        // Note: This assumes mz_zip_reader_init_file_v2 exists in Rust
-        // We'll need to implement it separately
-        if let Err(e) = mz_zip_reader_init_file_v2(&mut zip_archive, &file, flags, 0, 0) {
-            if let Some(err) = pErr {
-                *err = zip_archive.m_last_error;
-            }
-            return Err(e);
-        }
-    }
-    
-    #[cfg(feature = "no_std_io")]
-    {
-        return Err(MzZipError::UnsupportedFeature);
-    }
-    
-    // Locate file
-    let file_index = if let Some(comment) = pComment {
-        mz_zip_reader_locate_file_v2(&zip_archive, pArchive_name, Some(comment), flags)
-    } else {
-        mz_zip_reader_locate_file_v2(&zip_archive, pArchive_name, None, flags)
-    };
-    
-    let result = if let Some(index) = file_index {
-        mz_zip_reader_extract_to_heap(&zip_archive, index, flags)
-    } else {
-        Err(MzZipError::FileNotFound)
-    };
-    
-    // Clean up
-    mz_zip_reader_end_internal(&mut zip_archive, result.is_ok());
-    
-    if let Some(err) = pErr {
-        *err = zip_archive.m_last_error;
-    }
-    
-    result.map(|data| {
-        *pSize = data.len();
-        data
-    })
-}
-
-pub fn mz_zip_extract_archive_file_to_heap(
-    pZip_filename: &str,
-    pArchive_name: &str,
-    pSize: &mut usize,
-    flags: u32,
-) -> Result<Vec<u8>, MzZipError> {
-    mz_zip_extract_archive_file_to_heap_v2(pZip_filename, pArchive_name, None, pSize, flags, &mut None)
-}
 
 pub fn mz_zip_get_mode(pZip: Option<&MzZipArchive>) -> MzZipMode {
     pZip.map_or(MzZipMode::Invalid, |zip| zip.m_zip_mode)
@@ -2254,4 +2166,1431 @@ fn mz_zip_reader_read_central_dir(pZip: &mut MzZipArchive, flags: u32) -> bool {
     }
 
     true
+}
+
+// ============================================================================
+// Additional API functions
+// ============================================================================
+
+// --- Constants for new functions ---
+const MZ_ZIP_FLAG_CASE_SENSITIVE: u32 = 0x0100;
+const MZ_ZIP_FLAG_IGNORE_PATH: u32 = 0x0200;
+const MZ_ZIP_FLAG_VALIDATE_LOCATE_FILE_FLAG: u32 = 0x1000;
+const MZ_ZIP_FLAG_VALIDATE_HEADERS_ONLY: u32 = 0x2000;
+const MZ_ZIP_MAX_IO_BUF_SIZE: usize = 64 * 1024;
+
+// --- Reader info functions ---
+
+/// Check if a file entry in the archive is a directory.
+pub fn mz_zip_reader_is_file_a_directory(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+) -> bool {
+    let cdh = match mz_zip_get_cdh(p_zip, file_index) {
+        Some(data) if data.len() >= MZ_ZIP_CENTRAL_DIR_HEADER_SIZE => data,
+        _ => return false,
+    };
+    let filename_len = read_le16(cdh, MZ_ZIP_CDH_FILENAME_LEN_OFS) as usize;
+    if filename_len > 0 {
+        let fname_start = MZ_ZIP_CENTRAL_DIR_HEADER_SIZE;
+        if fname_start + filename_len <= cdh.len() && cdh[fname_start + filename_len - 1] == b'/' {
+            return true;
+        }
+    }
+    let external_attr = read_le32(cdh, MZ_ZIP_CDH_EXTERNAL_ATTR_OFS);
+    (external_attr & MZ_ZIP_DOS_DIR_ATTRIBUTE_BITFLAG as u32) != 0
+}
+
+/// Check if a file entry in the archive is encrypted.
+pub fn mz_zip_reader_is_file_encrypted(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+) -> bool {
+    let cdh = match mz_zip_get_cdh(p_zip, file_index) {
+        Some(data) if data.len() >= MZ_ZIP_CENTRAL_DIR_HEADER_SIZE => data,
+        _ => return false,
+    };
+    let bit_flag = read_le16(cdh, MZ_ZIP_CDH_BIT_FLAG_OFS);
+    (bit_flag & (MZ_ZIP_GENERAL_PURPOSE_BIT_FLAG_IS_ENCRYPTED as u16)) != 0
+}
+
+/// Check if a file entry in the archive is supported (not encrypted, uses
+/// store or deflate).
+pub fn mz_zip_reader_is_file_supported(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+) -> bool {
+    let cdh = match mz_zip_get_cdh(p_zip, file_index) {
+        Some(data) if data.len() >= MZ_ZIP_CENTRAL_DIR_HEADER_SIZE => data,
+        _ => return false,
+    };
+    let bit_flag = read_le16(cdh, MZ_ZIP_CDH_BIT_FLAG_OFS);
+    let method = read_le16(cdh, MZ_ZIP_CDH_METHOD_OFS);
+    let encrypted = (bit_flag & (MZ_ZIP_GENERAL_PURPOSE_BIT_FLAG_IS_ENCRYPTED as u16)) != 0;
+    let patch = (bit_flag & (MZ_ZIP_GENERAL_PURPOSE_BIT_FLAG_COMPRESSED_PATCH_FLAG as u16)) != 0;
+    !encrypted && !patch && (method == 0 || method == MZ_DEFLATED as u16)
+}
+
+// --- Reader locate (public wrappers) ---
+
+/// Locate a file in the archive by name. Returns -1 if not found.
+pub fn mz_zip_reader_locate_file(
+    p_zip: &MzZipArchive,
+    name: &str,
+    comment: Option<&str>,
+    flags: u32,
+) -> i32 {
+    match mz_zip_reader_locate_file_v2_pub(p_zip, name, comment, flags) {
+        Some(idx) => idx as i32,
+        None => -1,
+    }
+}
+
+/// Locate a file in the archive by name (v2). Returns file index or None.
+pub fn mz_zip_reader_locate_file_v2_pub(
+    p_zip: &MzZipArchive,
+    name: &str,
+    comment: Option<&str>,
+    flags: u32,
+) -> Option<u32> {
+    mz_zip_reader_locate_file_v2(p_zip, name, comment, flags)
+}
+
+// --- String comparison helpers ---
+
+fn mz_zip_string_equal(a: &[u8], b: &[u8], flags: u32) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    if (flags & MZ_ZIP_FLAG_CASE_SENSITIVE) != 0 {
+        a == b
+    } else {
+        a.iter().zip(b.iter()).all(|(&x, &y)| mz_tolower(x) == mz_tolower(y))
+    }
+}
+
+// --- Reader extract: to memory ---
+
+/// Extract a file to a caller-provided buffer (no internal alloc for read buf).
+pub fn mz_zip_reader_extract_to_mem_no_alloc(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+    buf: &mut [u8],
+    flags: u32,
+) -> Result<(), MzZipError> {
+    mz_zip_reader_extract_to_mem_internal(p_zip, file_index, buf, flags)
+}
+
+/// Extract a file (by name) to a caller-provided buffer.
+pub fn mz_zip_reader_extract_file_to_mem_no_alloc(
+    p_zip: &MzZipArchive,
+    filename: &str,
+    buf: &mut [u8],
+    flags: u32,
+) -> Result<(), MzZipError> {
+    let idx = mz_zip_reader_locate_file_v2(p_zip, filename, None, flags)
+        .ok_or(MzZipError::FileNotFound)?;
+    mz_zip_reader_extract_to_mem_internal(p_zip, idx, buf, flags)
+}
+
+/// Extract a file to a caller-provided buffer.
+pub fn mz_zip_reader_extract_to_mem(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+    buf: &mut [u8],
+    flags: u32,
+) -> Result<(), MzZipError> {
+    mz_zip_reader_extract_to_mem_internal(p_zip, file_index, buf, flags)
+}
+
+/// Extract a file (by name) to a caller-provided buffer.
+pub fn mz_zip_reader_extract_file_to_mem(
+    p_zip: &MzZipArchive,
+    filename: &str,
+    buf: &mut [u8],
+    flags: u32,
+) -> Result<(), MzZipError> {
+    let idx = mz_zip_reader_locate_file_v2(p_zip, filename, None, flags)
+        .ok_or(MzZipError::FileNotFound)?;
+    mz_zip_reader_extract_to_mem_internal(p_zip, idx, buf, flags)
+}
+
+/// Internal helper: extract file data into a provided buffer from memory-backed archive.
+fn mz_zip_reader_extract_to_mem_internal(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+    buf: &mut [u8],
+    flags: u32,
+) -> Result<(), MzZipError> {
+    let cdh = mz_zip_get_cdh(p_zip, file_index).ok_or(MzZipError::InvalidParameter)?;
+    let mut file_stat = MzZipArchiveFileStat {
+        m_file_index: 0, m_central_dir_ofs: 0, m_version_made_by: 0,
+        m_version_needed: 0, m_bit_flag: 0, m_method: 0, m_crc32: 0,
+        m_comp_size: 0, m_uncomp_size: 0, m_internal_attr: 0,
+        m_external_attr: 0, m_local_header_ofs: 0, m_comment_size: 0,
+        m_is_directory: false, m_is_encrypted: false, m_is_supported: false,
+        m_filename: String::new(), m_comment: String::new(), m_time: 0,
+    };
+    if !mz_zip_file_stat_internal(p_zip, file_index, Some(cdh), &mut file_stat) {
+        return Err(MzZipError::FileNotFound);
+    }
+    if file_stat.m_is_directory || file_stat.m_uncomp_size == 0 {
+        return Ok(());
+    }
+    if file_stat.m_is_encrypted {
+        return Err(MzZipError::UnsupportedEncryption);
+    }
+    if file_stat.m_method != 0 && file_stat.m_method != MZ_DEFLATED as u16 {
+        return Err(MzZipError::UnsupportedMethod);
+    }
+    let needed = file_stat.m_uncomp_size as usize;
+    if buf.len() < needed {
+        return Err(MzZipError::BufTooSmall);
+    }
+
+    let state = p_zip.m_pstate.as_ref().ok_or(MzZipError::InternalError)?;
+    let pmem = state.pmem.as_ref().ok_or(MzZipError::UnsupportedFeature)?;
+    let start = (state.file_archive_start_ofs + file_stat.m_local_header_ofs) as usize;
+    if start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE > pmem.len() {
+        return Err(MzZipError::FileReadFailed);
+    }
+    let local_header = &pmem[start..start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE];
+    let sig = read_le32(local_header, 0);
+    if sig != MZ_ZIP_LOCAL_DIR_HEADER_SIG as u32 {
+        return Err(MzZipError::InvalidHeaderOrCorrupted);
+    }
+    let fname_len = read_le16(local_header, MZ_ZIP_LDH_FILENAME_LEN_OFS) as u64;
+    let extra_len = read_le16(local_header, MZ_ZIP_LDH_EXTRA_LEN_OFS) as u64;
+    let data_ofs = start as u64 + MZ_ZIP_LOCAL_DIR_HEADER_SIZE as u64 + fname_len + extra_len;
+
+    if file_stat.m_method == 0 {
+        let ds = data_ofs as usize;
+        let de = ds + needed;
+        if de > pmem.len() {
+            return Err(MzZipError::FileReadFailed);
+        }
+        buf[..needed].copy_from_slice(&pmem[ds..de]);
+        let crc = mz_crc32(MZ_CRC32_INIT, &buf[..needed]);
+        if crc != file_stat.m_crc32 {
+            return Err(MzZipError::CrcCheckFailed);
+        }
+        Ok(())
+    } else {
+        // Deflated: call tinfl_decompress stub
+        let comp_start = data_ofs as usize;
+        let comp_end = comp_start + file_stat.m_comp_size as usize;
+        if comp_end > pmem.len() {
+            return Err(MzZipError::FileReadFailed);
+        }
+        let compressed = &pmem[comp_start..comp_end];
+        let decompressed = tinfl_decompress(compressed, needed)?;
+        if decompressed.len() != needed {
+            return Err(MzZipError::UnexpectedDecompressedSize);
+        }
+        buf[..needed].copy_from_slice(&decompressed);
+        let crc = mz_crc32(MZ_CRC32_INIT, &buf[..needed]);
+        if crc != file_stat.m_crc32 {
+            return Err(MzZipError::CrcCheckFailed);
+        }
+        Ok(())
+    }
+}
+
+/// Stub decompression function. In a real build, this would invoke the tinfl
+/// decompressor. For now it returns DecompressionFailed for deflated data.
+fn tinfl_decompress(compressed: &[u8], expected_size: usize) -> Result<Vec<u8>, MzZipError> {
+    // Placeholder: a real implementation would perform DEFLATE decompression.
+    let _ = (compressed, expected_size);
+    Err(MzZipError::DecompressionFailed)
+}
+
+/// Extract a file to a heap-allocated buffer (by name).
+pub fn mz_zip_reader_extract_file_to_heap(
+    p_zip: &MzZipArchive,
+    filename: &str,
+    flags: u32,
+) -> Result<Vec<u8>, MzZipError> {
+    let idx = mz_zip_reader_locate_file_v2(p_zip, filename, None, flags)
+        .ok_or(MzZipError::FileNotFound)?;
+    mz_zip_reader_extract_to_heap(p_zip, idx, flags)
+}
+
+// --- Reader extract: to callback ---
+
+/// Write callback type: receives (offset, data) and returns bytes written.
+pub type MzFileWriteFunc = fn(opaque: &mut dyn std::any::Any, file_ofs: u64, buf: &[u8]) -> usize;
+
+/// Extract a file and send data through a callback.
+pub fn mz_zip_reader_extract_to_callback(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+    callback: fn(&mut Vec<u8>, u64, &[u8]) -> usize,
+    opaque: &mut Vec<u8>,
+    flags: u32,
+) -> Result<(), MzZipError> {
+    let cdh = mz_zip_get_cdh(p_zip, file_index).ok_or(MzZipError::InvalidParameter)?;
+    let mut file_stat = MzZipArchiveFileStat {
+        m_file_index: 0, m_central_dir_ofs: 0, m_version_made_by: 0,
+        m_version_needed: 0, m_bit_flag: 0, m_method: 0, m_crc32: 0,
+        m_comp_size: 0, m_uncomp_size: 0, m_internal_attr: 0,
+        m_external_attr: 0, m_local_header_ofs: 0, m_comment_size: 0,
+        m_is_directory: false, m_is_encrypted: false, m_is_supported: false,
+        m_filename: String::new(), m_comment: String::new(), m_time: 0,
+    };
+    if !mz_zip_file_stat_internal(p_zip, file_index, Some(cdh), &mut file_stat) {
+        return Err(MzZipError::FileNotFound);
+    }
+    if file_stat.m_is_directory || file_stat.m_uncomp_size == 0 {
+        return Ok(());
+    }
+    if file_stat.m_is_encrypted {
+        return Err(MzZipError::UnsupportedEncryption);
+    }
+    if file_stat.m_method != 0 && file_stat.m_method != MZ_DEFLATED as u16 {
+        return Err(MzZipError::UnsupportedMethod);
+    }
+
+    let state = p_zip.m_pstate.as_ref().ok_or(MzZipError::InternalError)?;
+    let pmem = state.pmem.as_ref().ok_or(MzZipError::UnsupportedFeature)?;
+    let start = (state.file_archive_start_ofs + file_stat.m_local_header_ofs) as usize;
+    if start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE > pmem.len() {
+        return Err(MzZipError::FileReadFailed);
+    }
+    let lh = &pmem[start..start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE];
+    if read_le32(lh, 0) != MZ_ZIP_LOCAL_DIR_HEADER_SIG as u32 {
+        return Err(MzZipError::InvalidHeaderOrCorrupted);
+    }
+    let fname_len = read_le16(lh, MZ_ZIP_LDH_FILENAME_LEN_OFS) as u64;
+    let extra_len = read_le16(lh, MZ_ZIP_LDH_EXTRA_LEN_OFS) as u64;
+    let data_ofs = start as u64 + MZ_ZIP_LOCAL_DIR_HEADER_SIZE as u64 + fname_len + extra_len;
+
+    if file_stat.m_method == 0 {
+        let ds = data_ofs as usize;
+        let de = ds + file_stat.m_uncomp_size as usize;
+        if de > pmem.len() {
+            return Err(MzZipError::FileReadFailed);
+        }
+        let data = &pmem[ds..de];
+        let crc = mz_crc32(MZ_CRC32_INIT, data);
+        if crc != file_stat.m_crc32 {
+            return Err(MzZipError::CrcCheckFailed);
+        }
+        let written = callback(opaque, 0, data);
+        if written != data.len() {
+            return Err(MzZipError::WriteCallbackFailed);
+        }
+        Ok(())
+    } else {
+        Err(MzZipError::DecompressionFailed)
+    }
+}
+
+/// Extract a file (by name) and send data through a callback.
+pub fn mz_zip_reader_extract_file_to_callback(
+    p_zip: &MzZipArchive,
+    filename: &str,
+    callback: fn(&mut Vec<u8>, u64, &[u8]) -> usize,
+    opaque: &mut Vec<u8>,
+    flags: u32,
+) -> Result<(), MzZipError> {
+    let idx = mz_zip_reader_locate_file_v2(p_zip, filename, None, flags)
+        .ok_or(MzZipError::FileNotFound)?;
+    mz_zip_reader_extract_to_callback(p_zip, idx, callback, opaque, flags)
+}
+
+// --- Reader extract: iterator ---
+
+/// Create a new extraction iterator for a file by index.
+pub fn mz_zip_reader_extract_iter_new(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+    flags: u32,
+) -> Result<MzZipReaderExtractIterState, MzZipError> {
+    let cdh = mz_zip_get_cdh(p_zip, file_index).ok_or(MzZipError::InvalidParameter)?;
+    let mut file_stat = MzZipArchiveFileStat {
+        m_file_index: 0, m_central_dir_ofs: 0, m_version_made_by: 0,
+        m_version_needed: 0, m_bit_flag: 0, m_method: 0, m_crc32: 0,
+        m_comp_size: 0, m_uncomp_size: 0, m_internal_attr: 0,
+        m_external_attr: 0, m_local_header_ofs: 0, m_comment_size: 0,
+        m_is_directory: false, m_is_encrypted: false, m_is_supported: false,
+        m_filename: String::new(), m_comment: String::new(), m_time: 0,
+    };
+    if !mz_zip_file_stat_internal(p_zip, file_index, Some(cdh), &mut file_stat) {
+        return Err(MzZipError::FileNotFound);
+    }
+    if file_stat.m_is_encrypted {
+        return Err(MzZipError::UnsupportedEncryption);
+    }
+    if file_stat.m_method != 0 && file_stat.m_method != MZ_DEFLATED as u16 {
+        return Err(MzZipError::UnsupportedMethod);
+    }
+
+    // Pre-extract the entire file into pread_buf for simple iteration
+    let state = p_zip.m_pstate.as_ref().ok_or(MzZipError::InternalError)?;
+    let pmem = state.pmem.as_ref().ok_or(MzZipError::UnsupportedFeature)?;
+    let start = (state.file_archive_start_ofs + file_stat.m_local_header_ofs) as usize;
+    if start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE > pmem.len() {
+        return Err(MzZipError::FileReadFailed);
+    }
+    let lh = &pmem[start..start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE];
+    if read_le32(lh, 0) != MZ_ZIP_LOCAL_DIR_HEADER_SIG as u32 {
+        return Err(MzZipError::InvalidHeaderOrCorrupted);
+    }
+    let fname_len = read_le16(lh, MZ_ZIP_LDH_FILENAME_LEN_OFS) as u64;
+    let extra_len = read_le16(lh, MZ_ZIP_LDH_EXTRA_LEN_OFS) as u64;
+    let data_ofs = start as u64 + MZ_ZIP_LOCAL_DIR_HEADER_SIZE as u64 + fname_len + extra_len;
+
+    let extracted_data = if file_stat.m_is_directory || file_stat.m_uncomp_size == 0 {
+        Vec::new()
+    } else if file_stat.m_method == 0 {
+        let ds = data_ofs as usize;
+        let de = ds + file_stat.m_uncomp_size as usize;
+        if de > pmem.len() {
+            return Err(MzZipError::FileReadFailed);
+        }
+        pmem[ds..de].to_vec()
+    } else {
+        return Err(MzZipError::DecompressionFailed);
+    };
+
+    Ok(MzZipReaderExtractIterState {
+        pzip: None,
+        file_stat,
+        file_crc32: 0,
+        status: 0,
+        pread_buf: Some(extracted_data),
+        pwrite_buf: None,
+    })
+}
+
+/// Create a new extraction iterator for a file by name.
+pub fn mz_zip_reader_extract_file_iter_new(
+    p_zip: &MzZipArchive,
+    filename: &str,
+    flags: u32,
+) -> Result<MzZipReaderExtractIterState, MzZipError> {
+    let idx = mz_zip_reader_locate_file_v2(p_zip, filename, None, flags)
+        .ok_or(MzZipError::FileNotFound)?;
+    mz_zip_reader_extract_iter_new(p_zip, idx, flags)
+}
+
+/// Read bytes from an extraction iterator.
+pub fn mz_zip_reader_extract_iter_read(
+    iter_state: &mut MzZipReaderExtractIterState,
+    buf: &mut [u8],
+) -> usize {
+    let data = match iter_state.pread_buf.as_ref() {
+        Some(d) => d,
+        None => return 0,
+    };
+    let offset = iter_state.status as usize;
+    if offset >= data.len() {
+        return 0;
+    }
+    let available = data.len() - offset;
+    let to_copy = buf.len().min(available);
+    buf[..to_copy].copy_from_slice(&data[offset..offset + to_copy]);
+    iter_state.status += to_copy as i32;
+    iter_state.file_crc32 = mz_crc32(iter_state.file_crc32 as u64, &buf[..to_copy]);
+    to_copy
+}
+
+/// Free an extraction iterator and check CRC.
+pub fn mz_zip_reader_extract_iter_free(
+    iter_state: MzZipReaderExtractIterState,
+) -> bool {
+    if iter_state.file_stat.m_uncomp_size == 0 {
+        return true;
+    }
+    if let Some(ref data) = iter_state.pread_buf {
+        let expected_crc = mz_crc32(MZ_CRC32_INIT, data);
+        expected_crc == iter_state.file_stat.m_crc32
+    } else {
+        true
+    }
+}
+
+// --- Reader extract: to file ---
+
+/// Extract a file to a disk file.
+pub fn mz_zip_reader_extract_to_file(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+    dst_filename: &str,
+    flags: u32,
+) -> Result<(), MzZipError> {
+    let data = mz_zip_reader_extract_to_heap(p_zip, file_index, flags)?;
+    let mut file = File::create(dst_filename).map_err(|_| MzZipError::FileCreateFailed)?;
+    file.write_all(&data).map_err(|_| MzZipError::FileWriteFailed)?;
+    Ok(())
+}
+
+/// Extract a file (by name) to a disk file.
+pub fn mz_zip_reader_extract_file_to_file(
+    p_zip: &MzZipArchive,
+    archive_filename: &str,
+    dst_filename: &str,
+    flags: u32,
+) -> Result<(), MzZipError> {
+    let idx = mz_zip_reader_locate_file_v2(p_zip, archive_filename, None, flags)
+        .ok_or(MzZipError::FileNotFound)?;
+    mz_zip_reader_extract_to_file(p_zip, idx, dst_filename, flags)
+}
+
+/// Extract a file to a cfile (same as extract_to_file, using Write trait).
+pub fn mz_zip_reader_extract_to_cfile(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+    writer: &mut dyn Write,
+    flags: u32,
+) -> Result<(), MzZipError> {
+    let data = mz_zip_reader_extract_to_heap(p_zip, file_index, flags)?;
+    writer.write_all(&data).map_err(|_| MzZipError::FileWriteFailed)?;
+    Ok(())
+}
+
+/// Extract a file (by name) to a cfile.
+pub fn mz_zip_reader_extract_file_to_cfile(
+    p_zip: &MzZipArchive,
+    archive_filename: &str,
+    writer: &mut dyn Write,
+    flags: u32,
+) -> Result<(), MzZipError> {
+    let idx = mz_zip_reader_locate_file_v2(p_zip, archive_filename, None, flags)
+        .ok_or(MzZipError::FileNotFound)?;
+    mz_zip_reader_extract_to_cfile(p_zip, idx, writer, flags)
+}
+
+// --- Reader init variants ---
+
+/// Initialize a reader from an archive with user-supplied read callback.
+pub fn mz_zip_reader_init(
+    p_zip: &mut MzZipArchive,
+    size: u64,
+    flags: u32,
+) -> Result<(), MzZipError> {
+    if p_zip.m_pread.is_none() {
+        return Err(MzZipError::InvalidParameter);
+    }
+    p_zip.m_zip_mode = MzZipMode::Invalid;
+    p_zip.init_reader()?;
+    if let Some(state) = &mut p_zip.m_pstate {
+        state.init_flags = flags;
+    }
+    p_zip.m_zip_type = MzZipType::User;
+    p_zip.m_archive_size = size;
+    if !mz_zip_reader_read_central_dir(p_zip, flags) {
+        let err = p_zip.m_last_error;
+        mz_zip_reader_end_internal(p_zip, false);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Initialize a reader from an in-memory buffer.
+pub fn mz_zip_reader_init_mem(
+    p_zip: &mut MzZipArchive,
+    data: &[u8],
+    flags: u32,
+) -> Result<(), MzZipError> {
+    if data.is_empty() {
+        return Err(MzZipError::InvalidParameter);
+    }
+    p_zip.m_zip_mode = MzZipMode::Invalid;
+    p_zip.init_reader()?;
+    if let Some(state) = &mut p_zip.m_pstate {
+        state.pmem = Some(data.to_vec());
+        state.mem_size = data.len();
+        state.mem_capacity = data.len();
+        state.init_flags = flags;
+        state.file_archive_start_ofs = 0;
+    }
+    p_zip.m_zip_type = MzZipType::Memory;
+    p_zip.m_archive_size = data.len() as u64;
+    if !mz_zip_reader_read_central_dir(p_zip, flags) {
+        let err = p_zip.m_last_error;
+        mz_zip_reader_end_internal(p_zip, false);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Initialize a reader from a file on disk.
+pub fn mz_zip_reader_init_file(
+    p_zip: &mut MzZipArchive,
+    filename: &str,
+    flags: u32,
+) -> Result<(), MzZipError> {
+    mz_zip_reader_init_file_v2_pub(p_zip, filename, flags, 0, 0)
+}
+
+/// Initialize a reader from a file on disk (v2 with offset/size).
+pub fn mz_zip_reader_init_file_v2_pub(
+    p_zip: &mut MzZipArchive,
+    filename: &str,
+    flags: u32,
+    file_start_ofs: u64,
+    archive_size: u64,
+) -> Result<(), MzZipError> {
+    let file = File::open(filename).map_err(|_| MzZipError::FileOpenFailed)?;
+    mz_zip_reader_init_file_v2(p_zip, &file, flags, file_start_ofs, archive_size)
+}
+
+/// Initialize a reader from an open file handle.
+pub fn mz_zip_reader_init_cfile(
+    p_zip: &mut MzZipArchive,
+    file: &File,
+    archive_size: u64,
+    flags: u32,
+) -> Result<(), MzZipError> {
+    mz_zip_reader_init_file_v2(p_zip, file, flags, 0, archive_size)
+}
+
+// --- Misc: zero struct ---
+
+/// Clear a zip archive to all zeros.
+pub fn mz_zip_zero_struct(p_zip: &mut MzZipArchive) {
+    *p_zip = MzZipArchive::new();
+}
+
+// --- Validation functions ---
+
+/// Validate a single file in the archive by comparing local header to central directory.
+pub fn mz_zip_validate_file(
+    p_zip: &MzZipArchive,
+    file_index: u32,
+    flags: u32,
+) -> Result<bool, MzZipError> {
+    let cdh = mz_zip_get_cdh(p_zip, file_index).ok_or(MzZipError::InvalidParameter)?;
+    let mut file_stat = MzZipArchiveFileStat {
+        m_file_index: 0, m_central_dir_ofs: 0, m_version_made_by: 0,
+        m_version_needed: 0, m_bit_flag: 0, m_method: 0, m_crc32: 0,
+        m_comp_size: 0, m_uncomp_size: 0, m_internal_attr: 0,
+        m_external_attr: 0, m_local_header_ofs: 0, m_comment_size: 0,
+        m_is_directory: false, m_is_encrypted: false, m_is_supported: false,
+        m_filename: String::new(), m_comment: String::new(), m_time: 0,
+    };
+    if !mz_zip_file_stat_internal(p_zip, file_index, Some(cdh), &mut file_stat) {
+        return Err(MzZipError::InvalidParameter);
+    }
+    if file_stat.m_is_directory || file_stat.m_uncomp_size == 0 {
+        return Ok(true);
+    }
+    if file_stat.m_is_encrypted {
+        return Err(MzZipError::UnsupportedEncryption);
+    }
+    if !file_stat.m_is_supported {
+        return Err(MzZipError::UnsupportedFeature);
+    }
+
+    // Read the local header
+    let state = p_zip.m_pstate.as_ref().ok_or(MzZipError::InternalError)?;
+    let pmem = state.pmem.as_ref().ok_or(MzZipError::UnsupportedFeature)?;
+    let lh_start = (state.file_archive_start_ofs + file_stat.m_local_header_ofs) as usize;
+    if lh_start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE > pmem.len() {
+        return Err(MzZipError::FileReadFailed);
+    }
+    let lh = &pmem[lh_start..lh_start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE];
+    if read_le32(lh, 0) != MZ_ZIP_LOCAL_DIR_HEADER_SIG as u32 {
+        return Err(MzZipError::InvalidHeaderOrCorrupted);
+    }
+
+    let lh_fname_len = read_le16(lh, MZ_ZIP_LDH_FILENAME_LEN_OFS) as usize;
+    let lh_extra_len = read_le16(lh, MZ_ZIP_LDH_EXTRA_LEN_OFS) as usize;
+
+    // Verify filename length matches central directory
+    if lh_fname_len != file_stat.m_filename.len() {
+        return Err(MzZipError::ValidationFailed);
+    }
+
+    // Verify filename bytes match
+    if lh_fname_len > 0 {
+        let fname_start = lh_start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE;
+        if fname_start + lh_fname_len > pmem.len() {
+            return Err(MzZipError::FileReadFailed);
+        }
+        let lh_fname = &pmem[fname_start..fname_start + lh_fname_len];
+        if lh_fname != file_stat.m_filename.as_bytes() {
+            return Err(MzZipError::ValidationFailed);
+        }
+    }
+
+    // Check local header sizes match CDH (unless data descriptor is used)
+    let lh_bit_flags = read_le16(lh, MZ_ZIP_LDH_BIT_FLAG_OFS);
+    let has_data_descriptor = (lh_bit_flags & 8) != 0;
+
+    if !has_data_descriptor {
+        let lh_crc32 = read_le32(lh, MZ_ZIP_LDH_CRC32_OFS);
+        let mut lh_comp_size = read_le32(lh, MZ_ZIP_LDH_COMPRESSED_SIZE_OFS) as u64;
+        let mut lh_uncomp_size = read_le32(lh, MZ_ZIP_LDH_DECOMPRESSED_SIZE_OFS) as u64;
+
+        // Handle zip64 extended information in local header extra data
+        if lh_extra_len > 0 && (lh_comp_size == 0xFFFFFFFF || lh_uncomp_size == 0xFFFFFFFF) {
+            let extra_start = lh_start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE + lh_fname_len;
+            if extra_start + lh_extra_len <= pmem.len() {
+                let extra_data = &pmem[extra_start..extra_start + lh_extra_len];
+                let mut pos = 0;
+                while pos + 4 <= extra_data.len() {
+                    let field_id = read_le16(extra_data, pos);
+                    let field_size = read_le16(extra_data, pos + 2) as usize;
+                    if pos + 4 + field_size > extra_data.len() { break; }
+                    if field_id == MZ_ZIP64_EXTENDED_INFORMATION_FIELD_HEADER_ID as u16 && field_size >= 16 {
+                        lh_uncomp_size = read_le64(extra_data, pos + 4);
+                        lh_comp_size = read_le64(extra_data, pos + 12);
+                        break;
+                    }
+                    pos += 4 + field_size;
+                }
+            }
+        }
+
+        if lh_crc32 != file_stat.m_crc32
+            || lh_comp_size != file_stat.m_comp_size
+            || lh_uncomp_size != file_stat.m_uncomp_size
+        {
+            return Err(MzZipError::ValidationFailed);
+        }
+    }
+
+    // Optionally validate data by extracting and checking CRC
+    if (flags & MZ_ZIP_FLAG_VALIDATE_HEADERS_ONLY) == 0 {
+        let needed = file_stat.m_uncomp_size as usize;
+        let mut buf = vec![0u8; needed];
+        mz_zip_reader_extract_to_mem_internal(p_zip, file_index, &mut buf, 0)?;
+        // CRC is checked inside extract_to_mem_internal
+    }
+
+    Ok(true)
+}
+
+/// Validate an entire archive by validating each file.
+pub fn mz_zip_validate_archive(
+    p_zip: &MzZipArchive,
+    flags: u32,
+) -> Result<bool, MzZipError> {
+    let total = p_zip.m_total_files;
+    for i in 0..total {
+        if (flags & MZ_ZIP_FLAG_VALIDATE_LOCATE_FILE_FLAG) != 0 {
+            let cdh = mz_zip_get_cdh(p_zip, i).ok_or(MzZipError::InvalidParameter)?;
+            let mut stat = MzZipArchiveFileStat {
+                m_file_index: 0, m_central_dir_ofs: 0, m_version_made_by: 0,
+                m_version_needed: 0, m_bit_flag: 0, m_method: 0, m_crc32: 0,
+                m_comp_size: 0, m_uncomp_size: 0, m_internal_attr: 0,
+                m_external_attr: 0, m_local_header_ofs: 0, m_comment_size: 0,
+                m_is_directory: false, m_is_encrypted: false, m_is_supported: false,
+                m_filename: String::new(), m_comment: String::new(), m_time: 0,
+            };
+            if mz_zip_file_stat_internal(p_zip, i, Some(cdh), &mut stat) {
+                let found = mz_zip_reader_locate_file_v2(p_zip, &stat.m_filename, None, 0);
+                if found != Some(i) {
+                    return Err(MzZipError::ValidationFailed);
+                }
+            }
+        }
+        mz_zip_validate_file(p_zip, i, flags)?;
+    }
+    Ok(true)
+}
+
+/// Validate an in-memory archive.
+pub fn mz_zip_validate_mem_archive(
+    data: &[u8],
+    flags: u32,
+) -> Result<bool, MzZipError> {
+    let mut zip = MzZipArchive::new();
+    mz_zip_reader_init_mem(&mut zip, data, flags)?;
+    let result = mz_zip_validate_archive(&zip, flags);
+    mz_zip_reader_end_internal(&mut zip, result.is_ok());
+    result
+}
+
+/// Validate a file-based archive.
+pub fn mz_zip_validate_file_archive(
+    filename: &str,
+    flags: u32,
+) -> Result<bool, MzZipError> {
+    let mut zip = MzZipArchive::new();
+    mz_zip_reader_init_file(&mut zip, filename, flags)?;
+    let result = mz_zip_validate_archive(&zip, flags);
+    mz_zip_reader_end_internal(&mut zip, result.is_ok());
+    result
+}
+
+// --- Writer init functions ---
+
+impl MzZipArchive {
+    /// Initialize writer (v2 with flags).
+    pub fn mz_zip_writer_init_v2(
+        &mut self,
+        existing_size: u64,
+        flags: u32,
+    ) -> Result<(), MzZipError> {
+        if self.m_pstate.is_some() || self.m_zip_mode != MzZipMode::Invalid {
+            return Err(MzZipError::InvalidParameter);
+        }
+        if self.m_pwrite.is_none() {
+            return Err(MzZipError::InvalidParameter);
+        }
+        if (flags & MZ_ZIP_FLAG_WRITE_ALLOW_READING) != 0 && self.m_pread.is_none() {
+            return Err(MzZipError::InvalidParameter);
+        }
+        if self.m_file_offset_alignment != 0
+            && (self.m_file_offset_alignment & (self.m_file_offset_alignment - 1)) != 0
+        {
+            return Err(MzZipError::InvalidParameter);
+        }
+
+        self.m_archive_size = existing_size;
+        self.m_central_directory_file_ofs = 0;
+        self.m_total_files = 0;
+
+        let zip64 = (flags & MZ_ZIP_FLAG_WRITE_ZIP64) != 0;
+        let mut state = Box::new(MzZipInternalState {
+            central_dir: MzZipArray::new(1),
+            central_dir_offsets: MzZipArray::new(4),
+            sorted_central_dir_offsets: MzZipArray::new(4),
+            init_flags: flags,
+            zip64,
+            zip64_has_extended_info_fields: zip64,
+            pfile: None,
+            file_archive_start_ofs: 0,
+            pmem: None,
+            mem_size: 0,
+            mem_capacity: 0,
+        });
+        self.m_pstate = Some(state);
+        self.m_zip_type = MzZipType::User;
+        self.m_zip_mode = MzZipMode::Writing;
+        Ok(())
+    }
+
+    /// Initialize writer (simple, no flags).
+    pub fn mz_zip_writer_init(
+        &mut self,
+        existing_size: u64,
+    ) -> Result<(), MzZipError> {
+        self.mz_zip_writer_init_v2(existing_size, 0)
+    }
+
+    /// Initialize a heap-based writer (v2 with flags).
+    pub fn mz_zip_writer_init_heap_v2(
+        &mut self,
+        size_to_reserve: usize,
+        initial_alloc: usize,
+        flags: u32,
+    ) -> Result<(), MzZipError> {
+        // Set up heap write function
+        self.m_pwrite = Some(|_zip, _ofs, buf| buf.len());
+        if (flags & MZ_ZIP_FLAG_WRITE_ALLOW_READING) != 0 {
+            self.m_pread = Some(|_zip, _ofs, buf| buf.len());
+        }
+        self.mz_zip_writer_init_v2(size_to_reserve as u64, flags)?;
+        self.m_zip_type = MzZipType::Heap;
+
+        let alloc_size = initial_alloc.max(size_to_reserve);
+        if alloc_size > 0 {
+            if let Some(ref mut state) = self.m_pstate {
+                state.pmem = Some(vec![0u8; alloc_size]);
+                state.mem_size = alloc_size;
+                state.mem_capacity = alloc_size;
+            }
+        }
+        Ok(())
+    }
+
+    /// Initialize a heap-based writer (simple).
+    pub fn mz_zip_writer_init_heap(
+        &mut self,
+        size_to_reserve: usize,
+        initial_alloc: usize,
+    ) -> Result<(), MzZipError> {
+        self.mz_zip_writer_init_heap_v2(size_to_reserve, initial_alloc, 0)
+    }
+
+    /// Initialize a file-based writer (v2 with flags).
+    pub fn mz_zip_writer_init_file_v2(
+        &mut self,
+        filename: &str,
+        size_to_reserve: u64,
+        flags: u32,
+    ) -> Result<(), MzZipError> {
+        self.m_pwrite = Some(|_zip, _ofs, buf| buf.len());
+        if (flags & MZ_ZIP_FLAG_WRITE_ALLOW_READING) != 0 {
+            self.m_pread = Some(|_zip, _ofs, buf| buf.len());
+        }
+        self.mz_zip_writer_init_v2(size_to_reserve, flags)?;
+
+        let file = if (flags & MZ_ZIP_FLAG_WRITE_ALLOW_READING) != 0 {
+            std::fs::OpenOptions::new()
+                .read(true).write(true).create(true).truncate(true)
+                .open(filename)
+        } else {
+            std::fs::OpenOptions::new()
+                .write(true).create(true).truncate(true)
+                .open(filename)
+        };
+        let file = file.map_err(|_| MzZipError::FileOpenFailed)?;
+
+        if let Some(ref mut state) = self.m_pstate {
+            state.pfile = Some(file);
+        }
+        self.m_zip_type = MzZipType::File;
+
+        if size_to_reserve > 0 {
+            let zeros = vec![0u8; 4096];
+            let mut remaining = size_to_reserve;
+            let mut ofs = 0u64;
+            while remaining > 0 {
+                let n = (zeros.len() as u64).min(remaining) as usize;
+                let written = self.write_data(ofs, &zeros[..n])
+                    .map_err(|_| MzZipError::FileWriteFailed)?;
+                if written != n {
+                    return Err(MzZipError::FileWriteFailed);
+                }
+                ofs += n as u64;
+                remaining -= n as u64;
+            }
+        }
+        Ok(())
+    }
+
+    /// Initialize a file-based writer (simple).
+    pub fn mz_zip_writer_init_file(
+        &mut self,
+        filename: &str,
+        size_to_reserve: u64,
+    ) -> Result<(), MzZipError> {
+        self.mz_zip_writer_init_file_v2(filename, size_to_reserve, 0)
+    }
+}
+
+// --- Writer: add_from_zip_reader ---
+
+impl MzZipArchive {
+    /// Add a file from another zip archive by cloning its compressed data.
+    pub fn mz_zip_writer_add_from_zip_reader(
+        &mut self,
+        source_zip: &MzZipArchive,
+        src_file_index: u32,
+    ) -> Result<(), MzZipError> {
+        if self.m_zip_mode != MzZipMode::Writing {
+            return Err(MzZipError::InvalidParameter);
+        }
+        let src_cdh = mz_zip_get_cdh(source_zip, src_file_index)
+            .ok_or(MzZipError::InvalidParameter)?;
+        if src_cdh.len() < MZ_ZIP_CENTRAL_DIR_HEADER_SIZE {
+            return Err(MzZipError::InvalidHeaderOrCorrupted);
+        }
+        if read_le32(src_cdh, MZ_ZIP_CDH_SIG_OFS) != MZ_ZIP_CENTRAL_DIR_HEADER_SIG as u32 {
+            return Err(MzZipError::InvalidHeaderOrCorrupted);
+        }
+
+        let src_fname_len = read_le16(src_cdh, MZ_ZIP_CDH_FILENAME_LEN_OFS) as usize;
+        let src_ext_len = read_le16(src_cdh, MZ_ZIP_CDH_EXTRA_LEN_OFS) as usize;
+        let src_comment_len = read_le16(src_cdh, MZ_ZIP_CDH_COMMENT_LEN_OFS) as usize;
+        let following_data_size = src_fname_len + src_ext_len + src_comment_len;
+
+        // Copy entire CDH + following data
+        let cdh_total = MZ_ZIP_CENTRAL_DIR_HEADER_SIZE + following_data_size;
+        if cdh_total > src_cdh.len() {
+            return Err(MzZipError::InvalidHeaderOrCorrupted);
+        }
+        let cdh_owned = src_cdh[..cdh_total].to_vec();
+
+        // Get source file stat
+        let mut src_stat = MzZipArchiveFileStat {
+            m_file_index: 0, m_central_dir_ofs: 0, m_version_made_by: 0,
+            m_version_needed: 0, m_bit_flag: 0, m_method: 0, m_crc32: 0,
+            m_comp_size: 0, m_uncomp_size: 0, m_internal_attr: 0,
+            m_external_attr: 0, m_local_header_ofs: 0, m_comment_size: 0,
+            m_is_directory: false, m_is_encrypted: false, m_is_supported: false,
+            m_filename: String::new(), m_comment: String::new(), m_time: 0,
+        };
+        if !mz_zip_file_stat_internal(source_zip, src_file_index, Some(src_cdh), &mut src_stat) {
+            return Err(MzZipError::FileNotFound);
+        }
+
+        // Read source local header + data from source memory
+        let src_state = source_zip.m_pstate.as_ref().ok_or(MzZipError::InternalError)?;
+        let src_mem = src_state.pmem.as_ref().ok_or(MzZipError::UnsupportedFeature)?;
+        let src_lh_start = (src_state.file_archive_start_ofs + src_stat.m_local_header_ofs) as usize;
+        if src_lh_start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE > src_mem.len() {
+            return Err(MzZipError::FileReadFailed);
+        }
+        let src_lh = &src_mem[src_lh_start..src_lh_start + MZ_ZIP_LOCAL_DIR_HEADER_SIZE];
+        if read_le32(src_lh, 0) != MZ_ZIP_LOCAL_DIR_HEADER_SIG as u32 {
+            return Err(MzZipError::InvalidHeaderOrCorrupted);
+        }
+        let lh_fname_len = read_le16(src_lh, MZ_ZIP_LDH_FILENAME_LEN_OFS) as usize;
+        let lh_extra_len = read_le16(src_lh, MZ_ZIP_LDH_EXTRA_LEN_OFS) as usize;
+
+        // Total bytes to copy: local header + fname + extra + compressed data
+        let total_src_bytes = MZ_ZIP_LOCAL_DIR_HEADER_SIZE + lh_fname_len + lh_extra_len
+            + src_stat.m_comp_size as usize;
+        let src_end = src_lh_start + total_src_bytes;
+        if src_end > src_mem.len() {
+            return Err(MzZipError::FileReadFailed);
+        }
+        let src_bytes = &src_mem[src_lh_start..src_end];
+
+        // Write alignment padding
+        let padding = self.mz_zip_writer_compute_padding_needed_for_file_alignment();
+        if padding > 0 {
+            let ofs = self.m_archive_size;
+            self.mz_zip_writer_write_zeros(ofs, padding)?;
+            self.m_archive_size += padding as u64;
+        }
+
+        let local_dir_header_ofs = self.m_archive_size;
+
+        // Write the copied data to dest
+        let written = self.write_data(self.m_archive_size, src_bytes)?;
+        if written != src_bytes.len() {
+            return Err(MzZipError::FileWriteFailed);
+        }
+        self.m_archive_size += written as u64;
+
+        // Handle data descriptor if present
+        let bit_flags = read_le16(src_lh, MZ_ZIP_LDH_BIT_FLAG_OFS);
+        if (bit_flags & 8) != 0 {
+            let desc_start = src_end;
+            // Try to read the data descriptor (at most 24 bytes for zip64)
+            let desc_max = 24;
+            if desc_start + desc_max <= src_mem.len() {
+                let desc_data = &src_mem[desc_start..desc_start + desc_max];
+                let has_id = read_le32(desc_data, 0) == MZ_ZIP_DATA_DESCRIPTOR_ID as u32;
+                let is_zip64 = self.m_pstate.as_ref()
+                    .map(|s| s.zip64).unwrap_or(false);
+                let desc_size = if is_zip64 {
+                    if has_id { 24 } else { 20 }
+                } else if has_id { 16 } else { 12 };
+                let written = self.write_data(self.m_archive_size, &desc_data[..desc_size])?;
+                if written != desc_size {
+                    return Err(MzZipError::FileWriteFailed);
+                }
+                self.m_archive_size += written as u64;
+            }
+        }
+
+        // Add updated central directory entry
+        let mut new_cdh = cdh_owned.clone();
+        // Update local header offset in CDH
+        if new_cdh.len() >= MZ_ZIP_CDH_LOCAL_HEADER_OFS + 4 {
+            write_le32(&mut new_cdh, MZ_ZIP_CDH_LOCAL_HEADER_OFS, local_dir_header_ofs as u32);
+        }
+
+        // Append CDH to our central directory
+        let state = self.m_pstate.as_mut().ok_or(MzZipError::InternalError)?;
+        let cdir_ofs = state.central_dir.size as u32;
+        // Grow central_dir by pushing all CDH bytes
+        if let Some(ref mut vec) = state.central_dir.p {
+            vec.extend_from_slice(&new_cdh);
+            state.central_dir.size = vec.len();
+            state.central_dir.capacity = vec.capacity();
+        } else {
+            state.central_dir.p = Some(new_cdh);
+            state.central_dir.size = cdh_total;
+            state.central_dir.capacity = cdh_total;
+        }
+
+        // Push offset to central_dir_offsets
+        if let Some(ref mut vec) = state.central_dir_offsets.p {
+            vec.extend_from_slice(&cdir_ofs.to_le_bytes());
+            state.central_dir_offsets.size += 1;
+            state.central_dir_offsets.capacity = state.central_dir_offsets.size;
+        } else {
+            state.central_dir_offsets.p = Some(cdir_ofs.to_le_bytes().to_vec());
+            state.central_dir_offsets.size = 1;
+            state.central_dir_offsets.capacity = 1;
+        }
+
+        self.m_total_files += 1;
+        Ok(())
+    }
+}
+
+// --- Writer: finalize ---
+
+impl MzZipArchive {
+    /// Finalize the archive by writing the central directory and EOCD.
+    pub fn mz_zip_writer_finalize_archive(&mut self) -> Result<(), MzZipError> {
+        if self.m_zip_mode != MzZipMode::Writing {
+            return Err(MzZipError::InvalidParameter);
+        }
+        let is_zip64 = self.m_pstate.as_ref()
+            .map(|s| s.zip64).unwrap_or(false);
+
+        let mut central_dir_ofs = 0u64;
+        let mut central_dir_size = 0u64;
+
+        if self.m_total_files > 0 {
+            central_dir_ofs = self.m_archive_size;
+            self.m_central_directory_file_ofs = central_dir_ofs;
+
+            let cdir_bytes = {
+                let state = self.m_pstate.as_ref().ok_or(MzZipError::InternalError)?;
+                let bytes = state.central_dir.as_bytes().ok_or(MzZipError::InternalError)?;
+                central_dir_size = state.central_dir.size as u64;
+                bytes[..central_dir_size as usize].to_vec()
+            };
+
+            let written = self.write_data(central_dir_ofs, &cdir_bytes)?;
+            if written as u64 != central_dir_size {
+                return Err(MzZipError::FileWriteFailed);
+            }
+            self.m_archive_size += central_dir_size;
+        }
+
+        if is_zip64 {
+            // Write ZIP64 end of central directory header
+            let mut hdr = [0u8; MZ_ZIP64_END_OF_CENTRAL_DIR_HEADER_SIZE];
+            write_le32(&mut hdr, MZ_ZIP64_ECDH_SIG_OFS, MZ_ZIP64_END_OF_CENTRAL_DIR_HEADER_SIG as u32);
+            write_le64(&mut hdr, MZ_ZIP64_ECDH_SIZE_OF_RECORD_OFS,
+                (MZ_ZIP64_END_OF_CENTRAL_DIR_HEADER_SIZE - 12) as u64);
+            write_le16(&mut hdr, MZ_ZIP64_ECDH_VERSION_MADE_BY_OFS, 0x031E);
+            write_le16(&mut hdr, MZ_ZIP64_ECDH_VERSION_NEEDED_OFS, 0x002D);
+            write_le64(&mut hdr, MZ_ZIP64_ECDH_CDIR_NUM_ENTRIES_ON_DISK_OFS, self.m_total_files as u64);
+            write_le64(&mut hdr, MZ_ZIP64_ECDH_CDIR_TOTAL_ENTRIES_OFS, self.m_total_files as u64);
+            write_le64(&mut hdr, MZ_ZIP64_ECDH_CDIR_SIZE_OFS, central_dir_size);
+            write_le64(&mut hdr, MZ_ZIP64_ECDH_CDIR_OFS_OFS, central_dir_ofs);
+
+            let rel_ofs = self.m_archive_size;
+            let written = self.write_data(self.m_archive_size, &hdr)?;
+            if written != MZ_ZIP64_END_OF_CENTRAL_DIR_HEADER_SIZE {
+                return Err(MzZipError::FileWriteFailed);
+            }
+            self.m_archive_size += MZ_ZIP64_END_OF_CENTRAL_DIR_HEADER_SIZE as u64;
+
+            // Write ZIP64 end of central directory locator
+            let mut loc = [0u8; MZ_ZIP64_END_OF_CENTRAL_DIR_LOCATOR_SIZE];
+            write_le32(&mut loc, MZ_ZIP64_ECDL_SIG_OFS, MZ_ZIP64_END_OF_CENTRAL_DIR_LOCATOR_SIG as u32);
+            write_le64(&mut loc, MZ_ZIP64_ECDL_REL_OFS_TO_ZIP64_ECDR_OFS, rel_ofs);
+            write_le32(&mut loc, MZ_ZIP64_ECDL_TOTAL_NUMBER_OF_DISKS_OFS, 1);
+
+            let written = self.write_data(self.m_archive_size, &loc)?;
+            if written != MZ_ZIP64_END_OF_CENTRAL_DIR_LOCATOR_SIZE {
+                return Err(MzZipError::FileWriteFailed);
+            }
+            self.m_archive_size += MZ_ZIP64_END_OF_CENTRAL_DIR_LOCATOR_SIZE as u64;
+        }
+
+        // Write end of central directory record
+        let mut eocd = [0u8; MZ_ZIP_END_OF_CENTRAL_DIR_HEADER_SIZE];
+        write_le32(&mut eocd, MZ_ZIP_ECDH_SIG_OFS, MZ_ZIP_END_OF_CENTRAL_DIR_HEADER_SIG as u32);
+        let clamped_files = self.m_total_files.min(0xFFFF) as u16;
+        write_le16(&mut eocd, MZ_ZIP_ECDH_CDIR_NUM_ENTRIES_ON_DISK_OFS, clamped_files);
+        write_le16(&mut eocd, MZ_ZIP_ECDH_CDIR_TOTAL_ENTRIES_OFS, clamped_files);
+        let clamped_size = central_dir_size.min(0xFFFFFFFF) as u32;
+        write_le32(&mut eocd, MZ_ZIP_ECDH_CDIR_SIZE_OFS, clamped_size);
+        let clamped_ofs = central_dir_ofs.min(0xFFFFFFFF) as u32;
+        write_le32(&mut eocd, MZ_ZIP_ECDH_CDIR_OFS_OFS, clamped_ofs);
+
+        let written = self.write_data(self.m_archive_size, &eocd)?;
+        if written != MZ_ZIP_END_OF_CENTRAL_DIR_HEADER_SIZE {
+            return Err(MzZipError::FileWriteFailed);
+        }
+        self.m_archive_size += MZ_ZIP_END_OF_CENTRAL_DIR_HEADER_SIZE as u64;
+
+        self.m_zip_mode = MzZipMode::WritingHasBeenFinalized;
+        Ok(())
+    }
+
+    /// Finalize a heap-based archive and return the data.
+    pub fn mz_zip_writer_finalize_heap_archive(
+        &mut self,
+    ) -> Result<(Vec<u8>, usize), MzZipError> {
+        self.mz_zip_writer_finalize_archive()?;
+        let state = self.m_pstate.as_mut().ok_or(MzZipError::InternalError)?;
+        let data = state.pmem.take().unwrap_or_default();
+        let size = state.mem_size;
+        state.mem_size = 0;
+        state.mem_capacity = 0;
+        Ok((data, size))
+    }
+
+    /// End the writer and free resources.
+    pub fn mz_zip_writer_end_pub(&mut self) -> bool {
+        let mode = self.m_zip_mode;
+        if mode != MzZipMode::Writing && mode != MzZipMode::WritingHasBeenFinalized {
+            self.m_last_error = MzZipError::InvalidParameter;
+            return false;
+        }
+        if let Some(mut state) = self.m_pstate.take() {
+            state.central_dir.clear();
+            state.central_dir_offsets.clear();
+            state.sorted_central_dir_offsets.clear();
+            state.pfile = None;
+            state.pmem = None;
+        } else {
+            self.m_last_error = MzZipError::InvalidParameter;
+            return false;
+        }
+        self.m_zip_mode = MzZipMode::Invalid;
+        true
+    }
+}
+
+// --- Writer: add_read_buf_callback ---
+
+impl MzZipArchive {
+    /// Add a file using a read callback for data.
+    pub fn mz_zip_writer_add_read_buf_callback(
+        &mut self,
+        archive_name: &str,
+        read_callback: fn(&[u8], u64, &mut [u8]) -> usize,
+        callback_opaque: &[u8],
+        max_size: u64,
+        level_and_flags: u32,
+    ) -> Result<(), MzZipError> {
+        if self.m_zip_mode != MzZipMode::Writing || archive_name.is_empty() {
+            return Err(MzZipError::InvalidParameter);
+        }
+        // Store uncompressed for now (level 0)
+        let padding = self.mz_zip_writer_compute_padding_needed_for_file_alignment();
+        if padding > 0 {
+            let ofs = self.m_archive_size;
+            self.mz_zip_writer_write_zeros(ofs, padding)?;
+            self.m_archive_size += padding as u64;
+        }
+
+        let local_dir_header_ofs = self.m_archive_size;
+
+        // Create local header
+        let mut lh = [0u8; MZ_ZIP_LOCAL_DIR_HEADER_SIZE];
+        mz_zip_writer_create_local_dir_header(
+            self, &mut lh, archive_name.len() as u16, 0,
+            max_size, max_size, 0, 0, 0, 0, 0,
+        );
+        let written = self.write_data(self.m_archive_size, &lh)?;
+        if written != MZ_ZIP_LOCAL_DIR_HEADER_SIZE {
+            return Err(MzZipError::FileWriteFailed);
+        }
+        self.m_archive_size += written as u64;
+
+        // Write filename
+        let written = self.write_data(self.m_archive_size, archive_name.as_bytes())?;
+        self.m_archive_size += written as u64;
+
+        // Read and write data
+        let mut buf = vec![0u8; MZ_ZIP_MAX_IO_BUF_SIZE];
+        let mut total_read = 0u64;
+        let mut crc = 0u32;
+        loop {
+            let n = read_callback(callback_opaque, total_read, &mut buf);
+            if n == 0 { break; }
+            crc = mz_crc32(crc as u64, &buf[..n]);
+            let written = self.write_data(self.m_archive_size, &buf[..n])?;
+            if written != n {
+                return Err(MzZipError::FileWriteFailed);
+            }
+            self.m_archive_size += written as u64;
+            total_read += n as u64;
+        }
+
+        // Add to central directory
+        self.mz_zip_writer_add_to_central_dir(
+            archive_name, archive_name.len() as u16,
+            &[], 0, &[], 0,
+            total_read, total_read, crc, 0, 0, 0, 0,
+            local_dir_header_ofs, 0, &[], 0,
+        )?;
+        self.m_total_files += 1;
+        Ok(())
+    }
+}
+
+// --- Writer: add_file, add_cfile ---
+
+impl MzZipArchive {
+    /// Add a file from disk to the archive.
+    pub fn mz_zip_writer_add_file(
+        &mut self,
+        archive_name: &str,
+        src_filename: &str,
+        level_and_flags: u32,
+    ) -> Result<(), MzZipError> {
+        let data = std::fs::read(src_filename).map_err(|_| MzZipError::FileOpenFailed)?;
+        self.mz_zip_writer_add_mem(archive_name, &data, level_and_flags)
+    }
+}
+
+// --- Convenience: add_mem_to_archive_file_in_place ---
+
+/// Convenience: append a memory blob to a ZIP file on disk (non-atomic).
+pub fn mz_zip_add_mem_to_archive_file_in_place(
+    zip_filename: &str,
+    archive_name: &str,
+    buf: &[u8],
+    level_and_flags: u32,
+) -> Result<(), MzZipError> {
+    mz_zip_add_mem_to_archive_file_in_place_v2(zip_filename, archive_name, buf, level_and_flags)
+}
+
+/// Convenience v2: append a memory blob to a ZIP file on disk.
+pub fn mz_zip_add_mem_to_archive_file_in_place_v2(
+    zip_filename: &str,
+    archive_name: &str,
+    buf: &[u8],
+    level_and_flags: u32,
+) -> Result<(), MzZipError> {
+    if archive_name.is_empty() {
+        return Err(MzZipError::InvalidParameter);
+    }
+    if !mz_zip_writer_validate_archive_name(archive_name) {
+        return Err(MzZipError::InvalidFilename);
+    }
+
+    let file_exists = Path::new(zip_filename).exists();
+    let mut zip = MzZipArchive::new();
+
+    if !file_exists {
+        zip.mz_zip_writer_init_file_v2(zip_filename, 0, level_and_flags)?;
+    } else {
+        // Read existing archive
+        mz_zip_reader_init_file(&mut zip, zip_filename,
+            level_and_flags | MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY as u32)?;
+        // Switch to writer
+        zip.mz_zip_writer_init_from_reader(None)?;
+    }
+
+    let add_result = zip.mz_zip_writer_add_mem(archive_name, buf, level_and_flags);
+    if let Err(ref e) = add_result {
+        let _ = zip.mz_zip_writer_end_pub();
+        if !file_exists {
+            let _ = std::fs::remove_file(zip_filename);
+        }
+        return Err(*e);
+    }
+
+    if let Err(e) = zip.mz_zip_writer_finalize_archive() {
+        let _ = zip.mz_zip_writer_end_pub();
+        if !file_exists {
+            let _ = std::fs::remove_file(zip_filename);
+        }
+        return Err(e);
+    }
+
+    zip.mz_zip_writer_end_pub();
+    Ok(())
+}
+
+// --- Convenience: extract_archive_file_to_heap ---
+
+/// Read a single file from a ZIP file on disk into a heap buffer.
+pub fn mz_zip_extract_archive_file_to_heap(
+    zip_filename: &str,
+    archive_name: &str,
+    flags: u32,
+) -> Result<Vec<u8>, MzZipError> {
+    mz_zip_extract_archive_file_to_heap_v2(zip_filename, archive_name, None, flags)
+}
+
+/// Read a single file from a ZIP file on disk into a heap buffer (v2 with comment filter).
+pub fn mz_zip_extract_archive_file_to_heap_v2(
+    zip_filename: &str,
+    archive_name: &str,
+    comment: Option<&str>,
+    flags: u32,
+) -> Result<Vec<u8>, MzZipError> {
+    if zip_filename.is_empty() || archive_name.is_empty() {
+        return Err(MzZipError::InvalidParameter);
+    }
+    let mut zip = MzZipArchive::new();
+    mz_zip_reader_init_file(&mut zip, zip_filename,
+        flags | MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY as u32)?;
+
+    let file_index = mz_zip_reader_locate_file_v2(&zip, archive_name, comment, flags)
+        .ok_or(MzZipError::FileNotFound)?;
+
+    let result = mz_zip_reader_extract_to_heap(&zip, file_index, flags);
+    mz_zip_reader_end_internal(&mut zip, result.is_ok());
+    result
+}
+
+// --- CRC32 callback for validation ---
+
+/// Callback that accumulates CRC32 over data chunks.
+pub fn mz_zip_compute_crc32_callback(
+    crc: &mut u32,
+    _file_ofs: u64,
+    buf: &[u8],
+) -> usize {
+    *crc = mz_crc32(*crc as u64, buf);
+    buf.len()
+}
+
+// --- MzZipArray: push_bytes helper ---
+
+impl MzZipArray {
+    /// Push a slice of raw bytes into the array.
+    pub fn push_bytes(&mut self, data: &[u8]) -> Result<(), MzZipError> {
+        if let Some(ref mut vec) = self.p {
+            vec.extend_from_slice(data);
+            self.size = vec.len();
+            self.capacity = vec.capacity();
+            Ok(())
+        } else {
+            self.p = Some(data.to_vec());
+            self.size = data.len();
+            self.capacity = data.len();
+            Ok(())
+        }
+    }
+
+    /// Resize the array (truncate or extend with zeros).
+    pub fn resize(&mut self, new_size: usize) {
+        if let Some(ref mut vec) = self.p {
+            vec.resize(new_size, 0);
+            self.size = new_size;
+            self.capacity = vec.capacity();
+        }
+    }
+}
+
+// --- MzZipInternalState: new() constructor ---
+
+impl MzZipInternalState {
+    /// Create a new default internal state.
+    pub fn new() -> Self {
+        Self {
+            central_dir: MzZipArray::new(1),
+            central_dir_offsets: MzZipArray::new(4),
+            sorted_central_dir_offsets: MzZipArray::new(4),
+            init_flags: 0,
+            zip64: false,
+            zip64_has_extended_info_fields: false,
+            pfile: None,
+            file_archive_start_ofs: 0,
+            pmem: None,
+            mem_size: 0,
+            mem_capacity: 0,
+        }
+    }
+}
+
+impl Default for MzZipInternalState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// --- MzZipArchive: read_data method (immutable self version) ---
+
+impl MzZipArchive {
+    /// Read data from the archive backing store (memory or file) with immutable self.
+    pub fn read_data_immut(&self, offset: u64, buf: &mut [u8]) -> Result<usize, MzZipError> {
+        let state = self.m_pstate.as_ref().ok_or(MzZipError::InternalError)?;
+        if let Some(ref pmem) = state.pmem {
+            let start = (state.file_archive_start_ofs + offset) as usize;
+            if start >= pmem.len() {
+                return Ok(0);
+            }
+            let end = (start + buf.len()).min(pmem.len());
+            let n = end - start;
+            buf[..n].copy_from_slice(&pmem[start..end]);
+            Ok(n)
+        } else {
+            Err(MzZipError::InternalError)
+        }
+    }
 }
