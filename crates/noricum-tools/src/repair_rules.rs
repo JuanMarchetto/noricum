@@ -258,6 +258,10 @@ pub fn apply_all_rules(source: &str, errors: &[CompilerError]) -> String {
 
     // R12: fix truncated functions at module boundaries (must come before R4)
     result = rule_fix_truncated_module_boundary(&result);
+    // R13: field name prefix normalization (m_xyz ↔ xyz)
+    result = rule_field_name_prefix(&result, errors);
+    // R14: free function vs method call fix
+    result = rule_method_to_free_fn(&result, errors);
 
     // R4: auto-close unclosed braces from truncated LLM output
     result = auto_close_braces(&result);
@@ -1115,6 +1119,167 @@ pub fn rule_fix_truncated_module_boundary(source: &str) -> String {
     result_lines.join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// R13: Field name prefix normalization
+// ---------------------------------------------------------------------------
+
+/// When E0609 ("no field `m_xyz` on type") appears, try stripping the `m_` prefix
+/// or adding it. Common pattern: contract defines `zip64` but module uses `m_zip64`.
+pub fn rule_field_name_prefix(source: &str, errors: &[CompilerError]) -> String {
+    let field_errors: Vec<&CompilerError> = errors
+        .iter()
+        .filter(|e| e.code == "E0609")
+        .collect();
+
+    if field_errors.is_empty() {
+        return source.to_string();
+    }
+
+    let mut result = source.to_string();
+
+    for err in &field_errors {
+        // Extract field name from "no field `m_xyz` on type `Foo`"
+        let field_re = regex::Regex::new(r"no field `(\w+)` on type").ok();
+        if let Some(re) = field_re {
+            if let Some(caps) = re.captures(&err.message) {
+                let bad_field = &caps[1];
+
+                // Try stripping m_ prefix
+                if let Some(stripped) = bad_field.strip_prefix("m_") {
+                    // Only fix on the error line (±2 lines for safety)
+                    let lines: Vec<&str> = result.lines().collect();
+                    if err.line > 0 && (err.line as usize) <= lines.len() {
+                        let line_idx = err.line as usize - 1;
+                        let old_pattern = format!(".{bad_field}");
+                        let new_pattern = format!(".{stripped}");
+
+                        let start = line_idx.saturating_sub(1);
+                        let end = (line_idx + 2).min(lines.len());
+
+                        let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+                        for i in start..end {
+                            if new_lines[i].contains(&old_pattern) {
+                                new_lines[i] = new_lines[i].replace(&old_pattern, &new_pattern);
+                                debug!(line = i + 1, from = %bad_field, to = %stripped, "R13: stripped m_ prefix");
+                            }
+                        }
+                        result = new_lines.join("\n");
+                    }
+                }
+                // Try adding m_ prefix
+                else if !bad_field.starts_with("m_") {
+                    let with_prefix = format!("m_{bad_field}");
+                    let lines: Vec<&str> = result.lines().collect();
+                    if err.line > 0 && (err.line as usize) <= lines.len() {
+                        let line_idx = err.line as usize - 1;
+                        let old_pattern = format!(".{bad_field}");
+                        let new_pattern = format!(".{with_prefix}");
+
+                        let start = line_idx.saturating_sub(1);
+                        let end = (line_idx + 2).min(lines.len());
+
+                        let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+                        for i in start..end {
+                            if new_lines[i].contains(&old_pattern) {
+                                new_lines[i] = new_lines[i].replace(&old_pattern, &new_pattern);
+                                debug!(line = i + 1, from = %bad_field, to = %with_prefix, "R13: added m_ prefix");
+                            }
+                        }
+                        result = new_lines.join("\n");
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// R14: Free function vs method call fix
+// ---------------------------------------------------------------------------
+
+/// When E0599 ("no method named `xyz` found for struct `Foo`") appears and a free
+/// function `xyz` exists at module scope, rewrite `self.xyz(args)` → `xyz(self, args)`
+/// or `Self::xyz(args)` → `xyz(args)`.
+pub fn rule_method_to_free_fn(source: &str, errors: &[CompilerError]) -> String {
+    let method_errors: Vec<&CompilerError> = errors
+        .iter()
+        .filter(|e| e.code == "E0599" && e.message.contains("no method named"))
+        .collect();
+
+    if method_errors.is_empty() {
+        return source.to_string();
+    }
+
+    // Collect all free function names at module scope
+    let free_fns: std::collections::HashSet<String> = source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn "))
+                && !trimmed.starts_with("pub fn new")
+                && trimmed.contains('(')
+            {
+                let name = trimmed
+                    .split('(')
+                    .next()?
+                    .trim()
+                    .rsplit(' ')
+                    .next()?
+                    .to_string();
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut result = source.to_string();
+
+    for err in &method_errors {
+        // Extract method name: "no method named `xyz` found"
+        let method_re = regex::Regex::new(r"no method named `(\w+)` found").ok();
+        if let Some(re) = method_re {
+            if let Some(caps) = re.captures(&err.message) {
+                let method_name = &caps[1];
+
+                // Check if there's a free function with this name
+                if free_fns.contains(method_name) {
+                    let lines: Vec<&str> = result.lines().collect();
+                    if err.line > 0 && (err.line as usize) <= lines.len() {
+                        let line_idx = err.line as usize - 1;
+                        let mut new_lines: Vec<String> =
+                            lines.iter().map(|l| l.to_string()).collect();
+
+                        let line = &new_lines[line_idx];
+
+                        // Pattern: self.method_name(args) → method_name(self, args)
+                        let self_call = format!("self.{method_name}(");
+                        if line.contains(&self_call) {
+                            new_lines[line_idx] =
+                                line.replace(&self_call, &format!("{method_name}(self, "));
+                            debug!(line = line_idx + 1, method = %method_name, "R14: self.method → free_fn(self)");
+                        }
+
+                        // Pattern: Self::method_name(args) → method_name(args)
+                        let assoc_call = format!("Self::{method_name}(");
+                        if new_lines[line_idx].contains(&assoc_call) {
+                            new_lines[line_idx] = new_lines[line_idx]
+                                .replace(&assoc_call, &format!("{method_name}("));
+                            debug!(line = line_idx + 1, method = %method_name, "R14: Self::method → free_fn");
+                        }
+
+                        result = new_lines.join("\n");
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1384,6 +1549,64 @@ pub fn other_fn() -> bool {
         let result = rule_fix_truncated_module_boundary(input);
         // Complete function before boundary should not be modified
         assert!(result.contains("pub fn complete_fn(x: i32) -> bool {"));
+    }
+
+    // R13 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r13_strips_m_prefix() {
+        let source = "fn foo(zip: &Zip) {\n    let x = zip.m_zip64;\n}\n";
+        let errors = vec![CompilerError {
+            code: "E0609".to_string(),
+            message: "no field `m_zip64` on type `Zip`".to_string(),
+            line: 2,
+        }];
+        let result = rule_field_name_prefix(source, &errors);
+        assert!(result.contains("zip.zip64"), "m_ prefix should be stripped");
+        assert!(!result.contains("zip.m_zip64"), "original should be gone");
+    }
+
+    #[test]
+    fn test_r13_adds_m_prefix() {
+        let source = "fn foo(zip: &Zip) {\n    let x = zip.archive_size;\n}\n";
+        let errors = vec![CompilerError {
+            code: "E0609".to_string(),
+            message: "no field `archive_size` on type `Zip`".to_string(),
+            line: 2,
+        }];
+        let result = rule_field_name_prefix(source, &errors);
+        assert!(result.contains("zip.m_archive_size"), "m_ prefix should be added");
+    }
+
+    #[test]
+    fn test_r13_no_false_positive() {
+        let source = "fn foo(zip: &Zip) {\n    let x = zip.valid_field;\n}\n";
+        let result = rule_field_name_prefix(source, &[]);
+        assert_eq!(result, source, "no errors = no changes");
+    }
+
+    // R14 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r14_self_method_to_free_fn() {
+        let source = "fn mz_zip_set_error(zip: &mut Zip, e: i32) {}\n\nimpl Zip {\n    fn foo(&mut self) {\n        self.mz_zip_set_error(42);\n    }\n}\n";
+        let errors = vec![CompilerError {
+            code: "E0599".to_string(),
+            message: "no method named `mz_zip_set_error` found for struct `Zip`".to_string(),
+            line: 5,
+        }];
+        let result = rule_method_to_free_fn(source, &errors);
+        assert!(result.contains("mz_zip_set_error(self, 42)"), "should rewrite to free fn call");
+        assert!(!result.contains("self.mz_zip_set_error"), "method call should be gone");
+    }
+
+    #[test]
+    fn test_r14_no_false_positive() {
+        let source = "impl Zip {\n    fn foo(&self) {\n        self.real_method();\n    }\n}\n";
+        let result = rule_method_to_free_fn(source, &[]);
+        assert_eq!(result, source, "no errors = no changes");
     }
 
     // apply_all_rules tests
