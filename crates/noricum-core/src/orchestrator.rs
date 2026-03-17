@@ -1001,6 +1001,7 @@ pub async fn migrate_file(
         match migrate_file_modular(
             &unit.c_source,
             &name,
+            Some(c_file),
             config,
             &client,
             &provider_config,
@@ -1943,6 +1944,7 @@ pub async fn migrate_file(
 async fn migrate_file_modular(
     c_source: &str,
     name: &str,
+    source_file: Option<&std::path::Path>,
     config: &MigrationConfig,
     client: &LlmClient,
     provider_config: &noricum_agents::providers::ProviderConfig,
@@ -1959,12 +1961,13 @@ async fn migrate_file_modular(
         return Ok(ModularResult::FallbackToChunked);
     }
 
-    // P33: Generate type contract
+    // P33: Generate type contract (with header resolution for complete types)
     let type_contract = crate::type_contract::generate_type_contract(
         client,
         provider_config,
         &shared_context,
         c_source,
+        source_file,
         artifacts.as_ref(),
     )
     .await?;

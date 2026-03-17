@@ -6,6 +6,7 @@
 
 use crate::CoreError;
 use noricum_agents::providers::{LlmClient, ProviderConfig, select_model};
+use std::path::Path;
 
 /// Maximum retries for type contract compilation.
 const MAX_CONTRACT_RETRIES: usize = 3;
@@ -13,30 +14,49 @@ const MAX_CONTRACT_RETRIES: usize = 3;
 /// Maximum lines for abbreviated C source context.
 const CONTRACT_C_CONTEXT_MAX_LINES: usize = 2000;
 
+/// Maximum lines to inline from resolved headers.
+const MAX_HEADER_LINES: usize = 1500;
+
 /// P33: Type contract prompt preamble.
 const TYPE_CONTRACT_PREAMBLE: &str = "You are an expert C-to-Rust type translator. \
 You translate C type definitions to idiomatic Rust. You output ONLY valid Rust code.";
 
 /// P33: Generate a validated Rust type contract from C shared context.
 ///
-/// 1. Build prompt from shared_context + abbreviated C source
-/// 2. Call LLM to translate types
-/// 3. Post-process: strip fences, strip impl blocks
-/// 4. Validate with `check_rust_compiles()`
-/// 5. Try rule engine fixes before LLM retry
-/// 6. Retry up to [`MAX_CONTRACT_RETRIES`] times on failure
-/// 7. Return `None` if all retries fail (graceful degradation)
+/// 1. Resolve `#include` headers from the same directory for complete type info
+/// 2. Build prompt from shared_context + header types + abbreviated C source
+/// 3. Call LLM to translate types
+/// 4. Post-process: strip fences, strip impl blocks
+/// 5. Validate with `check_rust_compiles()`
+/// 6. Try rule engine fixes before LLM retry
+/// 7. Retry up to [`MAX_CONTRACT_RETRIES`] times on failure
+/// 8. Return `None` if all retries fail (graceful degradation)
 pub async fn generate_type_contract(
     client: &LlmClient,
     provider_config: &ProviderConfig,
     shared_context: &str,
     c_source: &str,
+    source_path: Option<&Path>,
     artifacts: Option<&crate::artifacts::ArtifactStore>,
 ) -> Result<Option<String>, CoreError> {
     if shared_context.trim().is_empty() {
         tracing::info!("P33: empty shared_context, skipping type contract");
         return Ok(None);
     }
+
+    // P33b: Resolve headers from #include directives in the same directory
+    let header_types = if let Some(path) = source_path {
+        let resolved = resolve_header_types(shared_context, path);
+        if !resolved.is_empty() {
+            tracing::info!(
+                "P33: resolved {} lines of header type definitions",
+                resolved.lines().count()
+            );
+        }
+        resolved
+    } else {
+        String::new()
+    };
 
     // Use Easy difficulty — type translation is a focused task
     let model_sel =
@@ -45,7 +65,7 @@ pub async fn generate_type_contract(
     let model = &model_sel.model;
 
     let c_abbreviated = abbreviate_c_for_context(c_source, CONTRACT_C_CONTEXT_MAX_LINES);
-    let user_prompt = build_type_contract_prompt(shared_context, &c_abbreviated);
+    let user_prompt = build_type_contract_prompt(shared_context, &header_types, &c_abbreviated);
     let mut last_errors = String::new();
 
     for attempt in 0..MAX_CONTRACT_RETRIES {
@@ -137,31 +157,166 @@ pub async fn generate_type_contract(
 }
 
 /// Build the user prompt for type contract generation.
-fn build_type_contract_prompt(shared_context: &str, c_source_abbreviated: &str) -> String {
+fn build_type_contract_prompt(
+    shared_context: &str,
+    header_types: &str,
+    c_source_abbreviated: &str,
+) -> String {
+    let header_section = if header_types.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nHeader type definitions (from #included files — these contain the REAL struct/enum definitions):\n\
+             ```c\n{header_types}\n```\n"
+        )
+    };
+
     format!(
-        "Translate ALL type definitions from this C code to idiomatic Rust.\n\n\
-         Rules:\n\
-         - Convert typedef struct → pub struct with pub fields\n\
-         - Convert enum → pub enum (use #[repr(i32)] if values have explicit integer assignments)\n\
-         - Convert #define constants → pub const\n\
-         - Convert typedef aliases → pub type\n\
-         - Use idiomatic Rust types:\n\
-           - void* → Box<dyn std::any::Any> (or concrete type if determinable)\n\
-           - char* → String (owned) or &str (borrowed)\n\
-           - T* + size_t len → Vec<T>\n\
-           - Nullable pointers → Option<T>\n\
-           - Function pointers → fn(...) -> ... or Option<fn(...) -> ...> for nullable\n\
-         - Add #[derive(Debug, Clone)] where appropriate\n\
-         - NO function bodies — only struct/enum/const/type definitions\n\
-         - NO impl blocks\n\
-         - NO standalone fn definitions\n\
-         - Include brief doc comments for each type explaining its purpose\n\n\
+        "Translate ALL type definitions from this C code to idiomatic, safe Rust.\n\n\
+         CRITICAL RULES:\n\
+         1. Every struct MUST have ALL its fields — never use empty structs or forward declarations.\n\
+         2. Use IDIOMATIC Rust types everywhere:\n\
+            - void* opaque handles → Box<dyn std::any::Any> or a concrete wrapper type\n\
+            - char* → String (owned) or &str (borrowed)\n\
+            - T* + length → Vec<T>\n\
+            - Nullable pointer (T*) → Option<Box<T>> or Option<Vec<T>>\n\
+            - Function pointers → Option<fn(...) -> ...> (nullable) or fn(...) -> ... (non-null)\n\
+            - FILE* → Option<Box<dyn std::io::Write + std::io::Read + std::io::Seek>>\n\
+            - mz_uint/mz_uint32/etc → use Rust native types (u32, u64, etc.) DIRECTLY in struct fields\n\
+         3. Do NOT create C-style type aliases like `type MzBool = i32` — use bool directly.\n\
+         4. Do NOT create aliases for basic integer types — use u8, u16, u32, u64, usize directly.\n\
+         5. Do NOT use raw pointers (*mut, *const) — use owned types (Box, Vec, Option).\n\
+         6. Convert typedef struct → pub struct with pub fields using idiomatic Rust names (CamelCase).\n\
+         7. Convert enum → pub enum with CamelCase variant names.\n\
+         8. Convert #define numeric constants → pub const with appropriate Rust type.\n\
+         9. Add #[derive(Debug, Clone)] where appropriate.\n\
+         10. NO function bodies, NO impl blocks, NO standalone fn definitions.\n\
+         11. Include brief doc comments for each type.\n\n\
          Output ONLY valid Rust code. No markdown fences. No explanations.\n\n\
-         C type definitions:\n```c\n{shared_context}\n```\n\n\
+         C source definitions (macros, includes):\n```c\n{shared_context}\n```\n\
+         {header_section}\n\
          Full C source (for context on how types are used):\n```c\n{c_source_abbreviated}\n```",
         shared_context = shared_context,
+        header_section = header_section,
         c_source_abbreviated = c_source_abbreviated,
     )
+}
+
+/// Resolve `#include "file.h"` directives from shared_context, reading header files
+/// from the same directory as the source file. Extracts type definitions (structs,
+/// enums, typedefs, function pointer typedefs) from headers.
+fn resolve_header_types(shared_context: &str, source_path: &Path) -> String {
+    let source_dir = match source_path.parent() {
+        Some(dir) => dir,
+        None => return String::new(),
+    };
+
+    let mut header_content = String::new();
+    let mut total_lines = 0;
+
+    // Find #include "local.h" directives (not <system.h>)
+    for line in shared_context.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("#include") {
+            let rest = rest.trim();
+            if let Some(filename) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                let header_path = source_dir.join(filename);
+                if let Ok(content) = std::fs::read_to_string(&header_path) {
+                    let type_lines = extract_type_lines_from_header(&content);
+                    let line_count = type_lines.lines().count();
+                    if total_lines + line_count <= MAX_HEADER_LINES {
+                        if !header_content.is_empty() {
+                            header_content.push_str("\n\n");
+                        }
+                        header_content
+                            .push_str(&format!("// === From {filename} ===\n{type_lines}"));
+                        total_lines += line_count;
+                        tracing::debug!(
+                            "P33: resolved header {} ({} type lines)",
+                            filename,
+                            line_count
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    header_content
+}
+
+/// Extract type-relevant lines from a C header: typedefs, structs, enums,
+/// #define constants, and function pointer typedefs.
+fn extract_type_lines_from_header(header: &str) -> String {
+    let lines: Vec<&str> = header.lines().collect();
+    let mut result = Vec::new();
+    let mut i = 0;
+    let mut in_block = false;
+    let mut brace_depth = 0;
+
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+
+        // Skip include guards, pragmas, #include directives, comments-only lines
+        if trimmed.starts_with("#pragma")
+            || trimmed.starts_with("#ifndef")
+            || trimmed.starts_with("#define _")
+            || trimmed.starts_with("#endif")
+            || trimmed.starts_with("#include")
+            || trimmed.starts_with("#ifdef")
+            || trimmed.starts_with("#else")
+            || trimmed.starts_with("#if ")
+        {
+            i += 1;
+            continue;
+        }
+
+        // Track braces for multi-line type definitions
+        if in_block {
+            result.push(lines[i]);
+            for ch in trimmed.chars() {
+                if ch == '{' {
+                    brace_depth += 1;
+                }
+                if ch == '}' {
+                    brace_depth -= 1;
+                }
+            }
+            if brace_depth <= 0 {
+                in_block = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Detect type definition starts
+        let is_type_line = trimmed.starts_with("typedef ")
+            || trimmed.starts_with("struct ")
+            || trimmed.starts_with("enum ")
+            || trimmed.starts_with("#define ")
+            || trimmed.starts_with("extern ")
+            || (trimmed.contains("typedef") && trimmed.contains("(*)"));
+
+        if is_type_line {
+            result.push(lines[i]);
+            // Check if this opens a multi-line block
+            for ch in trimmed.chars() {
+                if ch == '{' {
+                    brace_depth += 1;
+                }
+                if ch == '}' {
+                    brace_depth -= 1;
+                }
+            }
+            if brace_depth > 0 {
+                in_block = true;
+            }
+        }
+
+        i += 1;
+    }
+
+    result.join("\n")
 }
 
 /// Build abbreviated C source: first N lines that fit in budget.
@@ -241,10 +396,83 @@ mod tests {
     #[test]
     fn test_build_type_contract_prompt_contains_shared_context() {
         let prompt =
-            build_type_contract_prompt("typedef struct { int x; } Foo;", "void bar() {}");
+            build_type_contract_prompt("typedef struct { int x; } Foo;", "", "void bar() {}");
         assert!(prompt.contains("typedef struct { int x; } Foo;"));
         assert!(prompt.contains("void bar() {}"));
         assert!(prompt.contains("NO impl blocks"));
+        assert!(prompt.contains("IDIOMATIC Rust types"));
+        assert!(prompt.contains("Do NOT create C-style type aliases"));
+    }
+
+    #[test]
+    fn test_build_type_contract_prompt_includes_header_types() {
+        let prompt = build_type_contract_prompt(
+            "#include \"miniz.h\"",
+            "// === From miniz.h ===\ntypedef unsigned int mz_uint;",
+            "void foo() {}",
+        );
+        assert!(prompt.contains("Header type definitions"));
+        assert!(prompt.contains("From miniz.h"));
+        assert!(prompt.contains("mz_uint"));
+    }
+
+    #[test]
+    fn test_resolve_header_types_finds_local_headers() {
+        // Create a temp directory with a .c and .h file
+        let dir = std::env::temp_dir().join("noricum_test_headers");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("test.h"),
+            "typedef struct { int x; int y; } Point;\nenum Color { RED, GREEN };\n",
+        )
+        .unwrap();
+        let source_path = dir.join("test.c");
+        std::fs::write(&source_path, "").unwrap();
+
+        let shared = "#include \"test.h\"\n#define MAX 100\n";
+        let result = resolve_header_types(shared, &source_path);
+        assert!(result.contains("Point"));
+        assert!(result.contains("Color"));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_extract_type_lines_from_header() {
+        let header = r#"
+#ifndef MY_HEADER_H
+#define MY_HEADER_H
+
+#include <stdio.h>
+
+typedef unsigned int mz_uint;
+
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+enum Color { RED, GREEN, BLUE };
+
+void some_function(int arg);
+
+#define MAX_SIZE 100
+
+typedef int (*callback_fn)(void*);
+
+#endif
+"#;
+        let result = extract_type_lines_from_header(header);
+        assert!(result.contains("typedef unsigned int mz_uint"));
+        assert!(result.contains("typedef struct"));
+        assert!(result.contains("Point"));
+        assert!(result.contains("enum Color"));
+        assert!(result.contains("#define MAX_SIZE"));
+        assert!(result.contains("callback_fn"));
+        // Should NOT contain function declarations or include guards
+        assert!(!result.contains("some_function"));
+        assert!(!result.contains("#ifndef"));
     }
 
     #[test]
