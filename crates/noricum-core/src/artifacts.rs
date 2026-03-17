@@ -118,6 +118,11 @@ impl ArtifactStore {
         self.write_artifact(Path::new("02-c2rust.rs"), rust_source)
     }
 
+    /// Save the P33 type contract (`02-type-contract.rs`).
+    pub fn save_type_contract(&self, rust_source: &str) -> io::Result<()> {
+        self.write_artifact(Path::new("02-type-contract.rs"), rust_source)
+    }
+
     /// Save the final merged translation (`03-translation/final.rs`).
     pub fn save_translation_final(&self, rust_source: &str) -> io::Result<()> {
         self.write_artifact(Path::new("03-translation/final.rs"), rust_source)

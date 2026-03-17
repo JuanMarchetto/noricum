@@ -4,15 +4,137 @@
 //! strip non-type definitions from LLM output, and abbreviate C source
 //! to fit token budgets.
 
-#[allow(unused_imports)]
 use crate::CoreError;
-#[allow(unused_imports)]
 use noricum_agents::providers::{LlmClient, ProviderConfig, select_model};
 
+/// Maximum retries for type contract compilation.
+const MAX_CONTRACT_RETRIES: usize = 3;
+
+/// Maximum lines for abbreviated C source context.
+const CONTRACT_C_CONTEXT_MAX_LINES: usize = 2000;
+
 /// P33: Type contract prompt preamble.
-#[allow(dead_code)]
 const TYPE_CONTRACT_PREAMBLE: &str = "You are an expert C-to-Rust type translator. \
 You translate C type definitions to idiomatic Rust. You output ONLY valid Rust code.";
+
+/// P33: Generate a validated Rust type contract from C shared context.
+///
+/// 1. Build prompt from shared_context + abbreviated C source
+/// 2. Call LLM to translate types
+/// 3. Post-process: strip fences, strip impl blocks
+/// 4. Validate with `check_rust_compiles()`
+/// 5. Try rule engine fixes before LLM retry
+/// 6. Retry up to [`MAX_CONTRACT_RETRIES`] times on failure
+/// 7. Return `None` if all retries fail (graceful degradation)
+pub async fn generate_type_contract(
+    client: &LlmClient,
+    provider_config: &ProviderConfig,
+    shared_context: &str,
+    c_source: &str,
+    artifacts: Option<&crate::artifacts::ArtifactStore>,
+) -> Result<Option<String>, CoreError> {
+    if shared_context.trim().is_empty() {
+        tracing::info!("P33: empty shared_context, skipping type contract");
+        return Ok(None);
+    }
+
+    // Use Easy difficulty — type translation is a focused task
+    let model_sel =
+        select_model(provider_config, noricum_ir::Difficulty::Easy, "type_contract")
+            .map_err(|e| CoreError::Orchestration(format!("P33 model selection: {e}")))?;
+    let model = &model_sel.model;
+
+    let c_abbreviated = abbreviate_c_for_context(c_source, CONTRACT_C_CONTEXT_MAX_LINES);
+    let user_prompt = build_type_contract_prompt(shared_context, &c_abbreviated);
+    let mut last_errors = String::new();
+
+    for attempt in 0..MAX_CONTRACT_RETRIES {
+        let prompt = if attempt == 0 {
+            user_prompt.clone()
+        } else {
+            format!(
+                "{}\n\nPREVIOUS ATTEMPT FAILED TO COMPILE. Fix these errors:\n{}\n\nOutput ONLY corrected Rust code.",
+                user_prompt, last_errors
+            )
+        };
+
+        let raw = match client
+            .run_prompt(model, TYPE_CONTRACT_PREAMBLE, 0.2, 8192, &prompt)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("P33: LLM call failed attempt {}: {}", attempt + 1, e);
+                continue;
+            }
+        };
+
+        // Post-process
+        let cleaned = strip_markdown_fences(&raw);
+        let contract = strip_impl_blocks(&cleaned);
+
+        if contract.trim().is_empty() {
+            tracing::warn!(
+                "P33: empty contract after post-processing, attempt {}",
+                attempt + 1
+            );
+            continue;
+        }
+
+        // Validate compilation
+        match noricum_tools::compiler::check_rust_compiles(&contract) {
+            Ok(result) if result.success => {
+                tracing::info!(
+                    "P33: type contract compiled (attempt {}, {} lines)",
+                    attempt + 1,
+                    contract.lines().count()
+                );
+                if let Some(store) = artifacts {
+                    let _ = store.save_type_contract(&contract);
+                }
+                return Ok(Some(contract));
+            }
+            Ok(result) => {
+                tracing::warn!(
+                    "P33: contract failed to compile (attempt {}): {}",
+                    attempt + 1,
+                    &result.stderr[..result.stderr.len().min(500)]
+                );
+                // Try mechanical fixes via rule engine before LLM retry
+                let parsed_errors =
+                    noricum_tools::repair_rules::parse_rustc_errors(&result.stderr);
+                let fixed =
+                    noricum_tools::repair_rules::apply_all_rules(&contract, &parsed_errors);
+                if fixed != contract {
+                    match noricum_tools::compiler::check_rust_compiles(&fixed) {
+                        Ok(r2) if r2.success => {
+                            tracing::info!(
+                                "P33: rule engine fixed contract (attempt {})",
+                                attempt + 1
+                            );
+                            if let Some(store) = artifacts {
+                                let _ = store.save_type_contract(&fixed);
+                            }
+                            return Ok(Some(fixed));
+                        }
+                        _ => {}
+                    }
+                }
+                last_errors = result.stderr;
+            }
+            Err(e) => {
+                tracing::warn!("P33: compiler error attempt {}: {}", attempt + 1, e);
+                continue;
+            }
+        }
+    }
+
+    tracing::warn!(
+        "P33: type contract failed after {} retries, proceeding without contract",
+        MAX_CONTRACT_RETRIES
+    );
+    Ok(None)
+}
 
 /// Build the user prompt for type contract generation.
 fn build_type_contract_prompt(shared_context: &str, c_source_abbreviated: &str) -> String {
@@ -169,5 +291,24 @@ mod tests {
         let result = strip_markdown_fences(input);
         assert!(!result.contains("```"));
         assert!(result.contains("pub struct Foo"));
+    }
+
+    #[test]
+    fn test_validate_type_contract_compiles() {
+        let contract =
+            "pub struct Foo { pub x: i32 }\npub enum Bar { A, B }\npub const MAX: i32 = 100;\n";
+        let result = noricum_tools::compiler::check_rust_compiles(contract).unwrap();
+        assert!(
+            result.success,
+            "Valid type contract should compile: {}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn test_validate_type_contract_rejects_invalid() {
+        let contract = "pub struct Foo { pub x: UnknownType }\n";
+        let result = noricum_tools::compiler::check_rust_compiles(contract).unwrap();
+        assert!(!result.success);
     }
 }

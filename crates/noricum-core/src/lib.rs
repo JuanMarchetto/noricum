@@ -5,7 +5,6 @@ pub mod incremental;
 pub mod orchestrator;
 pub mod router;
 pub mod surgical_repair;
-#[allow(dead_code)] // Helpers used by tests now; Task 3 wires up generate_type_contract()
 pub mod type_contract;
 
 pub use orchestrator::MigrationConfig;
