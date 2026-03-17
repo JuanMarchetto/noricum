@@ -205,17 +205,17 @@ pub fn auto_close_braces(source: &str) -> String {
         }
     }
 
-    if let Some(cut_line) = last_balanced_line {
-        if cut_line + 1 < lines.len() {
-            let truncated_count = lines.len() - cut_line - 1;
-            debug!(
-                cut_line = cut_line + 1,
-                truncated_lines = truncated_count,
-                "P32: truncating at last balanced brace point"
-            );
-            let kept: String = lines[..=cut_line].join("\n");
-            return format!("{kept}\n// P32: truncated {truncated_count} lines of incomplete code");
-        }
+    if let Some(cut_line) = last_balanced_line
+        && cut_line + 1 < lines.len()
+    {
+        let truncated_count = lines.len() - cut_line - 1;
+        debug!(
+            cut_line = cut_line + 1,
+            truncated_lines = truncated_count,
+            "P32: truncating at last balanced brace point"
+        );
+        let kept: String = lines[..=cut_line].join("\n");
+        return format!("{kept}\n// P32: truncated {truncated_count} lines of incomplete code");
     }
 
     // Fallback: no balanced point found, just close braces
@@ -225,7 +225,9 @@ pub fn auto_close_braces(source: &str) -> String {
 
 /// Apply all mechanical repair rules in sequence.
 ///
-/// Order matters: R0 fence strip, R2 dedup (removes duplicate definitions),
+/// Order matters: R0 fence strip, R5 inner attributes, R6 inner doc comments,
+/// R7 duplicate use imports, R8 orphaned derive, R2 dedup (removes duplicate definitions),
+/// R9 conflicting trait impls, R10 external crate imports, R11 windows imports,
 /// R1 clone bounds (adds missing trait bounds), R3 mut option ref
 /// (fixes moved `Option<&mut T>` parameters), R4 auto-close braces
 /// (safety net for truncated LLM output).
@@ -233,8 +235,22 @@ pub fn apply_all_rules(source: &str, errors: &[CompilerError]) -> String {
     // R0 first: strip markdown fences (always, no error check needed)
     let mut result = rule_strip_markdown_fences(source);
 
+    // R5: inner attributes → outer attributes (must come before compilation-sensitive rules)
+    result = rule_inner_attribute_to_outer(&result, errors);
+    // R6: inner doc comments → regular comments
+    result = rule_inner_doc_to_comment(&result, errors);
+    // R7: duplicate use imports
+    result = rule_dedup_use_imports(&result, errors);
+    // R8: orphaned derive on non-struct
+    result = rule_orphaned_derive(&result, errors);
     // R2: dedup removes duplicate definitions, which can cascade
     result = rule_dedup_functions(&result, errors);
+    // R9: conflicting trait implementations
+    result = rule_conflicting_trait_impls(&result, errors);
+    // R10: unresolved external crate imports
+    result = rule_strip_external_crate_imports(&result, errors);
+    // R11: windows-specific imports on non-windows
+    result = rule_strip_windows_imports(&result, errors);
     // R1: add Clone bounds where needed
     result = rule_clone_bounds(&result, errors);
     // R3: fix Option<&mut T> move errors
@@ -520,6 +536,469 @@ pub fn rule_mut_option_ref(source: &str, errors: &[CompilerError]) -> String {
     }
 
     result
+}
+
+// ---------------------------------------------------------------------------
+// R5: Inner attributes → outer attributes
+// ---------------------------------------------------------------------------
+
+/// R5: When an inner attribute (`#![allow(...)]`) appears outside the crate root
+/// (line > 5), convert it to an outer attribute (`#[allow(...)]`).
+///
+/// Error: `an inner attribute is not permitted in this context`
+pub fn rule_inner_attribute_to_outer(source: &str, errors: &[CompilerError]) -> String {
+    let inner_attr_errors: Vec<&CompilerError> = errors
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("inner attribute is not permitted in this context")
+        })
+        .collect();
+
+    if inner_attr_errors.is_empty() {
+        return source.to_string();
+    }
+
+    let error_lines: Vec<usize> = inner_attr_errors.iter().map(|e| e.line).collect();
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut result_lines: Vec<String> = Vec::with_capacity(lines.len());
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_num = i + 1; // 1-indexed
+        if error_lines.contains(&line_num) && line_num > 5 {
+            let trimmed = line.trim();
+            if trimmed.starts_with("#![") {
+                // Replace #![ with #[
+                let fixed = line.replacen("#![", "#[", 1);
+                debug!(line = line_num, "R5: converted inner attribute to outer");
+                result_lines.push(fixed);
+                continue;
+            }
+        }
+        result_lines.push(line.to_string());
+    }
+
+    result_lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// R6: Inner doc comments → regular comments
+// ---------------------------------------------------------------------------
+
+/// R6: When an inner doc comment (`//!`) appears outside the crate root,
+/// convert it to a regular comment (`//`).
+///
+/// Error: `E0753: expected outer doc comment`
+pub fn rule_inner_doc_to_comment(source: &str, errors: &[CompilerError]) -> String {
+    let doc_errors: Vec<&CompilerError> = errors
+        .iter()
+        .filter(|e| e.code == "E0753" || e.message.contains("expected outer doc comment"))
+        .collect();
+
+    if doc_errors.is_empty() {
+        return source.to_string();
+    }
+
+    let error_lines: Vec<usize> = doc_errors.iter().map(|e| e.line).collect();
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut result_lines: Vec<String> = Vec::with_capacity(lines.len());
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_num = i + 1;
+        if error_lines.contains(&line_num) && line_num > 5 {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//!") {
+                // Replace //! with // preserving leading whitespace
+                let fixed = line.replacen("//!", "//", 1);
+                debug!(line = line_num, "R6: converted inner doc comment to regular comment");
+                result_lines.push(fixed);
+                continue;
+            }
+        }
+        result_lines.push(line.to_string());
+    }
+
+    result_lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// R7: Duplicate use imports
+// ---------------------------------------------------------------------------
+
+/// R7: When `E0252` reports "the name X is defined multiple times" from
+/// duplicate `use` statements, remove the second `use` line that imports
+/// the same name.
+///
+/// Also handles `use std::io;` duplicated after `use std::io::{self, ...}`.
+pub fn rule_dedup_use_imports(source: &str, errors: &[CompilerError]) -> String {
+    let dup_errors: Vec<&CompilerError> = errors
+        .iter()
+        .filter(|e| e.code == "E0252" && e.message.contains("defined multiple times"))
+        .collect();
+
+    if dup_errors.is_empty() {
+        return source.to_string();
+    }
+
+    // Extract the duplicate names from error messages
+    let name_re =
+        Regex::new(r"name `(\w+)` is defined multiple times").expect("static regex is valid");
+
+    let mut dup_names: Vec<String> = Vec::new();
+    for err in &dup_errors {
+        if let Some(caps) = name_re.captures(&err.message) {
+            let name = caps[1].to_string();
+            if !dup_names.contains(&name) {
+                dup_names.push(name);
+            }
+        }
+    }
+
+    if dup_names.is_empty() {
+        return source.to_string();
+    }
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut result_lines: Vec<String> = Vec::with_capacity(lines.len());
+    let mut seen_imports: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        // Only process `use` statements
+        if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
+            // Check if this use line imports any of the duplicated names
+            let mut is_dup = false;
+            for name in &dup_names {
+                // Match patterns like: `use foo::Name;` or `use foo::Name as ...;`
+                // or `use foo::{self, ...}` where foo ends with the module name
+                if trimmed.contains(&format!("::{name}")) || trimmed.ends_with(&format!("{name};")) {
+                    // Use the full line (normalized) as key
+                    let key = format!("{name}:{trimmed}");
+                    if seen_imports.contains(&format!("{name}:SEEN")) {
+                        // This is a duplicate import of the same name — remove it
+                        debug!(
+                            line = i + 1,
+                            name,
+                            "R7: removing duplicate use import"
+                        );
+                        is_dup = true;
+                        break;
+                    }
+                    seen_imports.insert(format!("{name}:SEEN"));
+                    let _ = key;
+                }
+            }
+            if is_dup {
+                continue;
+            }
+        }
+
+        result_lines.push(line.to_string());
+    }
+
+    result_lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// R8: Orphaned derive on non-struct
+// ---------------------------------------------------------------------------
+
+/// R8: When `E0774` reports "derive may only be applied to structs, enums and unions",
+/// remove the `#[derive(...)]` line if the following non-blank line is not a
+/// struct/enum/union declaration.
+pub fn rule_orphaned_derive(source: &str, errors: &[CompilerError]) -> String {
+    let derive_errors: Vec<&CompilerError> = errors
+        .iter()
+        .filter(|e| {
+            e.code == "E0774"
+                || e.message
+                    .contains("derive may only be applied to structs, enums and unions")
+        })
+        .collect();
+
+    if derive_errors.is_empty() {
+        return source.to_string();
+    }
+
+    let error_lines: Vec<usize> = derive_errors.iter().map(|e| e.line).collect();
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut remove_lines: Vec<usize> = Vec::new();
+
+    let derive_re = Regex::new(r"^\s*#\[derive\(").expect("static regex is valid");
+
+    for &line_num in &error_lines {
+        let idx = line_num.saturating_sub(1);
+        if idx >= lines.len() {
+            continue;
+        }
+        if derive_re.is_match(lines[idx]) {
+            // Check the next non-blank line
+            let mut next_idx = idx + 1;
+            while next_idx < lines.len() && lines[next_idx].trim().is_empty() {
+                next_idx += 1;
+            }
+            let is_valid_target = if next_idx < lines.len() {
+                let next_trimmed = lines[next_idx].trim();
+                next_trimmed.starts_with("struct ")
+                    || next_trimmed.starts_with("pub struct ")
+                    || next_trimmed.starts_with("pub(crate) struct ")
+                    || next_trimmed.starts_with("enum ")
+                    || next_trimmed.starts_with("pub enum ")
+                    || next_trimmed.starts_with("pub(crate) enum ")
+                    || next_trimmed.starts_with("union ")
+                    || next_trimmed.starts_with("pub union ")
+                    || next_trimmed.starts_with("pub(crate) union ")
+            } else {
+                false
+            };
+
+            if !is_valid_target {
+                remove_lines.push(idx);
+                debug!(line = line_num, "R8: removing orphaned #[derive(...)]");
+            }
+        }
+    }
+
+    if remove_lines.is_empty() {
+        return source.to_string();
+    }
+
+    let result_lines: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !remove_lines.contains(i))
+        .map(|(_, line)| line.to_string())
+        .collect();
+
+    result_lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// R9: Conflicting trait implementations
+// ---------------------------------------------------------------------------
+
+/// R9: When `E0119` reports "conflicting implementations of trait X for type Y",
+/// remove the second `impl` block entirely.
+pub fn rule_conflicting_trait_impls(source: &str, errors: &[CompilerError]) -> String {
+    let conflict_errors: Vec<&CompilerError> = errors
+        .iter()
+        .filter(|e| e.code == "E0119" && e.message.contains("conflicting implementations"))
+        .collect();
+
+    if conflict_errors.is_empty() {
+        return source.to_string();
+    }
+
+    // Extract trait and type names from error messages
+    // Message format: "conflicting implementations of trait `Debug` for type `Foo`"
+    let impl_re = Regex::new(r"conflicting implementations of trait `(\w+)` for type `([^`]+)`")
+        .expect("static regex is valid");
+
+    let mut to_remove: Vec<(String, String, usize)> = Vec::new(); // (trait, type, error_line)
+    for err in &conflict_errors {
+        if let Some(caps) = impl_re.captures(&err.message) {
+            to_remove.push((caps[1].to_string(), caps[2].to_string(), err.line));
+        }
+    }
+
+    if to_remove.is_empty() {
+        return source.to_string();
+    }
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut removed_ranges: Vec<(usize, usize)> = Vec::new();
+
+    for (trait_name, type_name, error_line) in &to_remove {
+        // The error line points to the second impl. Build pattern to match it.
+        // The error message uses unqualified names (e.g., `Debug`) but the source
+        // may use qualified paths (e.g., `fmt::Debug`), so we match with optional
+        // path prefix: `(path::)*TraitName`.
+        let impl_pattern = format!(
+            r"^\s*impl\s+(?:\w+::)*{}\s+for\s+(?:\w+::)*{}",
+            regex::escape(trait_name),
+            regex::escape(type_name)
+        );
+        let impl_match_re = Regex::new(&impl_pattern).expect("dynamic regex is valid");
+
+        // Search near the error line for the impl declaration
+        let search_start = error_line.saturating_sub(3); // error might be 1-2 lines after impl
+        let search_end = (error_line + 2).min(lines.len());
+
+        let mut found_first = false;
+        for i in 0..lines.len() {
+            if impl_match_re.is_match(lines[i].trim()) {
+                if !found_first {
+                    // Skip the first occurrence (keep it)
+                    found_first = true;
+                    continue;
+                }
+                // Check if this second occurrence is near the error line
+                let line_num = i + 1;
+                if line_num >= search_start && line_num <= search_end + 5 {
+                    let end = skip_function_body(&lines, i);
+                    removed_ranges.push((i, end));
+                    debug!(
+                        trait_name,
+                        type_name,
+                        start = i + 1,
+                        end,
+                        "R9: removing conflicting trait impl"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    if removed_ranges.is_empty() {
+        return source.to_string();
+    }
+
+    removed_ranges.sort_by_key(|&(start, _)| start);
+
+    let mut result_lines: Vec<String> = Vec::new();
+    let mut skip_until = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        if i < skip_until {
+            continue;
+        }
+        if let Some(&(_, end)) = removed_ranges.iter().find(|&&(s, _)| s == i) {
+            skip_until = end;
+            continue;
+        }
+        result_lines.push(line.to_string());
+    }
+
+    result_lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// R10: Unresolved external crate imports
+// ---------------------------------------------------------------------------
+
+/// R10: When `E0432` or `E0433` reports unresolved imports for known external
+/// crates (e.g., `miniz_oxide`, `crc32fast`), comment out the `use` line.
+///
+/// This is a conservative fix — only strips the import line, not code that
+/// references the missing types.
+pub fn rule_strip_external_crate_imports(source: &str, errors: &[CompilerError]) -> String {
+    // Known external crates that won't be available in single-file compilation
+    let external_crates = [
+        "miniz_oxide",
+        "crc32fast",
+        "flate2",
+        "libc",
+        "nix",
+        "winapi",
+        "num_traits",
+        "byteorder",
+        "rand",
+        "serde",
+        "tokio",
+    ];
+
+    let unresolved_errors: Vec<&CompilerError> = errors
+        .iter()
+        .filter(|e| {
+            (e.code == "E0432" || e.code == "E0433")
+                && (e.message.contains("unresolved") || e.message.contains("could not find"))
+        })
+        .collect();
+
+    let error_lines: Vec<usize> = unresolved_errors.iter().map(|e| e.line).collect();
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut result_lines: Vec<String> = Vec::with_capacity(lines.len());
+    let mut changed = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_num = i + 1;
+        let trimmed = line.trim();
+
+        // Check if this is a use line for an external crate on an error line
+        if !error_lines.is_empty()
+            && error_lines.contains(&line_num)
+            && (trimmed.starts_with("use ") || trimmed.starts_with("pub use "))
+        {
+            let is_external = external_crates
+                .iter()
+                .any(|crate_name| trimmed.contains(crate_name));
+
+            if is_external {
+                debug!(line = line_num, "R10: commenting out external crate import");
+                result_lines.push(format!("// R10: {trimmed}"));
+                changed = true;
+                continue;
+            }
+        }
+
+        // Always strip `extern crate` lines for known external crates
+        // (these are never valid in single-file compilation)
+        if trimmed.starts_with("extern crate ") {
+            let is_external = external_crates
+                .iter()
+                .any(|crate_name| trimmed.contains(crate_name));
+            if is_external {
+                debug!(line = i + 1, "R10: commenting out extern crate");
+                result_lines.push(format!("// R10: {trimmed}"));
+                changed = true;
+                continue;
+            }
+        }
+
+        result_lines.push(line.to_string());
+    }
+
+    if !changed {
+        return source.to_string();
+    }
+
+    result_lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// R11: Windows-specific imports on non-Windows
+// ---------------------------------------------------------------------------
+
+/// R11: When `E0433` reports "could not find `windows` in `os`", strip
+/// `use std::os::windows::*` import lines.
+///
+/// On non-Windows targets, these imports cause compilation failures.
+pub fn rule_strip_windows_imports(source: &str, errors: &[CompilerError]) -> String {
+    let windows_errors: Vec<&CompilerError> = errors
+        .iter()
+        .filter(|e| {
+            (e.code == "E0432" || e.code == "E0433")
+                && e.message.contains("windows")
+        })
+        .collect();
+
+    if windows_errors.is_empty() {
+        return source.to_string();
+    }
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut result_lines: Vec<String> = Vec::with_capacity(lines.len());
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("use std::os::windows")
+            || trimmed.starts_with("pub use std::os::windows")
+        {
+            debug!(line = i + 1, "R11: commenting out Windows-specific import");
+            result_lines.push(format!("// R11 (non-Windows): {trimmed}"));
+            continue;
+        }
+
+        result_lines.push(line.to_string());
+    }
+
+    result_lines.join("\n")
 }
 
 #[cfg(test)]
@@ -1002,5 +1481,428 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
         let source = "fn foo() {\n    1\n}\n}";
         let result = auto_close_braces(source);
         assert_eq!(result, source, "extra closes should not be modified");
+    }
+
+    // -----------------------------------------------------------------------
+    // R5: rule_inner_attribute_to_outer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r5_inner_attr_to_outer() {
+        // Inner attribute on line 10 (> 5) should become outer
+        let source = "use std::io;\n\
+                       use std::fmt;\n\
+                       use std::collections::HashMap;\n\
+                       \n\
+                       fn foo() { }\n\
+                       \n\
+                       #![allow(dead_code)]\n\
+                       fn bar() { }";
+
+        let errors = vec![CompilerError {
+            code: "SYNTAX".to_string(),
+            line: 7,
+            message: "an inner attribute is not permitted in this context".to_string(),
+        }];
+
+        let result = rule_inner_attribute_to_outer(source, &errors);
+        assert!(
+            result.contains("#[allow(dead_code)]"),
+            "inner attr should become outer: {result}"
+        );
+        assert!(
+            !result.contains("#![allow(dead_code)]"),
+            "inner attr should be gone: {result}"
+        );
+    }
+
+    #[test]
+    fn test_r5_inner_attr_at_crate_root_preserved() {
+        // Inner attribute on line 1 (≤ 5) should NOT be changed
+        let source = "#![allow(dead_code)]\n\nfn foo() { }";
+
+        let errors = vec![CompilerError {
+            code: "SYNTAX".to_string(),
+            line: 1,
+            message: "an inner attribute is not permitted in this context".to_string(),
+        }];
+
+        let result = rule_inner_attribute_to_outer(source, &errors);
+        assert!(
+            result.contains("#![allow(dead_code)]"),
+            "crate-root inner attr should be preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn test_r5_no_matching_errors() {
+        let source = "#![allow(dead_code)]\nfn foo() { }";
+        let result = rule_inner_attribute_to_outer(source, &[]);
+        assert_eq!(result, source, "no errors = no changes");
+    }
+
+    // -----------------------------------------------------------------------
+    // R6: rule_inner_doc_to_comment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r6_inner_doc_to_comment() {
+        let source = "use std::io;\n\
+                       use std::fmt;\n\
+                       \n\
+                       fn foo() { }\n\
+                       \n\
+                       //! This is a module doc\n\
+                       fn bar() { }";
+
+        let errors = vec![CompilerError {
+            code: "E0753".to_string(),
+            line: 6,
+            message: "expected outer doc comment".to_string(),
+        }];
+
+        let result = rule_inner_doc_to_comment(source, &errors);
+        assert!(
+            result.contains("// This is a module doc"),
+            "inner doc should become regular comment: {result}"
+        );
+        assert!(
+            !result.contains("//!"),
+            "inner doc marker should be gone: {result}"
+        );
+    }
+
+    #[test]
+    fn test_r6_at_crate_root_preserved() {
+        let source = "//! Crate documentation\n\nfn foo() { }";
+
+        let errors = vec![CompilerError {
+            code: "E0753".to_string(),
+            line: 1,
+            message: "expected outer doc comment".to_string(),
+        }];
+
+        let result = rule_inner_doc_to_comment(source, &errors);
+        assert!(
+            result.contains("//! Crate documentation"),
+            "crate-root inner doc should be preserved: {result}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // R7: rule_dedup_use_imports tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r7_dedup_use_imports() {
+        let source = "use std::io;\n\
+                       use std::fmt;\n\
+                       use std::io;";
+
+        let errors = vec![CompilerError {
+            code: "E0252".to_string(),
+            line: 3,
+            message: "the name `io` is defined multiple times".to_string(),
+        }];
+
+        let result = rule_dedup_use_imports(source, &errors);
+        let io_count = result.lines().filter(|l| l.trim() == "use std::io;").count();
+        assert_eq!(io_count, 1, "should have only one use std::io: {result}");
+        assert!(
+            result.contains("use std::fmt;"),
+            "unrelated import preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn test_r7_dedup_self_import() {
+        let source = "use std::io::{self, Read, Write};\n\
+                       use std::io;";
+
+        let errors = vec![CompilerError {
+            code: "E0252".to_string(),
+            line: 2,
+            message: "the name `io` is defined multiple times".to_string(),
+        }];
+
+        let result = rule_dedup_use_imports(source, &errors);
+        assert!(
+            result.contains("use std::io::{self, Read, Write};"),
+            "more specific import kept: {result}"
+        );
+        let simple_io = result
+            .lines()
+            .filter(|l| l.trim() == "use std::io;")
+            .count();
+        assert_eq!(simple_io, 0, "duplicate simple import removed: {result}");
+    }
+
+    #[test]
+    fn test_r7_no_matching_errors() {
+        let source = "use std::io;\nuse std::fmt;";
+        let result = rule_dedup_use_imports(source, &[]);
+        assert_eq!(result, source, "no errors = no changes");
+    }
+
+    // -----------------------------------------------------------------------
+    // R8: rule_orphaned_derive tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r8_orphaned_derive_on_fn() {
+        let source = "use std::io;\n\
+                       \n\
+                       fn foo() { }\n\
+                       \n\
+                       #[derive(Debug, Clone)]\n\
+                       fn bar() -> i32 { 42 }\n\
+                       \n\
+                       #[derive(Debug)]\n\
+                       struct Baz { x: i32 }";
+
+        let errors = vec![CompilerError {
+            code: "E0774".to_string(),
+            line: 5,
+            message: "derive may only be applied to structs, enums and unions".to_string(),
+        }];
+
+        let result = rule_orphaned_derive(source, &errors);
+        // The derive on fn bar should be removed
+        assert!(
+            !result.contains("#[derive(Debug, Clone)]"),
+            "orphaned derive should be removed: {result}"
+        );
+        // The derive on struct Baz should be kept
+        assert!(
+            result.contains("#[derive(Debug)]"),
+            "valid derive should be kept: {result}"
+        );
+        assert!(result.contains("fn bar()"), "function itself preserved: {result}");
+    }
+
+    #[test]
+    fn test_r8_orphaned_derive_on_const() {
+        let source = "use std::io;\n\
+                       \n\
+                       fn placeholder() { }\n\
+                       \n\
+                       #[derive(Debug)]\n\
+                       const X: i32 = 42;";
+
+        let errors = vec![CompilerError {
+            code: "E0774".to_string(),
+            line: 5,
+            message: "derive may only be applied to structs, enums and unions".to_string(),
+        }];
+
+        let result = rule_orphaned_derive(source, &errors);
+        assert!(
+            !result.contains("#[derive(Debug)]"),
+            "derive on const should be removed: {result}"
+        );
+        assert!(result.contains("const X: i32 = 42;"), "const preserved: {result}");
+    }
+
+    #[test]
+    fn test_r8_valid_derive_not_removed() {
+        let source = "#[derive(Debug, Clone)]\nstruct Foo { x: i32 }";
+        let result = rule_orphaned_derive(source, &[]);
+        assert_eq!(result, source, "valid derive on struct should be unchanged");
+    }
+
+    // -----------------------------------------------------------------------
+    // R9: rule_conflicting_trait_impls tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r9_conflicting_trait_impls() {
+        let source = r#"use std::fmt;
+
+struct Foo { x: i32 }
+
+impl fmt::Debug for Foo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Foo({})", self.x)
+    }
+}
+
+impl fmt::Debug for Foo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Foo[{}]", self.x)
+    }
+}"#;
+
+        let errors = vec![CompilerError {
+            code: "E0119".to_string(),
+            line: 11,
+            message: "conflicting implementations of trait `Debug` for type `Foo`".to_string(),
+        }];
+
+        let result = rule_conflicting_trait_impls(source, &errors);
+        let impl_count = result.matches("impl fmt::Debug for Foo").count();
+        assert_eq!(impl_count, 1, "should have only one impl: {result}");
+        // First definition should be kept
+        assert!(
+            result.contains("Foo({})"),
+            "first impl should be kept: {result}"
+        );
+        assert!(
+            !result.contains("Foo[{}]"),
+            "second impl should be removed: {result}"
+        );
+    }
+
+    #[test]
+    fn test_r9_no_matching_errors() {
+        let source = "impl Debug for Foo { fn fmt(&self, f: &mut Formatter) -> Result { Ok(()) } }";
+        let result = rule_conflicting_trait_impls(source, &[]);
+        assert_eq!(result, source, "no errors = no changes");
+    }
+
+    // -----------------------------------------------------------------------
+    // R10: rule_strip_external_crate_imports tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r10_strip_external_crate_import() {
+        let source = "use std::io;\n\
+                       use miniz_oxide::inflate;\n\
+                       use crc32fast::Hasher;\n\
+                       use std::collections::HashMap;";
+
+        let errors = vec![
+            CompilerError {
+                code: "E0432".to_string(),
+                line: 2,
+                message: "unresolved import `miniz_oxide`".to_string(),
+            },
+            CompilerError {
+                code: "E0432".to_string(),
+                line: 3,
+                message: "unresolved import `crc32fast`".to_string(),
+            },
+        ];
+
+        let result = rule_strip_external_crate_imports(source, &errors);
+        assert!(
+            result.contains("// R10: use miniz_oxide::inflate;"),
+            "miniz_oxide should be commented out: {result}"
+        );
+        assert!(
+            result.contains("// R10: use crc32fast::Hasher;"),
+            "crc32fast should be commented out: {result}"
+        );
+        assert!(
+            result.contains("use std::io;"),
+            "std imports preserved: {result}"
+        );
+        assert!(
+            result.contains("use std::collections::HashMap;"),
+            "std imports preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn test_r10_extern_crate_stripped() {
+        let source = "extern crate miniz_oxide;\nuse std::io;";
+        let result = rule_strip_external_crate_imports(source, &[]);
+        // extern crate lines for known crates are always stripped
+        assert!(
+            result.contains("// R10: extern crate miniz_oxide;"),
+            "extern crate should be commented: {result}"
+        );
+    }
+
+    #[test]
+    fn test_r10_no_matching_errors() {
+        let source = "use std::io;\nuse std::fmt;";
+        let result = rule_strip_external_crate_imports(source, &[]);
+        assert_eq!(result, source, "no external crates = no changes");
+    }
+
+    // -----------------------------------------------------------------------
+    // R11: rule_strip_windows_imports tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_r11_strip_windows_imports() {
+        let source = "use std::io;\n\
+                       use std::os::windows::io::AsRawHandle;\n\
+                       use std::collections::HashMap;";
+
+        let errors = vec![CompilerError {
+            code: "E0433".to_string(),
+            line: 2,
+            message: "could not find `windows` in `os`".to_string(),
+        }];
+
+        let result = rule_strip_windows_imports(source, &errors);
+        assert!(
+            result.contains("// R11 (non-Windows): use std::os::windows::io::AsRawHandle;"),
+            "windows import should be commented: {result}"
+        );
+        assert!(
+            result.contains("use std::io;"),
+            "std imports preserved: {result}"
+        );
+        assert!(
+            result.contains("use std::collections::HashMap;"),
+            "std imports preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn test_r11_no_matching_errors() {
+        let source = "use std::os::windows::io::AsRawHandle;";
+        let result = rule_strip_windows_imports(source, &[]);
+        assert_eq!(result, source, "no windows errors = no changes");
+    }
+
+    // -----------------------------------------------------------------------
+    // R5-R11 integration via apply_all_rules
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_all_rules_r5_r8_combined() {
+        // Source with both an orphaned derive (R8) and an inner attribute (R5)
+        let source = "use std::io;\n\
+                       use std::fmt;\n\
+                       \n\
+                       fn placeholder() { }\n\
+                       \n\
+                       #![allow(unused)]\n\
+                       #[derive(Debug)]\n\
+                       fn broken() -> i32 { 42 }";
+
+        let errors = vec![
+            CompilerError {
+                code: "SYNTAX".to_string(),
+                line: 6,
+                message: "an inner attribute is not permitted in this context".to_string(),
+            },
+            CompilerError {
+                code: "E0774".to_string(),
+                line: 7,
+                message: "derive may only be applied to structs, enums and unions".to_string(),
+            },
+        ];
+
+        let result = apply_all_rules(source, &errors);
+        // R5: inner attr → outer
+        assert!(
+            result.contains("#[allow(unused)]"),
+            "R5 should convert inner attr: {result}"
+        );
+        assert!(
+            !result.contains("#![allow(unused)]"),
+            "R5 should remove inner attr: {result}"
+        );
+        // R8: orphaned derive removed
+        assert!(
+            !result.contains("#[derive(Debug)]"),
+            "R8 should remove orphaned derive: {result}"
+        );
+        // Function preserved
+        assert!(result.contains("fn broken()"), "function preserved: {result}");
     }
 }
