@@ -311,4 +311,68 @@ mod tests {
         let result = noricum_tools::compiler::check_rust_compiles(contract).unwrap();
         assert!(!result.success);
     }
+
+    #[test]
+    fn test_strip_impl_blocks_preserves_complex_types() {
+        let input = r#"
+/// Zip internal state (opaque).
+pub struct ZipInternalState;
+
+/// Zip archive state.
+pub struct ZipArchive {
+    pub archive_size: u64,
+    pub total_files: u32,
+    pub zip_mode: ZipMode,
+    pub state: Option<Box<ZipInternalState>>,
+}
+
+/// Zip operation mode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ZipMode {
+    Reading,
+    Writing,
+    WritingHasBeenFinalized,
+}
+
+/// Zip error codes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(i32)]
+pub enum ZipError {
+    NoError = 0,
+    NotAnArchive = 1,
+    FailedFindingCentralDir = 2,
+    CrcCheckFailed = 3,
+}
+
+impl ZipArchive {
+    pub fn new() -> Self {
+        ZipArchive {
+            archive_size: 0,
+            total_files: 0,
+            zip_mode: ZipMode::Reading,
+            state: None,
+        }
+    }
+}
+
+pub const MZ_ZIP_MAX_IO_BUF_SIZE: usize = 64 * 1024;
+pub type MzUint = u32;
+"#;
+        let result = strip_impl_blocks(input);
+        assert!(result.contains("pub struct ZipArchive"));
+        assert!(result.contains("pub enum ZipMode"));
+        assert!(result.contains("pub enum ZipError"));
+        assert!(result.contains("pub const MZ_ZIP_MAX_IO_BUF_SIZE"));
+        assert!(result.contains("pub type MzUint"));
+        assert!(!result.contains("impl ZipArchive"));
+        assert!(!result.contains("fn new"));
+
+        // Verify it compiles
+        let compile_result = noricum_tools::compiler::check_rust_compiles(&result).unwrap();
+        assert!(
+            compile_result.success,
+            "Stripped contract should compile: {}",
+            compile_result.stderr
+        );
+    }
 }
