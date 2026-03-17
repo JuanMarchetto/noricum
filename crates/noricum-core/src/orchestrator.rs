@@ -151,13 +151,47 @@ fn should_retranslate(error_count: usize, retranslation_attempts: u32) -> bool {
 }
 
 /// Compute adaptive LLM call budget based on module count.
-/// Formula: modules * 7 + 10 (1 translate + up to 5 repairs + 1 buffer per module, plus 10 global).
+/// Formula: modules * 10 + 25 (translate + repairs + re-translates + P33 contract + assembly repair).
 /// If user specified a limit, use max(adaptive, user_limit).
 pub fn compute_adaptive_budget(module_count: usize, user_limit: Option<u32>) -> u32 {
-    let adaptive = (module_count as u32) * 7 + 10;
+    let adaptive = (module_count as u32) * 10 + 25;
     match user_limit {
         Some(limit) => adaptive.max(limit),
         None => adaptive,
+    }
+}
+
+/// P34: Budget phase for graceful degradation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BudgetPhase {
+    /// Under 80% — normal operation.
+    Normal,
+    /// 80-95% — skip remaining repair iterations, accept current module versions.
+    SkipRepairs,
+    /// 95-100% — skip remaining modules, go straight to assembly.
+    AssembleNow,
+    /// Over 100% — save best output and exit gracefully (not a hard error).
+    SaveAndExit,
+}
+
+/// P34: Determine current budget phase based on LLM call usage.
+pub fn budget_phase(config: &MigrationConfig, metrics: &noricum_ir::MigrationMetrics) -> BudgetPhase {
+    let max_calls = match config.max_llm_calls {
+        Some(m) => m,
+        None => return BudgetPhase::Normal,
+    };
+    if max_calls == 0 {
+        return BudgetPhase::Normal;
+    }
+    let pct = (metrics.llm_calls * 100) / max_calls;
+    if pct >= 100 {
+        BudgetPhase::SaveAndExit
+    } else if pct >= 95 {
+        BudgetPhase::AssembleNow
+    } else if pct >= 80 {
+        BudgetPhase::SkipRepairs
+    } else {
+        BudgetPhase::Normal
     }
 }
 
@@ -301,6 +335,7 @@ impl MigrationConfig {
 ///
 /// Returns `Ok(())` if within budget or no budget is set, otherwise
 /// returns `CoreError::BudgetExceeded`.
+/// P34: LLM call limit is now a soft check — use `budget_phase()` for graceful degradation.
 fn check_budget(
     config: &MigrationConfig,
     metrics: &noricum_ir::MigrationMetrics,
@@ -311,11 +346,12 @@ fn check_budget(
             return Err(CoreError::BudgetExceeded { used, budget });
         }
     }
+    // P34: LLM call limit is now soft — only hard-fail at 120% to prevent runaway
     if let Some(max_calls) = config.max_llm_calls
-        && metrics.llm_calls > max_calls
+        && metrics.llm_calls > max_calls + max_calls / 5
     {
         return Err(CoreError::Orchestration(format!(
-            "LLM call limit exceeded: {} calls (max {})",
+            "LLM call hard limit exceeded: {} calls (max {} + 20% grace)",
             metrics.llm_calls, max_calls
         )));
     }
@@ -2186,6 +2222,29 @@ async fn migrate_file_modular(
             }
         }
 
+        // P34: Graceful budget degradation instead of hard fail
+        let phase = budget_phase(&effective_config, &total_metrics);
+        match phase {
+            BudgetPhase::AssembleNow | BudgetPhase::SaveAndExit => {
+                warn!(
+                    function = %name,
+                    llm_calls = total_metrics.llm_calls,
+                    phase = ?phase,
+                    "P34: budget near limit, skipping remaining waves and proceeding to assembly"
+                );
+                break;
+            }
+            BudgetPhase::SkipRepairs => {
+                info!(
+                    function = %name,
+                    llm_calls = total_metrics.llm_calls,
+                    "P34: budget at 80%, will skip repair iterations for remaining modules"
+                );
+                // Reduce repair iterations to 0 for remaining waves
+                effective_config.max_repair_iterations = 0;
+            }
+            BudgetPhase::Normal => {}
+        }
         check_budget(&effective_config, &total_metrics)?;
     } // end for wave in waves
 
@@ -3741,14 +3800,38 @@ fn main() {
 
     #[test]
     fn test_adaptive_llm_budget() {
-        // 10 modules: each needs ~1 translate + up to 5 repairs + 1 analysis = 7 per module + 10 buffer
-        assert_eq!(compute_adaptive_budget(10, Some(50)), 80);
-        // 2 modules: 2*7 + 10 = 24, but user set 50 → use max(24, 50) = 50
+        // P34: 10 modules: 10*10 + 25 = 125, user set 50 → max(125, 50) = 125
+        assert_eq!(compute_adaptive_budget(10, Some(50)), 125);
+        // 2 modules: 2*10 + 25 = 45, but user set 50 → use max(45, 50) = 50
         assert_eq!(compute_adaptive_budget(2, Some(50)), 50);
         // No user limit: use adaptive
-        assert_eq!(compute_adaptive_budget(10, None), 80);
-        // 1 module: 1*7 + 10 = 17
-        assert_eq!(compute_adaptive_budget(1, None), 17);
+        assert_eq!(compute_adaptive_budget(10, None), 125);
+        // 1 module: 1*10 + 25 = 35
+        assert_eq!(compute_adaptive_budget(1, None), 35);
+    }
+
+    #[test]
+    fn test_budget_phase() {
+        use noricum_ir::MigrationMetrics;
+
+        let config = MigrationConfig {
+            max_llm_calls: Some(100),
+            ..MigrationConfig::default()
+        };
+
+        let mut metrics = MigrationMetrics::default();
+
+        metrics.llm_calls = 50;
+        assert_eq!(budget_phase(&config, &metrics), BudgetPhase::Normal);
+
+        metrics.llm_calls = 82;
+        assert_eq!(budget_phase(&config, &metrics), BudgetPhase::SkipRepairs);
+
+        metrics.llm_calls = 96;
+        assert_eq!(budget_phase(&config, &metrics), BudgetPhase::AssembleNow);
+
+        metrics.llm_calls = 101;
+        assert_eq!(budget_phase(&config, &metrics), BudgetPhase::SaveAndExit);
     }
 
     #[test]
