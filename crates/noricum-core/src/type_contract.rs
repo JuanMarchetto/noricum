@@ -79,7 +79,7 @@ pub async fn generate_type_contract(
         };
 
         let raw = match client
-            .run_prompt(model, TYPE_CONTRACT_PREAMBLE, 0.2, 8192, &prompt)
+            .run_prompt(model, TYPE_CONTRACT_PREAMBLE, 0.2, 16384, &prompt)
             .await
         {
             Ok(r) => r,

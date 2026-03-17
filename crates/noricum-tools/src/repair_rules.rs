@@ -968,15 +968,16 @@ pub fn rule_strip_external_crate_imports(source: &str, errors: &[CompilerError])
 // ---------------------------------------------------------------------------
 
 /// R11: When `E0433` reports "could not find `windows` in `os`", strip
-/// `use std::os::windows::*` import lines.
+/// Strip Windows-specific code: `use std::os::windows::*` imports AND
+/// `#[cfg(target_os = "windows")]` blocks (functions, impls, structs).
 ///
-/// On non-Windows targets, these imports cause compilation failures.
+/// On non-Windows targets, these cause compilation failures.
 pub fn rule_strip_windows_imports(source: &str, errors: &[CompilerError]) -> String {
     let windows_errors: Vec<&CompilerError> = errors
         .iter()
         .filter(|e| {
-            (e.code == "E0432" || e.code == "E0433")
-                && e.message.contains("windows")
+            (e.code == "E0432" || e.code == "E0433" || e.code == "SYNTAX")
+                && (e.message.contains("windows") || e.message.contains("FILE_SHARE"))
         })
         .collect();
 
@@ -986,19 +987,50 @@ pub fn rule_strip_windows_imports(source: &str, errors: &[CompilerError]) -> Str
 
     let lines: Vec<&str> = source.lines().collect();
     let mut result_lines: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
 
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
 
+        // Strip Windows use imports
         if trimmed.starts_with("use std::os::windows")
             || trimmed.starts_with("pub use std::os::windows")
         {
             debug!(line = i + 1, "R11: commenting out Windows-specific import");
             result_lines.push(format!("// R11 (non-Windows): {trimmed}"));
+            i += 1;
             continue;
         }
 
-        result_lines.push(line.to_string());
+        // Strip #[cfg(target_os = "windows")] + the following item (block)
+        if trimmed == "#[cfg(target_os = \"windows\")]"
+            || trimmed == "#[cfg(windows)]"
+        {
+            debug!(line = i + 1, "R11: stripping Windows-specific cfg block");
+            result_lines.push(format!("// R11 (non-Windows): {trimmed}"));
+            i += 1;
+            // Skip the following item (could be a function, struct, impl with braces)
+            if i < lines.len() {
+                let mut depth = 0;
+                let mut found_brace = false;
+                while i < lines.len() {
+                    let l = lines[i];
+                    for ch in l.chars() {
+                        if ch == '{' { depth += 1; found_brace = true; }
+                        if ch == '}' { depth -= 1; }
+                    }
+                    result_lines.push(format!("// R11: {}", l.trim()));
+                    i += 1;
+                    if found_brace && depth <= 0 {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        result_lines.push(lines[i].to_string());
+        i += 1;
     }
 
     result_lines.join("\n")
@@ -1980,6 +2012,33 @@ impl fmt::Debug for Foo {
         let source = "use std::os::windows::io::AsRawHandle;";
         let result = rule_strip_windows_imports(source, &[]);
         assert_eq!(result, source, "no windows errors = no changes");
+    }
+
+    #[test]
+    fn test_r11_strips_cfg_windows_block() {
+        let source = r#"fn good_fn() -> bool { true }
+
+#[cfg(target_os = "windows")]
+pub fn mz_fopen(p_filename: &str) -> Result<std::fs::File, std::io::Error> {
+    let share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    options.open(&path)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn mz_fopen(p_filename: &str) -> Result<std::fs::File, std::io::Error> {
+    std::fs::File::open(p_filename)
+}"#;
+        let errors = vec![CompilerError {
+            code: "E0433".to_string(),
+            message: "cannot find windows in os".to_string(),
+            line: 4,
+        }];
+        let result = rule_strip_windows_imports(source, &errors);
+        assert!(result.contains("fn good_fn"), "non-windows fn preserved");
+        assert!(result.contains("R11: pub fn mz_fopen"), "windows fn commented out");
+        assert!(result.contains("#[cfg(not(target_os"), "non-windows cfg preserved");
+        // Windows code should be commented out (prefixed with // R11:)
+        assert!(result.contains("// R11: let share_mode"), "windows code commented via R11 prefix");
     }
 
     // -----------------------------------------------------------------------
