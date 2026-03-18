@@ -356,8 +356,114 @@ fn detect_algorithms(c_source: &str, hints: &mut Vec<SemanticHint>) {
     }
 }
 
-fn detect_control_flow(_c_source: &str, _hints: &mut Vec<SemanticHint>) {
-    // Implemented in Task 5
+/// Detect control flow patterns: state machines, recursive descent parsers, event loops, goto cleanup.
+fn detect_control_flow(c_source: &str, hints: &mut Vec<SemanticHint>) {
+    let source_lower = c_source.to_lowercase();
+
+    // --- State machine detection ---
+    // Heuristic: enum with STATE_* constants + switch on state variable + state transitions
+    let has_state_enum =
+        Regex::new(r"(?i)\bSTATE_\w+")
+            .expect("static regex")
+            .is_match(c_source)
+            || Regex::new(r"enum\s+\w*[Ss]tate\w*")
+                .expect("static regex")
+                .is_match(c_source);
+    let has_switch_state = Regex::new(r"switch\s*\(\s*\w*->?\s*state")
+        .expect("static regex")
+        .is_match(c_source);
+    let has_state_assignment = Regex::new(r"\w*->?\s*state\s*=\s*STATE_")
+        .expect("static regex")
+        .is_match(c_source)
+        || Regex::new(r"\w*->?\s*state\s*=\s*\w+_STATE")
+            .expect("static regex")
+            .is_match(c_source);
+
+    if has_state_enum && (has_switch_state || has_state_assignment) {
+        // Count states
+        let state_re = Regex::new(r"STATE_(\w+)").expect("static regex");
+        let states: std::collections::HashSet<String> = state_re
+            .captures_iter(c_source)
+            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+            .collect();
+
+        hints.push(SemanticHint::ControlFlow {
+            kind: "state_machine".to_string(),
+            functions: vec![format!("{} states detected", states.len())],
+            suggestion: "enum State + match expression — one branch per state, no goto"
+                .to_string(),
+        });
+    }
+
+    // --- Recursive descent parser detection ---
+    // Heuristic: functions named parse_expression/parse_term/parse_factor or
+    // parse_* calling other parse_* functions
+    let parse_fn_re = Regex::new(r"\b(parse_\w+)\s*\(").expect("static regex");
+    let parse_fns: std::collections::HashSet<String> = parse_fn_re
+        .captures_iter(c_source)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .collect();
+
+    if parse_fns.len() >= 3 {
+        // Check for mutual recursion: parse_expression calls parse_term, etc.
+        let parser_keywords = [
+            "expression",
+            "term",
+            "factor",
+            "primary",
+            "unary",
+            "atom",
+            "statement",
+        ];
+        let parser_fn_count = parse_fns
+            .iter()
+            .filter(|f| parser_keywords.iter().any(|kw| f.contains(kw)))
+            .count();
+        if parser_fn_count >= 2 {
+            hints.push(SemanticHint::ControlFlow {
+                kind: "recursive_descent_parser".to_string(),
+                functions: parse_fns.into_iter().collect(),
+                suggestion:
+                    "Rust enum for AST nodes + recursive functions returning Result<Expr, ParseError>"
+                        .to_string(),
+            });
+        }
+    }
+
+    // --- Event loop detection ---
+    // Heuristic: select/poll/epoll/kqueue calls or while(1) with event dispatch
+    let event_keywords = [
+        "select(",
+        "poll(",
+        "epoll",
+        "kqueue",
+        "event_loop",
+        "dispatch",
+    ];
+    let has_event_loop = event_keywords.iter().any(|kw| source_lower.contains(kw));
+    if has_event_loop {
+        hints.push(SemanticHint::ControlFlow {
+            kind: "event_loop".to_string(),
+            functions: vec!["(event dispatch)".to_string()],
+            suggestion: "tokio/async or mio for event-driven I/O".to_string(),
+        });
+    }
+
+    // --- Goto cleanup detection ---
+    // Heuristic: goto + label with cleanup code (free, close)
+    let has_goto = Regex::new(r"\bgoto\s+\w+")
+        .expect("static regex")
+        .is_match(c_source);
+    let has_label_cleanup = Regex::new(r"(?m)^\w+:\s*$")
+        .expect("static regex")
+        .is_match(c_source);
+    if has_goto && has_label_cleanup {
+        hints.push(SemanticHint::ControlFlow {
+            kind: "goto_cleanup".to_string(),
+            functions: vec!["(goto-based resource cleanup)".to_string()],
+            suggestion: "Drop trait for RAII cleanup + ? operator for early returns".to_string(),
+        });
+    }
 }
 
 fn detect_io_patterns(_c_source: &str, _hints: &mut Vec<SemanticHint>) {
@@ -600,5 +706,103 @@ int inflate(z_stream *strm, int flush) {
             .filter(|h| matches!(h, SemanticHint::Algorithm { kind, .. } if kind == "compression"))
             .collect();
         assert!(!alg_hints.is_empty(), "should detect compression pattern");
+    }
+
+    #[test]
+    fn test_detect_state_machine() {
+        let c_source = r#"
+typedef enum { STATE_IDLE, STATE_HEADER, STATE_BODY, STATE_DONE } State;
+
+void parse(Parser *p, const char *data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        switch (p->state) {
+            case STATE_IDLE:
+                if (data[i] == '\n') p->state = STATE_HEADER;
+                break;
+            case STATE_HEADER:
+                if (data[i] == '\r') p->state = STATE_BODY;
+                break;
+            case STATE_BODY:
+                p->state = STATE_DONE;
+                break;
+        }
+    }
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let cf_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::ControlFlow { kind, .. } if kind == "state_machine"))
+            .collect();
+        assert!(!cf_hints.is_empty(), "should detect state machine pattern");
+    }
+
+    #[test]
+    fn test_detect_recursive_descent_parser() {
+        let c_source = r#"
+double parse_expression(Parser *p);
+double parse_term(Parser *p);
+double parse_factor(Parser *p);
+
+double parse_expression(Parser *p) {
+    double left = parse_term(p);
+    while (p->current == '+' || p->current == '-') {
+        char op = p->current;
+        advance(p);
+        double right = parse_term(p);
+        if (op == '+') left += right;
+        else left -= right;
+    }
+    return left;
+}
+
+double parse_term(Parser *p) {
+    double left = parse_factor(p);
+    while (p->current == '*' || p->current == '/') {
+        char op = p->current;
+        advance(p);
+        double right = parse_factor(p);
+        if (op == '*') left *= right;
+        else left /= right;
+    }
+    return left;
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let cf_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::ControlFlow { kind, .. } if kind == "recursive_descent_parser"))
+            .collect();
+        assert!(
+            !cf_hints.is_empty(),
+            "should detect recursive descent parser"
+        );
+    }
+
+    #[test]
+    fn test_detect_goto_cleanup() {
+        let c_source = r#"
+int process(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) goto error;
+    char *buf = malloc(1024);
+    if (!buf) goto cleanup_file;
+    /* work */
+    free(buf);
+    fclose(f);
+    return 0;
+
+cleanup_file:
+    fclose(f);
+error:
+    return -1;
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let cf_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::ControlFlow { kind, .. } if kind == "goto_cleanup"))
+            .collect();
+        assert!(!cf_hints.is_empty(), "should detect goto cleanup pattern");
     }
 }
