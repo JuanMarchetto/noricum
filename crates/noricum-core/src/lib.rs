@@ -9,6 +9,7 @@ pub mod type_contract;
 pub mod budget;
 pub(crate) mod warmstart;
 pub(crate) mod assembly;
+pub(crate) mod module_migration;
 
 pub use orchestrator::MigrationConfig;
 
