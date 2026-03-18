@@ -251,6 +251,21 @@ impl ArtifactStore {
         self.write_artifact(Path::new("07-tests.rs"), tests)
     }
 
+    /// Save the generated crate directory structure as an artifact.
+    ///
+    /// Copies the entire crate directory into the artifact store at `08-crate/`,
+    /// skipping the `target/` directory (cargo build artifacts).
+    pub fn save_crate_output(&self, crate_dir: &Path) -> io::Result<()> {
+        let dest = self.run_dir.join("08-crate");
+        copy_dir_recursive(crate_dir, &dest)?;
+        debug!(
+            src = %crate_dir.display(),
+            dest = %dest.display(),
+            "saved crate output artifact"
+        );
+        Ok(())
+    }
+
     /// Save the run manifest (`manifest.json`).
     pub fn save_manifest(&self, manifest_json: &str) -> io::Result<()> {
         self.write_artifact(Path::new("manifest.json"), manifest_json)
@@ -303,6 +318,26 @@ impl ArtifactStore {
             run_dir: path.to_path_buf(),
         })
     }
+}
+
+/// Copy a directory recursively, skipping `target/` subdirectories.
+fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            // Skip target/ directory (cargo build artifacts)
+            if entry.file_name() == "target" {
+                continue;
+            }
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            fs::copy(entry.path(), &dest_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// V2 artifact manifest with per-module metadata.
@@ -587,5 +622,30 @@ mod tests {
     fn test_from_existing_missing() {
         let result = ArtifactStore::from_existing(Path::new("/nonexistent/path"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_crate_output() {
+        let (store, _tmp) = make_store();
+
+        // Create a fake crate directory
+        let crate_dir = TempDir::new().expect("tempdir");
+        let src_dir = crate_dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(crate_dir.path().join("Cargo.toml"), "[package]").unwrap();
+        fs::write(src_dir.join("lib.rs"), "pub mod utils;").unwrap();
+        fs::write(src_dir.join("utils.rs"), "pub fn add() {}").unwrap();
+        // Create a target/ dir that should be skipped
+        fs::create_dir_all(crate_dir.path().join("target/debug")).unwrap();
+        fs::write(crate_dir.path().join("target/debug/binary"), "big file").unwrap();
+
+        store.save_crate_output(crate_dir.path()).unwrap();
+
+        let dest = store.run_dir().join("08-crate");
+        assert!(dest.exists(), "08-crate dir should exist");
+        assert!(dest.join("Cargo.toml").exists(), "Cargo.toml should be copied");
+        assert!(dest.join("src/lib.rs").exists(), "src/lib.rs should be copied");
+        assert!(dest.join("src/utils.rs").exists(), "src/utils.rs should be copied");
+        assert!(!dest.join("target").exists(), "target/ should be skipped");
     }
 }
