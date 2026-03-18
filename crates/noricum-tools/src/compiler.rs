@@ -218,6 +218,65 @@ fn count_unsafe_blocks_heuristic(rust_source: &str) -> u32 {
     count
 }
 
+/// Check if a generated Rust crate compiles using `cargo check`.
+///
+/// This is the multi-file equivalent of [`check_rust_compiles`].
+/// Takes the path to the crate root (containing `Cargo.toml`).
+pub fn check_crate_compiles(crate_dir: &Path) -> Result<CompileResult, ToolError> {
+    let cargo_toml = crate_dir.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        return Err(ToolError::CompilationFailed(format!(
+            "Cargo.toml not found at {}",
+            cargo_toml.display()
+        )));
+    }
+
+    info!(crate_dir = %crate_dir.display(), "compiling crate with cargo check");
+
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--manifest-path")
+        .arg(&cargo_toml)
+        .arg("--lib")
+        .arg("--message-format=short")
+        .output()
+        .map_err(|_| ToolError::CommandNotFound("cargo".to_string()))?;
+
+    let result = CompileResult::from_output(&output);
+    debug!(success = result.success, "cargo check finished");
+    Ok(result)
+}
+
+/// Check if a specific module within a crate compiles.
+///
+/// Runs `cargo check` on the whole crate but focuses error output
+/// on the specified module file for targeted repair.
+pub fn check_module_compiles(crate_dir: &Path, module_name: &str) -> Result<CompileResult, ToolError> {
+    let result = check_crate_compiles(crate_dir)?;
+    if result.success {
+        return Ok(result);
+    }
+
+    // Filter errors to only those in the target module file
+    let module_file = format!("src/{module_name}.rs");
+    let filtered_stderr: String = result
+        .stderr
+        .lines()
+        .filter(|line| line.contains(&module_file) || line.starts_with("error") || line.starts_with("warning"))
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    Ok(CompileResult {
+        success: result.success,
+        stdout: result.stdout,
+        stderr: if filtered_stderr.is_empty() {
+            result.stderr
+        } else {
+            filtered_stderr
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +370,88 @@ fn uses_unsafe() {
     fn test_check_rust_compiles_malformed() {
         let result = check_rust_compiles("}{}{}{fn !!!! @@@@").unwrap();
         assert!(!result.success, "malformed source should not compile");
+    }
+
+    #[test]
+    fn test_check_crate_compiles_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"test_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        ).unwrap();
+
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            "pub mod utils;\n",
+        ).unwrap();
+
+        std::fs::write(
+            src_dir.join("utils.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        ).unwrap();
+
+        let result = check_crate_compiles(tmp.path()).unwrap();
+        assert!(result.success, "simple crate should compile: {}", result.stderr);
+    }
+
+    #[test]
+    fn test_check_crate_compiles_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"bad_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        ).unwrap();
+
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            "pub fn broken( -> i32 { 42 }\n", // syntax error
+        ).unwrap();
+
+        let result = check_crate_compiles(tmp.path()).unwrap();
+        assert!(!result.success, "broken crate should not compile");
+        assert!(!result.stderr.is_empty());
+    }
+
+    #[test]
+    fn test_check_crate_compiles_no_cargo_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = check_crate_compiles(tmp.path());
+        assert!(result.is_err(), "missing Cargo.toml should be an error");
+    }
+
+    #[test]
+    fn test_check_crate_with_types() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"typed_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        ).unwrap();
+
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            "pub mod types;\npub mod utils;\n",
+        ).unwrap();
+
+        std::fs::write(
+            src_dir.join("types.rs"),
+            "pub struct Point { pub x: f64, pub y: f64 }\n",
+        ).unwrap();
+
+        std::fs::write(
+            src_dir.join("utils.rs"),
+            "use crate::types::*;\n\npub fn distance(p: &Point) -> f64 { (p.x * p.x + p.y * p.y).sqrt() }\n",
+        ).unwrap();
+
+        let result = check_crate_compiles(tmp.path()).unwrap();
+        assert!(result.success, "crate with types should compile: {}", result.stderr);
     }
 }
