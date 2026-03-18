@@ -38,6 +38,7 @@ const MODULAR_FILE_LOC: usize = 2000;
 
 use crate::CoreError;
 use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit};
+use crate::budget::{BudgetPhase, budget_phase, compute_adaptive_budget, check_budget};
 
 /// Number of compilation errors above which we re-translate instead of repairing.
 const RETRANSLATE_ERROR_THRESHOLD: usize = 100;
@@ -150,50 +151,6 @@ fn should_retranslate(error_count: usize, retranslation_attempts: u32) -> bool {
     error_count > RETRANSLATE_ERROR_THRESHOLD && retranslation_attempts == 0
 }
 
-/// Compute adaptive LLM call budget based on module count.
-/// Formula: modules * 10 + 25 (translate + repairs + re-translates + P33 contract + assembly repair).
-/// If user specified a limit, use max(adaptive, user_limit).
-pub fn compute_adaptive_budget(module_count: usize, user_limit: Option<u32>) -> u32 {
-    let adaptive = (module_count as u32) * 10 + 25;
-    match user_limit {
-        Some(limit) => adaptive.max(limit),
-        None => adaptive,
-    }
-}
-
-/// P34: Budget phase for graceful degradation.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BudgetPhase {
-    /// Under 80% — normal operation.
-    Normal,
-    /// 80-95% — skip remaining repair iterations, accept current module versions.
-    SkipRepairs,
-    /// 95-100% — skip remaining modules, go straight to assembly.
-    AssembleNow,
-    /// Over 100% — save best output and exit gracefully (not a hard error).
-    SaveAndExit,
-}
-
-/// P34: Determine current budget phase based on LLM call usage.
-pub fn budget_phase(config: &MigrationConfig, metrics: &noricum_ir::MigrationMetrics) -> BudgetPhase {
-    let max_calls = match config.max_llm_calls {
-        Some(m) => m,
-        None => return BudgetPhase::Normal,
-    };
-    if max_calls == 0 {
-        return BudgetPhase::Normal;
-    }
-    let pct = (metrics.llm_calls * 100) / max_calls;
-    if pct >= 100 {
-        BudgetPhase::SaveAndExit
-    } else if pct >= 95 {
-        BudgetPhase::AssembleNow
-    } else if pct >= 80 {
-        BudgetPhase::SkipRepairs
-    } else {
-        BudgetPhase::Normal
-    }
-}
 
 /// Configuration for the async LLM-based migration pipeline.
 #[derive(Debug, Clone)]
@@ -331,32 +288,6 @@ impl MigrationConfig {
     }
 }
 
-/// Check whether the accumulated token usage exceeds the configured budget.
-///
-/// Returns `Ok(())` if within budget or no budget is set, otherwise
-/// returns `CoreError::BudgetExceeded`.
-/// P34: LLM call limit is now a soft check — use `budget_phase()` for graceful degradation.
-fn check_budget(
-    config: &MigrationConfig,
-    metrics: &noricum_ir::MigrationMetrics,
-) -> Result<(), CoreError> {
-    if let Some(budget) = config.max_tokens_budget {
-        let used = metrics.input_tokens + metrics.output_tokens;
-        if used > budget {
-            return Err(CoreError::BudgetExceeded { used, budget });
-        }
-    }
-    // P34: LLM call limit is now soft — only hard-fail at 120% to prevent runaway
-    if let Some(max_calls) = config.max_llm_calls
-        && metrics.llm_calls > max_calls + max_calls / 5
-    {
-        return Err(CoreError::Orchestration(format!(
-            "LLM call hard limit exceeded: {} calls (max {} + 20% grace)",
-            metrics.llm_calls, max_calls
-        )));
-    }
-    Ok(())
-}
 
 /// Estimate total token cost for migrating a file before starting.
 ///
@@ -1004,7 +935,7 @@ pub async fn migrate_file(
         analysis_ms = unit.metrics.analysis_ms,
         "state -> Analyzed"
     );
-    check_budget(config, &unit.metrics)?;
+    check_budget(config.max_tokens_budget, config.max_llm_calls, &unit.metrics)?;
 
     if let Some(ref trail) = audit {
         audit_log(
@@ -1308,7 +1239,7 @@ pub async fn migrate_file(
             unit.metrics.output_tokens += noricum_agents::estimate_tokens(rust);
         }
         info!(function = %name, state = ?unit.state, translation_ms = unit.metrics.translation_ms, "state -> Refined");
-        check_budget(config, &unit.metrics)?;
+        check_budget(config.max_tokens_budget, config.max_llm_calls, &unit.metrics)?;
     }
 
     // --- Stage 6: Validate ---
@@ -1689,7 +1620,7 @@ pub async fn migrate_file(
             unit.metrics.input_tokens += input_token_est;
             unit.metrics.output_tokens += output_token_est;
             unit.metrics.repair_iterations = iteration;
-            check_budget(config, &unit.metrics)?;
+            check_budget(config.max_tokens_budget, config.max_llm_calls, &unit.metrics)?;
 
             let re_validation =
                 noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
@@ -2228,7 +2159,7 @@ async fn migrate_file_modular(
         }
 
         // P34: Graceful budget degradation instead of hard fail
-        let phase = budget_phase(&effective_config, &total_metrics);
+        let phase = budget_phase(effective_config.max_llm_calls, total_metrics.llm_calls);
         match phase {
             BudgetPhase::AssembleNow | BudgetPhase::SaveAndExit => {
                 warn!(
@@ -2250,7 +2181,7 @@ async fn migrate_file_modular(
             }
             BudgetPhase::Normal => {}
         }
-        check_budget(&effective_config, &total_metrics)?;
+        check_budget(effective_config.max_tokens_budget, effective_config.max_llm_calls, &total_metrics)?;
     } // end for wave in waves
 
     if !any_succeeded {
@@ -2814,7 +2745,7 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
                 break;
             }
 
-            check_budget(config, &local_metrics)?;
+            check_budget(config.max_tokens_budget, config.max_llm_calls, &local_metrics)?;
         }
 
         local_metrics.repair_ms += repair_start.elapsed().as_millis() as u64;
@@ -3807,41 +3738,6 @@ fn main() {
         assert!(!should_retranslate(200, 2)); // max 1 retranslation
     }
 
-    #[test]
-    fn test_adaptive_llm_budget() {
-        // P34: 10 modules: 10*10 + 25 = 125, user set 50 → max(125, 50) = 125
-        assert_eq!(compute_adaptive_budget(10, Some(50)), 125);
-        // 2 modules: 2*10 + 25 = 45, but user set 50 → use max(45, 50) = 50
-        assert_eq!(compute_adaptive_budget(2, Some(50)), 50);
-        // No user limit: use adaptive
-        assert_eq!(compute_adaptive_budget(10, None), 125);
-        // 1 module: 1*10 + 25 = 35
-        assert_eq!(compute_adaptive_budget(1, None), 35);
-    }
-
-    #[test]
-    fn test_budget_phase() {
-        use noricum_ir::MigrationMetrics;
-
-        let config = MigrationConfig {
-            max_llm_calls: Some(100),
-            ..MigrationConfig::default()
-        };
-
-        let mut metrics = MigrationMetrics::default();
-
-        metrics.llm_calls = 50;
-        assert_eq!(budget_phase(&config, &metrics), BudgetPhase::Normal);
-
-        metrics.llm_calls = 82;
-        assert_eq!(budget_phase(&config, &metrics), BudgetPhase::SkipRepairs);
-
-        metrics.llm_calls = 96;
-        assert_eq!(budget_phase(&config, &metrics), BudgetPhase::AssembleNow);
-
-        metrics.llm_calls = 101;
-        assert_eq!(budget_phase(&config, &metrics), BudgetPhase::SaveAndExit);
-    }
 
     #[test]
     fn test_assemble_module_outputs_preserves_order() {

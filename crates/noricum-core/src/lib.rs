@@ -6,6 +6,7 @@ pub mod orchestrator;
 pub mod router;
 pub mod surgical_repair;
 pub mod type_contract;
+pub mod budget;
 
 pub use orchestrator::MigrationConfig;
 
