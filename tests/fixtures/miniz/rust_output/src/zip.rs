@@ -1009,9 +1009,17 @@ impl MzZipArchive {
         uncomp_size: u64,
         uncomp_crc32: u32,
     ) -> Result<(), MzZipError> {
-        // This would call the more complete version with additional parameters
-        // For now, we'll return a stub implementation
-        Ok(())
+        self.mz_zip_writer_add_mem_ex_v2(
+            archive_name,
+            buf,
+            if comment.is_empty() { None } else { Some(comment) },
+            level_and_flags,
+            uncomp_size,
+            uncomp_crc32,
+            None,
+            None,
+            None,
+        )
     }
 }
 
@@ -1915,10 +1923,55 @@ fn mz_zip_reader_extract_to_heap(
                 return Err(MzZipError::CrcCheckFailed);
             }
         }
+    } else if let Some(read_fn) = pZip.m_pread {
+        // File-based: read through the m_pread function pointer
+        let file_start = pZip.m_pstate.as_ref()
+            .map(|s| s.file_archive_start_ofs)
+            .unwrap_or(0);
+        let header_ofs = file_start + file_stat.m_local_header_ofs;
+
+        // Read local header
+        let n = read_fn(pZip, header_ofs, &mut local_header);
+        if n != MZ_ZIP_LOCAL_DIR_HEADER_SIZE {
+            return Err(MzZipError::FileReadFailed);
+        }
+
+        let sig = read_le32(&local_header, 0);
+        if sig != MZ_ZIP_LOCAL_DIR_HEADER_SIG as u32 {
+            return Err(MzZipError::InvalidHeaderOrCorrupted);
+        }
+
+        let fname_len = read_le16(&local_header, MZ_ZIP_LDH_FILENAME_LEN_OFS) as u64;
+        let extra_len = read_le16(&local_header, MZ_ZIP_LDH_EXTRA_LEN_OFS) as u64;
+        let data_ofs = header_ofs + MZ_ZIP_LOCAL_DIR_HEADER_SIZE as u64 + fname_len + extra_len;
+
+        if file_stat.m_method == 0 {
+            // Stored: read directly into output buffer
+            let n = read_fn(pZip, data_ofs, &mut buf);
+            if n != file_stat.m_uncomp_size as usize {
+                return Err(MzZipError::FileReadFailed);
+            }
+            let crc = mz_crc32(MZ_CRC32_INIT, &buf);
+            if crc != file_stat.m_crc32 {
+                return Err(MzZipError::CrcCheckFailed);
+            }
+        } else {
+            // Deflated: read compressed data, decompress
+            let mut compressed = vec![0u8; file_stat.m_comp_size as usize];
+            let n = read_fn(pZip, data_ofs, &mut compressed);
+            if n != compressed.len() {
+                return Err(MzZipError::FileReadFailed);
+            }
+            let needed = file_stat.m_uncomp_size as usize;
+            let decompressed = tinfl_decompress(&compressed, needed)?;
+            buf.copy_from_slice(&decompressed);
+            let crc = mz_crc32(MZ_CRC32_INIT, &buf);
+            if crc != file_stat.m_crc32 {
+                return Err(MzZipError::CrcCheckFailed);
+            }
+        }
     } else {
-        // File-based: would need mutable borrow for seek/read
-        // TODO: needs mutable access pattern refactoring
-        return Err(MzZipError::UnsupportedFeature);
+        return Err(MzZipError::InvalidParameter);
     }
 
     Ok(buf)
