@@ -1208,6 +1208,7 @@ version = "0.1.0"
 dependencies = [
  "noricum-ir",
  "noricum-tools",
+ "noricum-validation",
  "rig-core",
  "serde",
  "serde_json",

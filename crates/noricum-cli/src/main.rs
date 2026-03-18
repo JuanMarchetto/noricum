@@ -186,6 +186,10 @@ struct MigrateOpts {
     /// Output directory for multi-file Rust crate (instead of single .rs file)
     #[arg(long)]
     crate_output: Option<PathBuf>,
+    /// Enable ensemble translation: generate multiple candidates from different providers
+    /// when initial translation fails. Costs more but improves success rate.
+    #[arg(long, default_value_t = false)]
+    ensemble: bool,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -232,6 +236,7 @@ async fn main() {
                 warm_start: opts.warm_start,
                 max_unsafe: opts.max_unsafe,
                 crate_output: opts.crate_output,
+                ensemble: opts.ensemble,
             })
             .await
         }

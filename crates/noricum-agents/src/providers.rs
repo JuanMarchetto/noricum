@@ -54,7 +54,7 @@ pub struct ModelSelection {
 }
 
 /// Identifies which LLM provider backend is in use.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProviderKind {
     /// Anthropic (Claude API).
     Anthropic,

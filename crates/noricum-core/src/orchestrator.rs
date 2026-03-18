@@ -108,6 +108,8 @@ pub struct MigrationConfig {
     /// generates a Cargo crate instead of a single .rs file.
     /// Each module becomes `src/{module}.rs`, types go to `src/types.rs`.
     pub crate_output_dir: Option<std::path::PathBuf>,
+    /// Whether ensemble translation is enabled (P38).
+    pub ensemble_enabled: bool,
 }
 
 impl Default for MigrationConfig {
@@ -139,6 +141,7 @@ impl Default for MigrationConfig {
             warm_start: None,
             max_unsafe_blocks: None,
             crate_output_dir: None,
+            ensemble_enabled: false,
         }
     }
 }

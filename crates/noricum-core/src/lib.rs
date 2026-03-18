@@ -1,6 +1,7 @@
 pub mod artifacts;
 pub mod audit;
 pub mod dependency;
+pub mod ensemble;
 pub mod incremental;
 pub mod orchestrator;
 pub mod router;

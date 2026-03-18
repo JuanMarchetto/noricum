@@ -265,6 +265,18 @@ pub struct MigrationMetrics {
     /// Number of specs that passed validation (P37)
     #[serde(default)]
     pub specs_passed: usize,
+    /// Whether ensemble was used for this module (P38)
+    #[serde(default)]
+    pub ensemble_used: bool,
+    /// Number of ensemble candidates generated (P38)
+    #[serde(default)]
+    pub ensemble_candidates: u32,
+    /// Number of ensemble candidates that compiled (P38)
+    #[serde(default)]
+    pub ensemble_compiled: u32,
+    /// Cost of the ensemble run in USD (P38)
+    #[serde(default)]
+    pub ensemble_cost_usd: f64,
 }
 
 impl MigrationMetrics {

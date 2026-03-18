@@ -30,6 +30,7 @@ pub struct MigrateParams {
     pub warm_start: Option<std::path::PathBuf>,
     pub max_unsafe: Option<u32>,
     pub crate_output: Option<std::path::PathBuf>,
+    pub ensemble: bool,
 }
 
 pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
@@ -72,6 +73,7 @@ pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
         warm_start: opts.warm_start,
         max_unsafe_blocks: opts.max_unsafe,
         crate_output_dir: opts.crate_output.clone(),
+        ensemble_enabled: opts.ensemble,
         max_tokens_budget: match opts.max_tokens {
             Some(0) => None,
             Some(n) => Some(n),

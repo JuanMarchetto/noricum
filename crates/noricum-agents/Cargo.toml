@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 noricum-ir = { workspace = true }
 noricum-tools = { workspace = true }
+noricum-validation = { workspace = true }
 rig-core = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
