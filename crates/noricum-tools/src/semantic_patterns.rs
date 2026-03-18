@@ -466,12 +466,131 @@ fn detect_control_flow(c_source: &str, hints: &mut Vec<SemanticHint>) {
     }
 }
 
-fn detect_io_patterns(_c_source: &str, _hints: &mut Vec<SemanticHint>) {
-    // Implemented in Task 6a
+/// Detect I/O patterns: file read/write, buffer management, serialization.
+fn detect_io_patterns(c_source: &str, hints: &mut Vec<SemanticHint>) {
+    let source_lower = c_source.to_lowercase();
+
+    // --- File I/O detection ---
+    let file_fns = [
+        "fopen", "fclose", "fread", "fwrite", "fprintf", "fscanf", "fgets", "fputs",
+    ];
+    let detected_fns: Vec<String> = file_fns
+        .iter()
+        .filter(|f| c_source.contains(&format!("{f}(")))
+        .map(|f| f.to_string())
+        .collect();
+
+    if detected_fns.len() >= 2 {
+        hints.push(SemanticHint::IoPattern {
+            kind: "file_readwrite".to_string(),
+            functions: detected_fns,
+            suggestion:
+                "std::fs::read_to_string / std::io::BufReader / BufWriter with Read/Write traits"
+                    .to_string(),
+        });
+    }
+
+    // --- Buffer management ---
+    let has_buffer = source_lower.contains("buffer") || source_lower.contains("buf_size");
+    let has_read_write = (source_lower.contains("read(") || source_lower.contains("recv("))
+        && (source_lower.contains("write(") || source_lower.contains("send("));
+    if has_buffer && has_read_write {
+        hints.push(SemanticHint::IoPattern {
+            kind: "buffer_management".to_string(),
+            functions: vec!["(buffered I/O)".to_string()],
+            suggestion: "Vec<u8> as growable buffer + std::io::Cursor for in-memory I/O"
+                .to_string(),
+        });
+    }
+
+    // --- Serialization ---
+    let has_serialize = source_lower.contains("serialize")
+        || source_lower.contains("deserialize")
+        || (source_lower.contains("json")
+            && (source_lower.contains("parse") || source_lower.contains("print")));
+    if has_serialize {
+        hints.push(SemanticHint::IoPattern {
+            kind: "serialization".to_string(),
+            functions: vec!["(serialization/deserialization)".to_string()],
+            suggestion: "serde with Serialize/Deserialize derives, or manual Display/FromStr"
+                .to_string(),
+        });
+    }
 }
 
-fn detect_concurrency(_c_source: &str, _hints: &mut Vec<SemanticHint>) {
-    // Implemented in Task 6b
+/// Detect concurrency patterns: mutex/lock, thread creation, atomics.
+fn detect_concurrency(c_source: &str, hints: &mut Vec<SemanticHint>) {
+    let source_lower = c_source.to_lowercase();
+
+    // --- Mutex/lock detection ---
+    let mutex_fns = [
+        "pthread_mutex_lock",
+        "pthread_mutex_unlock",
+        "pthread_mutex_init",
+        "EnterCriticalSection",
+        "LeaveCriticalSection",
+    ];
+    let detected_mutex: Vec<String> = mutex_fns
+        .iter()
+        .filter(|f| c_source.contains(*f))
+        .map(|f| f.to_string())
+        .collect();
+
+    if !detected_mutex.is_empty() {
+        hints.push(SemanticHint::Concurrency {
+            kind: "mutex".to_string(),
+            functions: detected_mutex,
+            suggestion: "std::sync::Mutex<T> with RAII MutexGuard — lock scope = guard lifetime"
+                .to_string(),
+        });
+    }
+
+    // --- Thread creation detection ---
+    let has_pthread_create = c_source.contains("pthread_create");
+    let has_pthread_join = c_source.contains("pthread_join");
+    let has_createthread = c_source.contains("CreateThread");
+    if has_pthread_create || has_createthread {
+        let mut fns = Vec::new();
+        if has_pthread_create {
+            fns.push("pthread_create".to_string());
+        }
+        if has_pthread_join {
+            fns.push("pthread_join".to_string());
+        }
+        if has_createthread {
+            fns.push("CreateThread".to_string());
+        }
+        hints.push(SemanticHint::Concurrency {
+            kind: "thread_creation".to_string(),
+            functions: fns,
+            suggestion: "std::thread::spawn with JoinHandle, or tokio::spawn for async tasks"
+                .to_string(),
+        });
+    }
+
+    // --- Atomic operations detection ---
+    let atomic_keywords = [
+        "atomic_load",
+        "atomic_store",
+        "atomic_fetch_add",
+        "__atomic",
+        "__sync_fetch",
+        "InterlockedIncrement",
+    ];
+    let detected_atomics: Vec<String> = atomic_keywords
+        .iter()
+        .filter(|kw| source_lower.contains(&kw.to_lowercase()))
+        .map(|kw| kw.to_string())
+        .collect();
+
+    if !detected_atomics.is_empty() {
+        hints.push(SemanticHint::Concurrency {
+            kind: "atomic".to_string(),
+            functions: detected_atomics,
+            suggestion: "std::sync::atomic::{AtomicUsize, AtomicBool, etc.} with Ordering"
+                .to_string(),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -804,5 +923,302 @@ error:
             .filter(|h| matches!(h, SemanticHint::ControlFlow { kind, .. } if kind == "goto_cleanup"))
             .collect();
         assert!(!cf_hints.is_empty(), "should detect goto cleanup pattern");
+    }
+
+    #[test]
+    fn test_detect_file_io() {
+        let c_source = r#"
+int read_file(const char *path, char *buf, size_t max) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    size_t n = fread(buf, 1, max, f);
+    fclose(f);
+    return (int)n;
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let io_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::IoPattern { .. }))
+            .collect();
+        assert!(!io_hints.is_empty(), "should detect file I/O pattern");
+    }
+
+    #[test]
+    fn test_detect_mutex_concurrency() {
+        let c_source = r#"
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+void safe_increment(int *counter) {
+    pthread_mutex_lock(&lock);
+    (*counter)++;
+    pthread_mutex_unlock(&lock);
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let conc_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::Concurrency { .. }))
+            .collect();
+        assert!(!conc_hints.is_empty(), "should detect mutex concurrency");
+    }
+
+    #[test]
+    fn test_detect_thread_creation() {
+        let c_source = r#"
+void *worker(void *arg) {
+    int id = *(int *)arg;
+    printf("Thread %d\n", id);
+    return NULL;
+}
+
+int main() {
+    pthread_t threads[4];
+    for (int i = 0; i < 4; i++) {
+        pthread_create(&threads[i], NULL, worker, &i);
+    }
+    for (int i = 0; i < 4; i++) {
+        pthread_join(threads[i], NULL);
+    }
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let conc_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::Concurrency { kind, .. } if kind == "thread_creation"))
+            .collect();
+        assert!(!conc_hints.is_empty(), "should detect thread creation");
+    }
+
+    #[test]
+    fn test_hash_table_fixture_detection() {
+        // Use a representative excerpt of hash_table.c
+        let hash_table_c = r#"
+typedef struct Entry {
+    char *key;
+    int value;
+    struct Entry *next;
+} Entry;
+
+typedef struct {
+    Entry **buckets;
+    int capacity;
+    int size;
+} HashTable;
+
+unsigned long hash_key(const char *str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c;
+    return hash;
+}
+
+HashTable *ht_create(int capacity) {
+    HashTable *ht = (HashTable *)malloc(sizeof(HashTable));
+    ht->buckets = (Entry **)calloc(capacity, sizeof(Entry *));
+    ht->capacity = capacity;
+    ht->size = 0;
+    return ht;
+}
+
+void ht_destroy(HashTable *ht) {
+    for (int i = 0; i < ht->capacity; i++) {
+        Entry *entry = ht->buckets[i];
+        while (entry) {
+            Entry *next = entry->next;
+            free(entry->key);
+            free(entry);
+            entry = next;
+        }
+    }
+    free(ht->buckets);
+    free(ht);
+}
+"#;
+        let hints = detect_semantic_patterns(hash_table_c);
+
+        // Should detect hash table
+        assert!(
+            hints
+                .iter()
+                .any(|h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "hash_table")),
+            "should detect hash table in hash_table.c fixture"
+        );
+        // Should detect linked list (collision chaining)
+        assert!(
+            hints
+                .iter()
+                .any(|h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "linked_list")),
+            "should detect linked list in hash_table.c (collision chains)"
+        );
+        // Should detect memory management
+        assert!(
+            hints
+                .iter()
+                .any(|h| matches!(h, SemanticHint::MemoryManagement { .. })),
+            "should detect memory management (malloc/free)"
+        );
+    }
+
+    #[test]
+    fn test_expr_eval_fixture_detection() {
+        // Representative excerpt of expr_eval.c
+        let expr_eval_c = r#"
+typedef enum {
+    TOK_NUMBER, TOK_STRING, TOK_IDENT, TOK_PLUS, TOK_MINUS,
+    TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_LPAREN, TOK_RPAREN
+} TokenType;
+
+double parse_expression(Parser *p);
+double parse_term(Parser *p);
+double parse_factor(Parser *p);
+double parse_primary(Parser *p);
+
+double parse_expression(Parser *p) {
+    double left = parse_term(p);
+    while (p->current.type == TOK_PLUS || p->current.type == TOK_MINUS) {
+        TokenType op = p->current.type;
+        advance(p);
+        double right = parse_term(p);
+        if (op == TOK_PLUS) left += right;
+        else left -= right;
+    }
+    return left;
+}
+
+double parse_term(Parser *p) {
+    double left = parse_factor(p);
+    while (p->current.type == TOK_STAR || p->current.type == TOK_SLASH) {
+        TokenType op = p->current.type;
+        advance(p);
+        double right = parse_factor(p);
+        if (op == TOK_STAR) left *= right;
+        else left /= right;
+    }
+    return left;
+}
+"#;
+        let hints = detect_semantic_patterns(expr_eval_c);
+
+        // Should detect recursive descent parser
+        assert!(
+            hints
+                .iter()
+                .any(|h| matches!(h, SemanticHint::ControlFlow { kind, .. } if kind == "recursive_descent_parser")),
+            "should detect recursive descent parser in expr_eval.c fixture"
+        );
+    }
+
+    #[test]
+    fn test_format_all_hint_types() {
+        // Ensure to_prompt_line works for all variants
+        let hints = vec![
+            SemanticHint::MemoryManagement {
+                functions: vec!["alloc".to_string()],
+                suggestion: "Box".to_string(),
+            },
+            SemanticHint::DataStructure {
+                kind: "linked_list".to_string(),
+                involved: vec!["Node".to_string()],
+                rust_type: "Vec<T>".to_string(),
+            },
+            SemanticHint::Algorithm {
+                kind: "sort".to_string(),
+                functions: vec!["qsort".to_string()],
+                suggestion: "sort_unstable".to_string(),
+            },
+            SemanticHint::ControlFlow {
+                kind: "state_machine".to_string(),
+                functions: vec!["parse".to_string()],
+                suggestion: "enum + match".to_string(),
+            },
+            SemanticHint::IoPattern {
+                kind: "file_readwrite".to_string(),
+                functions: vec!["fopen".to_string()],
+                suggestion: "std::fs".to_string(),
+            },
+            SemanticHint::Concurrency {
+                kind: "mutex".to_string(),
+                functions: vec!["lock".to_string()],
+                suggestion: "Mutex<T>".to_string(),
+            },
+        ];
+
+        for hint in &hints {
+            let line = hint.to_prompt_line();
+            assert!(!line.is_empty(), "prompt line should not be empty");
+            assert!(line.starts_with("- "), "prompt line should start with '- '");
+        }
+    }
+
+    #[test]
+    fn test_real_hash_table_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/medium/hash_table.c");
+        if !path.exists() {
+            return; // Skip if fixture not available
+        }
+        let c_source = std::fs::read_to_string(&path).unwrap();
+        let hints = detect_semantic_patterns(&c_source);
+
+        // hash_table.c MUST detect: hash table, linked list, memory management
+        let kinds: Vec<String> = hints
+            .iter()
+            .map(|h| match h {
+                SemanticHint::MemoryManagement { .. } => "memory".to_string(),
+                SemanticHint::DataStructure { kind, .. } => kind.clone(),
+                SemanticHint::Algorithm { kind, .. } => kind.clone(),
+                SemanticHint::ControlFlow { kind, .. } => kind.clone(),
+                SemanticHint::IoPattern { kind, .. } => kind.clone(),
+                SemanticHint::Concurrency { kind, .. } => kind.clone(),
+            })
+            .collect();
+
+        assert!(
+            kinds.contains(&"hash_table".to_string()),
+            "hash_table.c: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"linked_list".to_string()),
+            "hash_table.c: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"memory".to_string()),
+            "hash_table.c: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn test_real_expr_eval_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/large/expr_eval.c");
+        if !path.exists() {
+            return; // Skip if fixture not available
+        }
+        let c_source = std::fs::read_to_string(&path).unwrap();
+        let hints = detect_semantic_patterns(&c_source);
+
+        // expr_eval.c MUST detect: recursive descent parser, memory management
+        let kinds: Vec<String> = hints
+            .iter()
+            .map(|h| match h {
+                SemanticHint::MemoryManagement { .. } => "memory".to_string(),
+                SemanticHint::DataStructure { kind, .. } => kind.clone(),
+                SemanticHint::Algorithm { kind, .. } => kind.clone(),
+                SemanticHint::ControlFlow { kind, .. } => kind.clone(),
+                SemanticHint::IoPattern { kind, .. } => kind.clone(),
+                SemanticHint::Concurrency { kind, .. } => kind.clone(),
+            })
+            .collect();
+
+        assert!(
+            kinds.contains(&"recursive_descent_parser".to_string()),
+            "expr_eval.c should detect parser: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"memory".to_string()),
+            "expr_eval.c should detect memory: {kinds:?}"
+        );
     }
 }
