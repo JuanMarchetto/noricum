@@ -872,12 +872,11 @@ pub async fn migrate_file(
                     trace_count = traces.len(),
                     "P37: mined behavioral specs"
                 );
-                if let Some(ref store) = artifacts {
-                    if let Ok(trace_json) = serde_json::to_string_pretty(&traces) {
+                if let Some(ref store) = artifacts
+                    && let Ok(trace_json) = serde_json::to_string_pretty(&traces) {
                         let trace_path = store.run_dir().join("spec-traces.json");
                         let _ = std::fs::write(&trace_path, &trace_json);
                     }
-                }
                 traces
             }
             Err(e) => {
@@ -1228,8 +1227,8 @@ pub async fn migrate_file(
     }
 
     // --- Stage 6.5: Spec Validation (P37) ---
-    if !spec_traces.is_empty() && validation.compiles {
-        if let Some(ref rust_source) = unit.rust_output {
+    if !spec_traces.is_empty() && validation.compiles
+        && let Some(ref rust_source) = unit.rust_output {
             match noricum_tools::spec_mining::validate_against_specs(rust_source, &spec_traces) {
                 Ok(spec_result) => {
                     info!(
@@ -1253,7 +1252,6 @@ pub async fn migrate_file(
                 }
             }
         }
-    }
 
     // --- Stage 7: Repair loop (token-aware iteration limit) ---
     // P0: Track baseline unsafe count from translation to enforce quality floor.
