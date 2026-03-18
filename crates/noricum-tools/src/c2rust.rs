@@ -180,8 +180,8 @@ mod tests {
         // This test documents behavior when c2rust is not installed
         // It may pass or fail depending on the environment
         let result = check_c2rust_available();
-        if result.is_err() {
-            match result.unwrap_err() {
+        if let Err(err) = result {
+            match err {
                 ToolError::CommandNotFound(_) => {} // expected
                 other => panic!("unexpected error: {other}"),
             }

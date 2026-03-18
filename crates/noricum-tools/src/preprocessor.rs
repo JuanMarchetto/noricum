@@ -219,17 +219,14 @@ int feature_x(void) { return 0; }
 "#;
         let config = PreprocessorConfig::default();
         let result = preprocess_source(source, &config);
-        match result {
-            Ok(pp) => {
-                if pp.was_preprocessed {
-                    assert!(pp.source.contains("return 0"));
-                    assert!(
-                        !pp.source.contains("return 1"),
-                        "FEATURE_X not defined, so return 1 should be stripped"
-                    );
-                }
-            }
-            Err(_) => {}
+        if let Ok(pp) = result
+            && pp.was_preprocessed
+        {
+            assert!(pp.source.contains("return 0"));
+            assert!(
+                !pp.source.contains("return 1"),
+                "FEATURE_X not defined, so return 1 should be stripped"
+            );
         }
     }
 
@@ -247,16 +244,13 @@ int feature_x(void) { return 0; }
             ..Default::default()
         };
         let result = preprocess_source(source, &config);
-        match result {
-            Ok(pp) => {
-                if pp.was_preprocessed {
-                    assert!(
-                        pp.source.contains("return 1"),
-                        "FEATURE_X defined, should get return 1"
-                    );
-                }
-            }
-            Err(_) => {}
+        if let Ok(pp) = result
+            && pp.was_preprocessed
+        {
+            assert!(
+                pp.source.contains("return 1"),
+                "FEATURE_X defined, should get return 1"
+            );
         }
     }
 

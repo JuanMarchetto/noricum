@@ -153,7 +153,7 @@ fn parse_params_from_signature(sig_line: &str, _fn_name: &str) -> Vec<(String, S
         }
         let tokens: Vec<&str> = param.split_whitespace().collect();
         if tokens.len() >= 2 {
-            let name = tokens.last().unwrap().trim_start_matches('*').to_string();
+            let name = tokens.last().unwrap_or(&"").trim_start_matches('*').to_string();
             let type_part = if param.contains('*') {
                 let star_count = param.chars().filter(|c| *c == '*').count();
                 let base_type: Vec<&str> = tokens[..tokens.len() - 1]

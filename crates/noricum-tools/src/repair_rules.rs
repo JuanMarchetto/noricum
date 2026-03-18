@@ -1106,7 +1106,7 @@ pub fn rule_fix_truncated_module_boundary(source: &str) -> String {
                     result_lines.pop();
                 }
                 // Add stub
-                result_lines.push(format!("// R12: truncated function stubbed at module boundary"));
+                result_lines.push("// R12: truncated function stubbed at module boundary".to_string());
                 result_lines.push(format!("{fn_name}() -> bool {{ false }}"));
                 result_lines.push(String::new());
             }
@@ -1136,57 +1136,55 @@ pub fn rule_field_name_prefix(source: &str, errors: &[CompilerError]) -> String 
     }
 
     let mut result = source.to_string();
+    let field_re = regex::Regex::new(r"no field `(\w+)` on type").expect("static regex");
 
     for err in &field_errors {
         // Extract field name from "no field `m_xyz` on type `Foo`"
-        let field_re = regex::Regex::new(r"no field `(\w+)` on type").ok();
-        if let Some(re) = field_re {
-            if let Some(caps) = re.captures(&err.message) {
-                let bad_field = &caps[1];
+        if let Some(caps) = field_re.captures(&err.message) {
+            let bad_field = &caps[1];
 
-                // Try stripping m_ prefix
-                if let Some(stripped) = bad_field.strip_prefix("m_") {
-                    // Only fix on the error line (±2 lines for safety)
-                    let lines: Vec<&str> = result.lines().collect();
-                    if err.line > 0 && (err.line as usize) <= lines.len() {
-                        let line_idx = err.line as usize - 1;
-                        let old_pattern = format!(".{bad_field}");
-                        let new_pattern = format!(".{stripped}");
+            // Try stripping m_ prefix
+            if let Some(stripped) = bad_field.strip_prefix("m_") {
+                // Only fix on the error line (+-2 lines for safety)
+                let lines: Vec<&str> = result.lines().collect();
+                if err.line > 0 && err.line <= lines.len() {
+                    let line_idx = err.line - 1;
+                    let old_pattern = format!(".{bad_field}");
+                    let new_pattern = format!(".{stripped}");
 
-                        let start = line_idx.saturating_sub(1);
-                        let end = (line_idx + 2).min(lines.len());
+                    let start = line_idx.saturating_sub(1);
+                    let end = (line_idx + 2).min(lines.len());
 
-                        let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-                        for i in start..end {
-                            if new_lines[i].contains(&old_pattern) {
-                                new_lines[i] = new_lines[i].replace(&old_pattern, &new_pattern);
-                                debug!(line = i + 1, from = %bad_field, to = %stripped, "R13: stripped m_ prefix");
-                            }
+                    let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+                    for (idx, new_line) in new_lines.iter_mut().enumerate().take(end).skip(start) {
+                        if new_line.contains(&old_pattern) {
+                            *new_line = new_line.replace(&old_pattern, &new_pattern);
+                            debug!(line = idx + 1, from = %bad_field, to = %stripped, "R13: stripped m_ prefix");
                         }
-                        result = new_lines.join("\n");
                     }
+                    result = new_lines.join("\n");
                 }
-                // Try adding m_ prefix
-                else if !bad_field.starts_with("m_") {
-                    let with_prefix = format!("m_{bad_field}");
-                    let lines: Vec<&str> = result.lines().collect();
-                    if err.line > 0 && (err.line as usize) <= lines.len() {
-                        let line_idx = err.line as usize - 1;
-                        let old_pattern = format!(".{bad_field}");
-                        let new_pattern = format!(".{with_prefix}");
+            }
+            // Try adding m_ prefix
+            else if !bad_field.starts_with("m_") {
+                let with_prefix = format!("m_{bad_field}");
+                let lines: Vec<&str> = result.lines().collect();
+                if err.line > 0 && err.line <= lines.len() {
+                    let line_idx = err.line - 1;
+                    let old_pattern = format!(".{bad_field}");
+                    let new_pattern = format!(".{with_prefix}");
 
-                        let start = line_idx.saturating_sub(1);
-                        let end = (line_idx + 2).min(lines.len());
+                    let start = line_idx.saturating_sub(1);
+                    let end = (line_idx + 2).min(lines.len());
 
-                        let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-                        for i in start..end {
-                            if new_lines[i].contains(&old_pattern) {
-                                new_lines[i] = new_lines[i].replace(&old_pattern, &new_pattern);
-                                debug!(line = i + 1, from = %bad_field, to = %with_prefix, "R13: added m_ prefix");
-                            }
+                    let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+                    for (idx, new_line) in new_lines.iter_mut().enumerate().take(end).skip(start) {
+                        if new_line.contains(&old_pattern) {
+                            *new_line = new_line.replace(&old_pattern, &new_pattern);
+                            debug!(line = idx + 1, from = %bad_field, to = %with_prefix, "R13: added m_ prefix");
                         }
-                        result = new_lines.join("\n");
                     }
+                    result = new_lines.join("\n");
                 }
             }
         }
@@ -1236,42 +1234,40 @@ pub fn rule_method_to_free_fn(source: &str, errors: &[CompilerError]) -> String 
         .collect();
 
     let mut result = source.to_string();
+    let method_re = regex::Regex::new(r"no method named `(\w+)` found").expect("static regex");
 
     for err in &method_errors {
         // Extract method name: "no method named `xyz` found"
-        let method_re = regex::Regex::new(r"no method named `(\w+)` found").ok();
-        if let Some(re) = method_re {
-            if let Some(caps) = re.captures(&err.message) {
-                let method_name = &caps[1];
+        if let Some(caps) = method_re.captures(&err.message) {
+            let method_name = &caps[1];
 
-                // Check if there's a free function with this name
-                if free_fns.contains(method_name) {
-                    let lines: Vec<&str> = result.lines().collect();
-                    if err.line > 0 && (err.line as usize) <= lines.len() {
-                        let line_idx = err.line as usize - 1;
-                        let mut new_lines: Vec<String> =
-                            lines.iter().map(|l| l.to_string()).collect();
+            // Check if there's a free function with this name
+            if free_fns.contains(method_name) {
+                let lines: Vec<&str> = result.lines().collect();
+                if err.line > 0 && err.line <= lines.len() {
+                    let line_idx = err.line - 1;
+                    let mut new_lines: Vec<String> =
+                        lines.iter().map(|l| l.to_string()).collect();
 
-                        let line = &new_lines[line_idx];
+                    let line = &new_lines[line_idx];
 
-                        // Pattern: self.method_name(args) → method_name(self, args)
-                        let self_call = format!("self.{method_name}(");
-                        if line.contains(&self_call) {
-                            new_lines[line_idx] =
-                                line.replace(&self_call, &format!("{method_name}(self, "));
-                            debug!(line = line_idx + 1, method = %method_name, "R14: self.method → free_fn(self)");
-                        }
-
-                        // Pattern: Self::method_name(args) → method_name(args)
-                        let assoc_call = format!("Self::{method_name}(");
-                        if new_lines[line_idx].contains(&assoc_call) {
-                            new_lines[line_idx] = new_lines[line_idx]
-                                .replace(&assoc_call, &format!("{method_name}("));
-                            debug!(line = line_idx + 1, method = %method_name, "R14: Self::method → free_fn");
-                        }
-
-                        result = new_lines.join("\n");
+                    // Pattern: self.method_name(args) -> method_name(self, args)
+                    let self_call = format!("self.{method_name}(");
+                    if line.contains(&self_call) {
+                        new_lines[line_idx] =
+                            line.replace(&self_call, &format!("{method_name}(self, "));
+                        debug!(line = line_idx + 1, method = %method_name, "R14: self.method -> free_fn(self)");
                     }
+
+                    // Pattern: Self::method_name(args) -> method_name(args)
+                    let assoc_call = format!("Self::{method_name}(");
+                    if new_lines[line_idx].contains(&assoc_call) {
+                        new_lines[line_idx] = new_lines[line_idx]
+                            .replace(&assoc_call, &format!("{method_name}("));
+                        debug!(line = line_idx + 1, method = %method_name, "R14: Self::method -> free_fn");
+                    }
+
+                    result = new_lines.join("\n");
                 }
             }
         }

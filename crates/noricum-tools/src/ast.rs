@@ -622,16 +622,16 @@ pub fn detect_static_data_blocks(c_source: &str) -> Vec<(usize, usize, String)> 
                     .take(end_line + 1)
                     .map(|l| l.len() + 1)
                     .sum::<usize>();
+                debug!(
+                    name = %name,
+                    lines = block_lines,
+                    "P8: detected static data block"
+                );
                 blocks.push((
                     start_byte.min(c_source.len()),
                     end_byte.min(c_source.len()),
                     name,
                 ));
-                debug!(
-                    name = %blocks.last().unwrap().2,
-                    lines = block_lines,
-                    "P8: detected static data block"
-                );
             }
             i = end_line + 1;
         } else {
