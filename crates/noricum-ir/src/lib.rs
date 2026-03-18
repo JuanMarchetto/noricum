@@ -47,6 +47,145 @@ pub enum Difficulty {
     Hard,
 }
 
+/// A semantic hint detected in C source code.
+///
+/// These hints provide algorithmic context to the translation agent.
+/// They are suggestions, not directives — the LLM uses them as
+/// additional context for producing idiomatic Rust translations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticHint {
+    /// malloc/free pair detected — suggest RAII (Vec, Box, String)
+    MemoryManagement {
+        /// C functions involved (e.g., "malloc_node", "free_node")
+        functions: Vec<String>,
+        /// Suggested Rust approach
+        suggestion: String,
+    },
+    /// Data structure pattern detected
+    DataStructure {
+        /// Kind: "linked_list", "hash_table", "tree", "stack", "queue", "ring_buffer"
+        kind: String,
+        /// C functions/structs involved
+        involved: Vec<String>,
+        /// Suggested Rust type (e.g., "Vec<T>", "HashMap<K, V>", "BTreeMap<K, V>")
+        rust_type: String,
+    },
+    /// Algorithm pattern detected
+    Algorithm {
+        /// Kind: "sort", "binary_search", "compression", "checksum", "crypto"
+        kind: String,
+        /// C functions involved
+        functions: Vec<String>,
+        /// Suggested Rust approach
+        suggestion: String,
+    },
+    /// Control flow pattern detected
+    ControlFlow {
+        /// Kind: "state_machine", "recursive_descent_parser", "event_loop", "goto_cleanup"
+        kind: String,
+        /// C functions involved
+        functions: Vec<String>,
+        /// Suggested Rust approach
+        suggestion: String,
+    },
+    /// I/O pattern detected
+    IoPattern {
+        /// Kind: "file_readwrite", "buffer_management", "serialization"
+        kind: String,
+        /// C functions involved
+        functions: Vec<String>,
+        /// Suggested Rust approach
+        suggestion: String,
+    },
+    /// Concurrency pattern detected
+    Concurrency {
+        /// Kind: "mutex", "thread_creation", "atomic"
+        kind: String,
+        /// C functions involved
+        functions: Vec<String>,
+        /// Suggested Rust approach
+        suggestion: String,
+    },
+}
+
+impl SemanticHint {
+    /// Format this hint as a human-readable comment for the translation prompt.
+    pub fn to_prompt_line(&self) -> String {
+        match self {
+            SemanticHint::MemoryManagement {
+                functions,
+                suggestion,
+            } => {
+                format!(
+                    "- Functions {} implement memory management -> {}",
+                    functions.join(", "),
+                    suggestion
+                )
+            }
+            SemanticHint::DataStructure {
+                kind,
+                involved,
+                rust_type,
+            } => {
+                format!(
+                    "- {} pattern detected in {} -> consider {}",
+                    kind,
+                    involved.join(", "),
+                    rust_type
+                )
+            }
+            SemanticHint::Algorithm {
+                kind,
+                functions,
+                suggestion,
+            } => {
+                format!(
+                    "- {} algorithm in {} -> {}",
+                    kind,
+                    functions.join(", "),
+                    suggestion
+                )
+            }
+            SemanticHint::ControlFlow {
+                kind,
+                functions,
+                suggestion,
+            } => {
+                format!(
+                    "- {} pattern in {} -> {}",
+                    kind,
+                    functions.join(", "),
+                    suggestion
+                )
+            }
+            SemanticHint::IoPattern {
+                kind,
+                functions,
+                suggestion,
+            } => {
+                format!(
+                    "- {} I/O in {} -> {}",
+                    kind,
+                    functions.join(", "),
+                    suggestion
+                )
+            }
+            SemanticHint::Concurrency {
+                kind,
+                functions,
+                suggestion,
+            } => {
+                format!(
+                    "- {} concurrency in {} -> {}",
+                    kind,
+                    functions.join(", "),
+                    suggestion
+                )
+            }
+        }
+    }
+}
+
 /// Metadata about a single C function being migrated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionUnit {
@@ -284,5 +423,29 @@ mod tests {
         let deserialized: FunctionUnit = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "add");
         assert_eq!(deserialized.state, MigrationState::Pending);
+    }
+
+    #[test]
+    fn test_semantic_hint_prompt_line() {
+        let hint = SemanticHint::DataStructure {
+            kind: "linked_list".to_string(),
+            involved: vec!["Node".to_string(), "insert_node".to_string()],
+            rust_type: "Vec<T>".to_string(),
+        };
+        let line = hint.to_prompt_line();
+        assert!(line.contains("linked_list"), "should mention kind");
+        assert!(line.contains("Vec<T>"), "should mention rust_type");
+        assert!(line.contains("Node"), "should mention involved items");
+    }
+
+    #[test]
+    fn test_semantic_hint_serialization_roundtrip() {
+        let hint = SemanticHint::MemoryManagement {
+            functions: vec!["create_buffer".to_string(), "destroy_buffer".to_string()],
+            suggestion: "use Vec<u8> with RAII".to_string(),
+        };
+        let json = serde_json::to_string(&hint).unwrap();
+        let deserialized: SemanticHint = serde_json::from_str(&json).unwrap();
+        assert_eq!(hint, deserialized);
     }
 }
