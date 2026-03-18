@@ -7,6 +7,7 @@ pub mod router;
 pub mod surgical_repair;
 pub mod type_contract;
 pub mod budget;
+pub(crate) mod warmstart;
 
 pub use orchestrator::MigrationConfig;
 
