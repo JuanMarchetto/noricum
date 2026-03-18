@@ -612,10 +612,18 @@ fn select_model(c_loc: u32, config: &MigrationConfig) -> String {
             .unwrap_or("qwen2.5-coder:32b")
             .to_string();
     }
-    match c_loc {
-        0..=300 => "claude-haiku-4-5-20251001".to_string(),
-        301..=1500 => "claude-sonnet-4-6".to_string(),
-        _ => "claude-opus-4-6".to_string(),
+    // Respect --provider flag for model selection
+    let provider = config
+        .primary_provider
+        .as_deref()
+        .unwrap_or("anthropic");
+    match provider {
+        "deepseek" => "deepseek-chat".to_string(),
+        _ => match c_loc {
+            0..=300 => "claude-haiku-4-5-20251001".to_string(),
+            301..=1500 => "claude-sonnet-4-6".to_string(),
+            _ => "claude-opus-4-6".to_string(),
+        },
     }
 }
 
@@ -987,6 +995,10 @@ async fn run_project(project: &CrustProject, config: &MigrationConfig) -> Projec
 
 fn create_llm_client(config: &MigrationConfig) -> Result<LlmClient> {
     let provider_config = ProviderConfig {
+        primary_provider: config
+            .primary_provider
+            .clone()
+            .unwrap_or_else(|| "auto".to_string()),
         anthropic_api_key: config.anthropic_api_key.clone(),
         deepseek_api_key: config.deepseek_api_key.clone(),
         ollama_url: "http://localhost:11434".to_string(),
@@ -994,7 +1006,6 @@ fn create_llm_client(config: &MigrationConfig) -> Result<LlmClient> {
             .ollama_model
             .clone()
             .unwrap_or_else(|| "qwen2.5-coder:32b".to_string()),
-        ..Default::default()
     };
     providers::create_llm_client(&provider_config)
         .map_err(|e| anyhow::anyhow!("failed to create LLM client: {e}"))
