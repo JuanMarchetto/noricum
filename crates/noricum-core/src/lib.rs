@@ -8,6 +8,7 @@ pub mod surgical_repair;
 pub mod type_contract;
 pub mod budget;
 pub(crate) mod warmstart;
+pub(crate) mod assembly;
 
 pub use orchestrator::MigrationConfig;
 
