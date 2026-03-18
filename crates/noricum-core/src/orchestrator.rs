@@ -16,6 +16,7 @@ use noricum_agents::providers::{
 use noricum_ir::pattern_store::PatternStore;
 use noricum_ir::{Difficulty, FunctionUnit, MigrationProject, MigrationState};
 use noricum_tools::repair_rules::{apply_all_rules, parse_rustc_errors};
+use noricum_tools::semantic_patterns::detect_semantic_patterns;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -178,6 +179,19 @@ impl MigrationConfig {
     }
 }
 
+
+/// Build a `## Semantic Hints` prompt section from detected patterns.
+///
+/// Returns `None` when no hints were detected so callers can skip injection.
+fn format_semantic_hints(c_source: &str) -> Option<String> {
+    let hints = detect_semantic_patterns(c_source);
+    if hints.is_empty() {
+        return None;
+    }
+    debug!(hint_count = hints.len(), "semantic hints detected for translation");
+    let lines: Vec<String> = hints.iter().map(|h| h.to_prompt_line()).collect();
+    Some(format!("## Semantic Hints\n{}\n", lines.join("\n")))
+}
 
 /// Estimate total token cost for migrating a file before starting.
 ///
@@ -798,6 +812,17 @@ pub async fn migrate_file(
             return migrate_file_sync(c_file);
         }
     };
+    // Populate semantic hints from deterministic pattern detection
+    let mut analysis = analysis;
+    analysis.semantic_hints = detect_semantic_patterns(&unit.c_source);
+    if !analysis.semantic_hints.is_empty() {
+        info!(
+            function = %name,
+            hints = analysis.semantic_hints.len(),
+            "semantic pattern detection: {} hints",
+            analysis.semantic_hints.len()
+        );
+    }
     unit.state = MigrationState::Analyzed;
     if let Some(ref store) = artifacts
         && let Ok(json) = serde_json::to_string_pretty(&analysis)
@@ -904,6 +929,13 @@ pub async fn migrate_file(
             model = %translation_model_sel.model,
             "calling translation agent"
         );
+        // Inject semantic hints into the C source for the translation agent
+        let translation_c_source = if let Some(hints_section) = format_semantic_hints(&unit.c_source) {
+            format!("{}\n{}", hints_section, unit.c_source)
+        } else {
+            unit.c_source.clone()
+        };
+
         let c_lines_for_chunk = unit.c_source.lines().count();
         let use_chunked = c_lines_for_chunk > MEDIUM_FILE_LOC;
         let rust_code = if use_chunked {
@@ -920,7 +952,7 @@ pub async fn migrate_file(
             });
             let chunks = if has_data_model {
                 let structural =
-                    noricum_tools::ast::chunk_c_source_structural(&unit.c_source, chunk_target);
+                    noricum_tools::ast::chunk_c_source_structural(&translation_c_source, chunk_target);
                 if structural.len() > 1 {
                     info!(
                         function = %name,
@@ -928,10 +960,10 @@ pub async fn migrate_file(
                     );
                     structural
                 } else {
-                    noricum_tools::ast::chunk_c_source(&unit.c_source, chunk_target)
+                    noricum_tools::ast::chunk_c_source(&translation_c_source, chunk_target)
                 }
             } else {
-                noricum_tools::ast::chunk_c_source(&unit.c_source, chunk_target)
+                noricum_tools::ast::chunk_c_source(&translation_c_source, chunk_target)
             };
             info!(
                 function = %name,
@@ -974,7 +1006,7 @@ pub async fn migrate_file(
             match noricum_agents::translation::translate_function_with_patterns_and_temperature(
                 &client,
                 &translation_model_sel.model,
-                &unit.c_source,
+                &translation_c_source,
                 unit.c2rust_output.as_deref(),
                 &analysis,
                 &relevant_patterns,
@@ -2263,6 +2295,13 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
         )
     } else {
         module.source.clone()
+    };
+
+    // Inject semantic hints into the augmented C source for translation
+    let augmented_c = if let Some(hints_section) = format_semantic_hints(&module.source) {
+        format!("{}\n{}", hints_section, augmented_c)
+    } else {
+        augmented_c
     };
 
     // P19: Use warm-start seed if available, skip translation
