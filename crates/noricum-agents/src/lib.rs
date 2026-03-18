@@ -1,27 +1,40 @@
+/// Analysis agent for examining C source code before migration.
 pub mod analysis;
+/// Behavioral equivalence review agent for deep LLM-based comparison.
 pub mod behavioral_review;
+/// Ensemble translation: multi-provider best-of-N candidate selection.
 pub mod ensemble_translation;
+/// Mock LLM responses for testing agent parsing logic without real API calls.
 pub mod mock_responses;
+/// LLM provider configuration and client abstraction (Anthropic, DeepSeek, Ollama).
 pub mod providers;
+/// Repair agent for fixing Rust compilation errors in migrated code.
 pub mod repair;
+/// Test generation agent for creating behavioral equivalence tests.
 pub mod test_gen;
+/// Translation agent for converting C source code to idiomatic Rust.
 pub mod translation;
 
 pub use providers::{LlmClient, TokenUsage};
 
 use thiserror::Error;
 
+/// Errors that can occur during LLM agent operations.
 #[derive(Debug, Error)]
 pub enum AgentError {
+    /// The LLM provider returned an error or failed to respond.
     #[error("LLM provider error: {0}")]
     Provider(String),
 
+    /// No LLM provider is configured for the requested role.
     #[error("no provider configured for role: {0}")]
     NoProvider(String),
 
+    /// The LLM response could not be parsed into the expected format.
     #[error("failed to parse LLM response: {0}")]
     Parse(String),
 
+    /// The maximum number of retry attempts has been exceeded.
     #[error("max retries exceeded")]
     MaxRetries,
 }

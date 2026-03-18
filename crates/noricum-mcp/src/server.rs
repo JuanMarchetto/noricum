@@ -75,9 +75,9 @@ fn check_rate_limit() -> Result<(), String> {
 }
 
 use crate::protocol::{
-    INVALID_PARAMS, InitializeResult, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND,
-    PARSE_ERROR, ServerCapabilities, ServerInfo, ToolCallParams, ToolCapability, ToolDefinition,
-    ToolResult,
+    INTERNAL_ERROR, INVALID_PARAMS, InitializeResult, JsonRpcRequest, JsonRpcResponse,
+    METHOD_NOT_FOUND, PARSE_ERROR, ServerCapabilities, ServerInfo, ToolCallParams, ToolCapability,
+    ToolDefinition, ToolResult,
 };
 
 /// Run the MCP server loop: read JSON-RPC from stdin, dispatch, write to stdout.
@@ -171,7 +171,7 @@ fn handle_initialize(id: serde_json::Value) -> JsonRpcResponse {
         Ok(val) => JsonRpcResponse::success(id, val),
         Err(e) => {
             error!(error = %e, "failed to serialize InitializeResult");
-            JsonRpcResponse::error(id, -32603, format!("serialization error: {e}"))
+            JsonRpcResponse::error(id, INTERNAL_ERROR, format!("serialization error: {e}"))
         }
     }
 }
@@ -376,7 +376,7 @@ fn handle_tools_call(id: serde_json::Value, params: serde_json::Value) -> JsonRp
         Ok(val) => JsonRpcResponse::success(id, val),
         Err(e) => {
             error!(error = %e, "failed to serialize tool result");
-            JsonRpcResponse::error(id, -32603, format!("serialization error: {e}"))
+            JsonRpcResponse::error(id, INTERNAL_ERROR, format!("serialization error: {e}"))
         }
     }
 }

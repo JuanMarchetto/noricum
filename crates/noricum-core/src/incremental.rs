@@ -11,6 +11,9 @@ use tracing::info;
 use crate::CoreError;
 
 /// Per-function migration state for incremental mode.
+///
+/// Persisted as part of [`IncrementalState`] in a `.noricum-state.json` file,
+/// allowing the pipeline to resume and skip already-migrated functions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionMigrationState {
     /// Whether this function has been migrated to Rust.
@@ -26,6 +29,10 @@ pub struct FunctionMigrationState {
 }
 
 /// Persistent state for incremental migration of a C source file.
+///
+/// Tracks which functions have been migrated, their scores, and the Rust
+/// output so that subsequent runs can skip completed work.  Serialized as
+/// JSON and stored alongside the source under `<state_dir>/<stem>.noricum-state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncrementalState {
     /// Source file path.
@@ -114,7 +121,10 @@ impl IncrementalState {
     }
 }
 
-/// Filter for selecting which functions to migrate.
+/// Filter for selecting which functions to migrate in incremental mode.
+///
+/// Passed to the orchestrator to restrict migration to a subset of
+/// the functions defined in the C source file.
 #[derive(Debug, Clone)]
 pub enum FunctionFilter {
     /// Migrate specific functions by name.

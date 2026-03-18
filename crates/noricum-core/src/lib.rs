@@ -1,3 +1,10 @@
+//! `noricum-core` -- orchestrator and state machine for C-to-Rust migration.
+//!
+//! This crate provides the top-level migration pipeline that drives a C source
+//! file through extraction, analysis, translation, validation, and repair.
+//! It coordinates the agents (`noricum-agents`), tools (`noricum-tools`), and
+//! validation (`noricum-validation`) crates.
+
 pub mod artifacts;
 pub mod audit;
 pub mod dependency;
@@ -17,6 +24,9 @@ pub use orchestrator::MigrationConfig;
 use thiserror::Error;
 
 /// Error severity classification for alerting and monitoring.
+///
+/// Used by [`CoreError::severity`] to route errors to the appropriate
+/// notification channel (e.g., log-only for `Low`, page-on-call for `High`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSeverity {
     /// Transient or expected failure (e.g., compilation failure during repair loop).
@@ -27,6 +37,11 @@ pub enum ErrorSeverity {
     High,
 }
 
+/// Typed error for the `noricum-core` crate.
+///
+/// Wraps errors from downstream crates (`noricum-agents`, `noricum-tools`,
+/// `noricum-validation`) and adds orchestration-specific variants such as
+/// budget exceeded and missing source files.
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("orchestration error: {0}")]

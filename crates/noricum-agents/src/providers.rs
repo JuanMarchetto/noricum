@@ -49,7 +49,9 @@ impl Default for ProviderConfig {
 /// Which model to use for a given task.
 #[derive(Debug, Clone)]
 pub struct ModelSelection {
+    /// The provider backend (Anthropic, DeepSeek, or Ollama).
     pub provider: ProviderKind,
+    /// The model identifier string (e.g., "claude-opus-4-6", "deepseek-chat").
     pub model: String,
 }
 

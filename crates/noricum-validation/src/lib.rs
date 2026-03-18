@@ -5,17 +5,27 @@ use noricum_ir::{FunctionUnit, MigrationState};
 use thiserror::Error;
 use tracing::{info, warn};
 
+/// Errors that can occur during the validation pipeline.
 #[derive(Debug, Error)]
 pub enum ValidationError {
+    /// The function unit has no Rust output to validate.
     #[error("no Rust output to validate")]
     NoRustOutput,
 
+    /// Compilation of the Rust output failed.
     #[error("compilation failed: {0}")]
     CompilationFailed(String),
 
+    /// Differential test showed a behavioral mismatch between C and Rust.
     #[error("differential test failed: expected {expected}, got {actual}")]
-    DifferentialTestFailed { expected: String, actual: String },
+    DifferentialTestFailed {
+        /// Expected output from the C program.
+        expected: String,
+        /// Actual output from the Rust program.
+        actual: String,
+    },
 
+    /// An underlying tool (compiler, diff test runner, etc.) returned an error.
     #[error("tool error: {0}")]
     Tool(#[from] noricum_tools::ToolError),
 }
@@ -23,15 +33,21 @@ pub enum ValidationError {
 /// Result of running the full validation pipeline on a function.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ValidationResult {
+    /// Whether the Rust output compiles successfully.
     pub compiles: bool,
+    /// Compiler error messages from the last compilation attempt.
     pub compiler_errors: Vec<String>,
+    /// Clippy warnings found in the Rust output.
     pub clippy_warnings: Vec<String>,
+    /// Number of `unsafe` blocks in the Rust output.
     pub unsafe_count: u32,
+    /// Idiomatic score (0-100) based on Rust coding patterns.
     pub idiomatic_score: u32,
-    /// Whether the diff test passed (None if not run, e.g. no main() in source)
+    /// Whether the diff test passed (`None` if not run, e.g. no `main()` in source).
     pub diff_test_passed: Option<bool>,
-    /// Feedback describing the diff test mismatch (for the repair agent)
+    /// Feedback describing the diff test mismatch (for the repair agent).
     pub diff_test_feedback: Vec<String>,
+    /// Whether the function passed the full validation pipeline.
     pub passed: bool,
     /// Per-function spec validation results (None if spec mining not run).
     pub spec_validation: Option<noricum_tools::spec_mining::SpecValidationResult>,
