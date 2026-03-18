@@ -12,6 +12,7 @@ pub mod preprocessor;
 pub mod repair_rules;
 pub mod rig_tools;
 pub mod rule_translate;
+pub mod semantic_patterns;
 
 use thiserror::Error;
 
