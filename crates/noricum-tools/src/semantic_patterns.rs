@@ -54,10 +54,10 @@ fn detect_memory_management(c_source: &str, hints: &mut Vec<SemanticHint>) {
         let trimmed = line.trim();
 
         // Track function boundaries
-        if brace_depth == 0 {
-            if let Some(caps) = fn_re.captures(trimmed) {
-                current_fn = caps.get(1).map(|m| m.as_str().to_string());
-            }
+        if brace_depth == 0
+            && let Some(caps) = fn_re.captures(trimmed)
+        {
+            current_fn = caps.get(1).map(|m| m.as_str().to_string());
         }
 
         let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
@@ -68,18 +68,15 @@ fn detect_memory_management(c_source: &str, hints: &mut Vec<SemanticHint>) {
         }
 
         if let Some(ref fn_name) = current_fn {
-            if trimmed.contains("malloc(")
+            if (trimmed.contains("malloc(")
                 || trimmed.contains("calloc(")
-                || trimmed.contains("realloc(")
+                || trimmed.contains("realloc("))
+                && !alloc_fns.contains(fn_name)
             {
-                if !alloc_fns.contains(fn_name) {
-                    alloc_fns.push(fn_name.clone());
-                }
+                alloc_fns.push(fn_name.clone());
             }
-            if trimmed.contains("free(") {
-                if !free_fns.contains(fn_name) {
-                    free_fns.push(fn_name.clone());
-                }
+            if trimmed.contains("free(") && !free_fns.contains(fn_name) {
+                free_fns.push(fn_name.clone());
             }
         }
 
@@ -233,19 +230,15 @@ fn detect_algorithms(c_source: &str, hints: &mut Vec<SemanticHint>) {
     let source_lower = c_source.to_lowercase();
 
     // --- Sort detection ---
-    // Heuristic: qsort() call, or comparison functions (const void *a, const void *b)
+    // Heuristic: qsort() call, or swap + nested loops (manual sort)
     let has_qsort = c_source.contains("qsort(");
-    let has_comparison_fn =
-        Regex::new(r"const\s+void\s*\*\s*\w+\s*,\s*const\s+void\s*\*\s*\w+")
-            .expect("static regex")
-            .is_match(c_source);
     // Manual sort: swap + nested loops
     let has_swap = source_lower.contains("swap") || c_source.contains("temp =");
     let has_nested_loop = Regex::new(r"for\s*\([^)]*\)\s*\{[^}]*for\s*\(")
         .expect("static regex")
         .is_match(c_source);
 
-    if has_qsort || (has_comparison_fn && has_qsort) {
+    if has_qsort {
         let mut functions = vec!["qsort".to_string()];
         // Find the comparison function name
         let cmp_re =
