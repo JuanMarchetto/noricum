@@ -409,9 +409,27 @@ fn fix_contract_compilation_issues(source: &str) -> String {
 
         // Replace bare `dyn Trait` (without Box) → usize (E0782)
         if fixed.contains(": dyn ") || fixed.contains("(dyn ") {
-            let re_pattern = regex::Regex::new(r"(?<![<(])dyn\s+[\w:]+").ok();
+            // Use a simple regex and then check the char before the match to avoid
+            // replacing `dyn` inside `Box<dyn ...>` or `(dyn ...` contexts.
+            let re_pattern = regex::Regex::new(r"dyn\s+[\w:]+").ok();
             if let Some(re) = re_pattern {
-                fixed = re.replace_all(&fixed, "usize").to_string();
+                let mut result = String::new();
+                let mut last_end = 0;
+                for m in re.find_iter(&fixed) {
+                    let start = m.start();
+                    // Only replace if not preceded by < or (
+                    let preceded_by_angle_or_paren = start > 0
+                        && matches!(fixed.as_bytes().get(start - 1), Some(b'<') | Some(b'('));
+                    result.push_str(&fixed[last_end..start]);
+                    if preceded_by_angle_or_paren {
+                        result.push_str(m.as_str());
+                    } else {
+                        result.push_str("usize");
+                    }
+                    last_end = m.end();
+                }
+                result.push_str(&fixed[last_end..]);
+                fixed = result;
             }
         }
 
