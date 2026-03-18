@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod c2rust;
 pub mod compiler;
+pub mod crate_builder;
 pub mod diff_test;
 pub mod doc_gen;
 pub mod ffi_bridge;
@@ -9,6 +10,7 @@ pub mod harness_gen;
 pub mod mixed_build;
 pub mod multi_input_test;
 pub mod preprocessor;
+pub mod repair_pattern_store;
 pub mod repair_rules;
 pub mod rig_tools;
 pub mod rule_translate;
