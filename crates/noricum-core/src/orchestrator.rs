@@ -860,6 +860,32 @@ pub async fn migrate_file(
         );
     }
 
+    // --- Stage 4.5: Spec Mining (P37) ---
+    let spec_traces = if unit.c_source.contains("int main(") {
+        match noricum_tools::spec_mining::mine_specs(&unit.c_source) {
+            Ok(traces) => {
+                info!(
+                    function = %name,
+                    trace_count = traces.len(),
+                    "P37: mined behavioral specs"
+                );
+                if let Some(ref store) = artifacts {
+                    if let Ok(trace_json) = serde_json::to_string_pretty(&traces) {
+                        let trace_path = store.run_dir().join("spec-traces.json");
+                        let _ = std::fs::write(&trace_path, &trace_json);
+                    }
+                }
+                traces
+            }
+            Err(e) => {
+                debug!(function = %name, error = %e, "P37: spec mining failed (non-fatal)");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     // --- Translation cache check ---
     if let Some(cached_rust) = cache::get(&unit.c_source) {
         info!(function = %name, "using cached translation, skipping LLM call");
@@ -1196,6 +1222,34 @@ pub async fn migrate_file(
                 passed: validation.passed,
             },
         );
+    }
+
+    // --- Stage 6.5: Spec Validation (P37) ---
+    if !spec_traces.is_empty() && validation.compiles {
+        if let Some(ref rust_source) = unit.rust_output {
+            match noricum_tools::spec_mining::validate_against_specs(rust_source, &spec_traces) {
+                Ok(spec_result) => {
+                    info!(
+                        function = %name,
+                        total = spec_result.total_specs,
+                        passed = spec_result.passed,
+                        failed = spec_result.failed,
+                        "P37: spec validation"
+                    );
+                    unit.metrics.spec_count = spec_result.total_specs;
+                    unit.metrics.specs_passed = spec_result.passed;
+                    if spec_result.failed > 0 {
+                        for failure in &spec_result.failures {
+                            unit.last_diff_feedback
+                                .push(format!("Spec failure: {failure}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(function = %name, error = %e, "P37: spec validation failed (non-fatal)");
+                }
+            }
+        }
     }
 
     // --- Stage 7: Repair loop (token-aware iteration limit) ---

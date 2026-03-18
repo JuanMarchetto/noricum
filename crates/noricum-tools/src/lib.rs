@@ -15,6 +15,7 @@ pub mod repair_rules;
 pub mod rig_tools;
 pub mod rule_translate;
 pub mod semantic_patterns;
+pub mod spec_mining;
 pub mod translation_memory;
 
 use thiserror::Error;

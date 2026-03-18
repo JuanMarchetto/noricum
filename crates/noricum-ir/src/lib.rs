@@ -259,6 +259,12 @@ pub struct MigrationMetrics {
     pub provider: Option<String>,
     /// LLM model used (e.g. "claude-sonnet-4-20250514")
     pub model: Option<String>,
+    /// Number of behavioral specs mined from C source (P37)
+    #[serde(default)]
+    pub spec_count: usize,
+    /// Number of specs that passed validation (P37)
+    #[serde(default)]
+    pub specs_passed: usize,
 }
 
 impl MigrationMetrics {

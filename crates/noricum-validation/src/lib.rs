@@ -33,6 +33,8 @@ pub struct ValidationResult {
     /// Feedback describing the diff test mismatch (for the repair agent)
     pub diff_test_feedback: Vec<String>,
     pub passed: bool,
+    /// Per-function spec validation results (None if spec mining not run).
+    pub spec_validation: Option<noricum_tools::spec_mining::SpecValidationResult>,
 }
 
 /// Run the full validation pipeline on a function unit with the default threshold (60).
@@ -170,6 +172,7 @@ pub fn validate_with_threshold(
         diff_test_passed,
         diff_test_feedback,
         passed,
+        spec_validation: None,
     })
 }
 
@@ -471,6 +474,7 @@ mod tests {
             diff_test_passed: None,
             diff_test_feedback: vec![],
             passed: true,
+            spec_validation: None,
         };
 
         apply_validation(&mut unit, &result);
@@ -492,6 +496,7 @@ mod tests {
             diff_test_passed: None,
             diff_test_feedback: vec![],
             passed: false,
+            spec_validation: None,
         };
 
         apply_validation(&mut unit, &result);
@@ -513,6 +518,7 @@ mod tests {
             diff_test_passed: None,
             diff_test_feedback: vec![],
             passed: false,
+            spec_validation: None,
         };
 
         apply_validation(&mut unit, &result);
@@ -556,6 +562,7 @@ mod tests {
             diff_test_passed: None,
             diff_test_feedback: vec![],
             passed: false,
+            spec_validation: None,
         };
 
         // First failure: Refined -> Repairing(1)
@@ -589,6 +596,7 @@ mod tests {
             diff_test_passed: None,
             diff_test_feedback: vec![],
             passed: false,
+            spec_validation: None,
         };
 
         let pass_result = ValidationResult {
@@ -600,6 +608,7 @@ mod tests {
             diff_test_passed: Some(true),
             diff_test_feedback: vec![],
             passed: true,
+            spec_validation: None,
         };
 
         // Fail twice
@@ -630,6 +639,7 @@ mod tests {
             diff_test_passed: Some(false),
             diff_test_feedback: vec!["Output mismatch: C=\"42\" Rust=\"43\"".into()],
             passed: false,
+            spec_validation: None,
         };
 
         apply_validation(&mut unit, &diff_fail);
@@ -660,6 +670,7 @@ mod tests {
             diff_test_passed: Some(false),
             diff_test_feedback: vec!["Diff test error: execution timed out after 10s".into()],
             passed: false,
+            spec_validation: None,
         };
         // A diff test error (including timeout) must NOT pass validation
         assert!(
