@@ -493,6 +493,9 @@ fn tool_analyze_function(source: Option<String>) -> ToolResult {
 }
 
 /// `check_compilation`: Compile Rust source and report results.
+///
+/// If the `source` parameter is a path to a directory containing `Cargo.toml`,
+/// uses `cargo check` (crate-mode). Otherwise, compiles as a single-file via `rustc`.
 fn tool_check_compilation(source: Option<String>) -> ToolResult {
     let source = match source {
         Some(s) => s,
@@ -503,6 +506,22 @@ fn tool_check_compilation(source: Option<String>) -> ToolResult {
             "source exceeds maximum size of {} bytes",
             MAX_MCP_SOURCE_SIZE
         ));
+    }
+
+    // Check if the source is a path to a crate directory
+    let input_path = std::path::Path::new(&source);
+    if input_path.is_dir() && input_path.join("Cargo.toml").exists() {
+        match noricum_tools::compiler::check_crate_compiles(input_path) {
+            Ok(compile_result) => {
+                let result = json!({
+                    "success": compile_result.success,
+                    "errors": compile_result.stderr,
+                    "mode": "crate",
+                });
+                return json_to_tool_result(&result);
+            }
+            Err(e) => return ToolResult::error(format!("crate compilation check failed: {e}")),
+        }
     }
 
     match noricum_tools::compiler::check_rust_compiles(&source) {
