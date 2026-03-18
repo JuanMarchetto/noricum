@@ -228,8 +228,132 @@ fn detect_data_structures(c_source: &str, hints: &mut Vec<SemanticHint>) {
     }
 }
 
-fn detect_algorithms(_c_source: &str, _hints: &mut Vec<SemanticHint>) {
-    // Implemented in Task 4
+/// Detect algorithmic patterns: sort, search, compression, checksum, crypto.
+fn detect_algorithms(c_source: &str, hints: &mut Vec<SemanticHint>) {
+    let source_lower = c_source.to_lowercase();
+
+    // --- Sort detection ---
+    // Heuristic: qsort() call, or comparison functions (const void *a, const void *b)
+    let has_qsort = c_source.contains("qsort(");
+    let has_comparison_fn =
+        Regex::new(r"const\s+void\s*\*\s*\w+\s*,\s*const\s+void\s*\*\s*\w+")
+            .expect("static regex")
+            .is_match(c_source);
+    // Manual sort: swap + nested loops
+    let has_swap = source_lower.contains("swap") || c_source.contains("temp =");
+    let has_nested_loop = Regex::new(r"for\s*\([^)]*\)\s*\{[^}]*for\s*\(")
+        .expect("static regex")
+        .is_match(c_source);
+
+    if has_qsort || (has_comparison_fn && has_qsort) {
+        let mut functions = vec!["qsort".to_string()];
+        // Find the comparison function name
+        let cmp_re =
+            Regex::new(r"int\s+(\w+)\s*\(\s*const\s+void").expect("static regex");
+        for cap in cmp_re.captures_iter(c_source) {
+            if let Some(name) = cap.get(1) {
+                functions.push(name.as_str().to_string());
+            }
+        }
+        hints.push(SemanticHint::Algorithm {
+            kind: "sort".to_string(),
+            functions,
+            suggestion: "slice::sort_unstable_by() with typed comparison closure".to_string(),
+        });
+    } else if has_swap && has_nested_loop {
+        hints.push(SemanticHint::Algorithm {
+            kind: "sort".to_string(),
+            functions: vec!["(manual sort detected)".to_string()],
+            suggestion: "slice::sort() or sort_unstable_by() — avoid manual swap loops"
+                .to_string(),
+        });
+    }
+
+    // --- Binary search detection ---
+    // Heuristic: low/high/mid variables with halving logic
+    let has_low_high = (source_lower.contains("low") || source_lower.contains("left"))
+        && (source_lower.contains("high") || source_lower.contains("right"));
+    let has_mid =
+        Regex::new(r"\bmid\b\s*=.*[/+].*2")
+            .expect("static regex")
+            .is_match(c_source)
+            || c_source.contains(">> 1");
+    if has_low_high && has_mid {
+        let fn_re = Regex::new(r"(?i)\b(\w*search\w*)\s*\(").expect("static regex");
+        let functions: Vec<String> = fn_re
+            .captures_iter(c_source)
+            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+            .collect();
+        hints.push(SemanticHint::Algorithm {
+            kind: "binary_search".to_string(),
+            functions: if functions.is_empty() {
+                vec!["(binary search pattern)".to_string()]
+            } else {
+                functions
+            },
+            suggestion: "slice::binary_search() or partition_point()".to_string(),
+        });
+    }
+
+    // --- Compression detection ---
+    // Heuristic: deflate/inflate, compress/decompress, zlib, lz77, huffman
+    let compression_keywords = [
+        "deflate",
+        "inflate",
+        "compress",
+        "decompress",
+        "lz77",
+        "huffman",
+        "zlib",
+    ];
+    let compression_fns: Vec<String> = compression_keywords
+        .iter()
+        .filter(|kw| source_lower.contains(*kw))
+        .map(|kw| kw.to_string())
+        .collect();
+    if !compression_fns.is_empty() {
+        hints.push(SemanticHint::Algorithm {
+            kind: "compression".to_string(),
+            functions: compression_fns,
+            suggestion: "use flate2 crate or reimplement with byte slices and iterators"
+                .to_string(),
+        });
+    }
+
+    // --- Checksum/CRC detection ---
+    // Heuristic: crc32, adler32, checksum, XOR accumulation with table lookup
+    let checksum_keywords = ["crc32", "crc16", "adler32", "checksum"];
+    let checksum_fns: Vec<String> = checksum_keywords
+        .iter()
+        .filter(|kw| source_lower.contains(*kw))
+        .map(|kw| kw.to_string())
+        .collect();
+    if !checksum_fns.is_empty() {
+        hints.push(SemanticHint::Algorithm {
+            kind: "checksum".to_string(),
+            functions: checksum_fns,
+            suggestion:
+                "wrapping arithmetic (wrapping_add, wrapping_shl) for bit-exact results"
+                    .to_string(),
+        });
+    }
+
+    // --- Crypto detection ---
+    let crypto_keywords = [
+        "sha256", "sha1", "md5", "aes", "encrypt", "decrypt", "hmac", "pbkdf",
+    ];
+    let crypto_fns: Vec<String> = crypto_keywords
+        .iter()
+        .filter(|kw| source_lower.contains(*kw))
+        .map(|kw| kw.to_string())
+        .collect();
+    if !crypto_fns.is_empty() {
+        hints.push(SemanticHint::Algorithm {
+            kind: "crypto".to_string(),
+            functions: crypto_fns,
+            suggestion: "use ring or sha2 crate for standard algorithms, or reimplement with wrapping ops for custom".to_string(),
+        });
+    }
 }
 
 fn detect_control_flow(_c_source: &str, _hints: &mut Vec<SemanticHint>) {
@@ -388,5 +512,93 @@ int peek(Stack *s) { return s->data[s->top - 1]; }
             .filter(|h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "stack"))
             .collect();
         assert!(!ds_hints.is_empty(), "should detect stack pattern");
+    }
+
+    #[test]
+    fn test_detect_sort_qsort() {
+        let c_source = r#"
+int compare(const void *a, const void *b) {
+    return (*(int *)a - *(int *)b);
+}
+
+void sort_array(int *arr, int n) {
+    qsort(arr, n, sizeof(int), compare);
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let alg_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::Algorithm { kind, .. } if kind == "sort"))
+            .collect();
+        assert!(!alg_hints.is_empty(), "should detect qsort pattern");
+    }
+
+    #[test]
+    fn test_detect_binary_search() {
+        let c_source = r#"
+int binary_search(int *arr, int n, int target) {
+    int low = 0, high = n - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        if (arr[mid] == target) return mid;
+        if (arr[mid] < target) low = mid + 1;
+        else high = mid - 1;
+    }
+    return -1;
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let alg_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::Algorithm { kind, .. } if kind == "binary_search"))
+            .collect();
+        assert!(!alg_hints.is_empty(), "should detect binary search pattern");
+    }
+
+    #[test]
+    fn test_detect_checksum() {
+        let c_source = r#"
+unsigned long crc32(unsigned long crc, const unsigned char *buf, size_t len) {
+    crc = crc ^ 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc = crc32_table[(crc ^ buf[i]) & 0xFF] ^ (crc >> 8);
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+unsigned long adler32(unsigned long adler, const unsigned char *buf, size_t len) {
+    unsigned long s1 = adler & 0xFFFF;
+    unsigned long s2 = (adler >> 16) & 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        s1 = (s1 + buf[i]) % 65521;
+        s2 = (s2 + s1) % 65521;
+    }
+    return (s2 << 16) + s1;
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let alg_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::Algorithm { kind, .. } if kind == "checksum"))
+            .collect();
+        assert!(!alg_hints.is_empty(), "should detect checksum/CRC pattern");
+    }
+
+    #[test]
+    fn test_detect_compression() {
+        let c_source = r#"
+int deflate(z_stream *strm, int flush) {
+    /* compression algorithm */
+}
+int inflate(z_stream *strm, int flush) {
+    /* decompression */
+}
+"#;
+        let hints = detect_semantic_patterns(c_source);
+        let alg_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| matches!(h, SemanticHint::Algorithm { kind, .. } if kind == "compression"))
+            .collect();
+        assert!(!alg_hints.is_empty(), "should detect compression pattern");
     }
 }
