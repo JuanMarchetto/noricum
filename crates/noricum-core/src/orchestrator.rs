@@ -104,6 +104,10 @@ pub struct MigrationConfig {
     /// baseline as ceiling (same as pre-P21 behavior). Setting e.g. `Some(3)` allows
     /// repair to introduce up to 3 unsafe blocks even if translation had 0.
     pub max_unsafe_blocks: Option<u32>,
+    /// Output directory for multi-file Rust crate. When set, the pipeline
+    /// generates a Cargo crate instead of a single .rs file.
+    /// Each module becomes `src/{module}.rs`, types go to `src/types.rs`.
+    pub crate_output_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for MigrationConfig {
@@ -134,6 +138,7 @@ impl Default for MigrationConfig {
             module_target_loc: None,
             warm_start: None,
             max_unsafe_blocks: None,
+            crate_output_dir: None,
         }
     }
 }
@@ -1864,6 +1869,27 @@ async fn migrate_file_modular(
         tracing::info!("P33: no type contract (will use per-module type discovery)");
     }
 
+    // Phase 1: Initialize CrateBuilder when --crate-output is configured
+    let mut crate_builder = if let Some(ref output_dir) = config.crate_output_dir {
+        let mut builder = noricum_tools::crate_builder::CrateBuilder::new(output_dir, name)
+            .map_err(|e| CoreError::Orchestration(format!("CrateBuilder init: {e}")))?;
+
+        // Write type contract to types.rs
+        if let Some(ref tc) = type_contract {
+            builder.write_types(tc)
+                .map_err(|e| CoreError::Orchestration(format!("write types.rs: {e}")))?;
+        }
+
+        // Write Cargo.toml early so cargo check works incrementally
+        builder.write_cargo_toml()
+            .map_err(|e| CoreError::Orchestration(format!("write Cargo.toml: {e}")))?;
+
+        info!(function = %name, output_dir = %output_dir.display(), "Phase 1: CrateBuilder initialized");
+        Some(builder)
+    } else {
+        None
+    };
+
     // Build intra-file dependency graph and order modules
     let dep_graph = crate::dependency::DependencyGraph::from_source(c_source);
     let waves = dep_graph.module_waves(&modules);
@@ -2063,6 +2089,11 @@ async fn migrate_file_modular(
                 any_succeeded = true;
                 best_combined_score += unit.idiomatic_score.unwrap_or(0);
 
+                // Phase 1: Write module to crate output
+                if let Some(ref mut builder) = crate_builder {
+                    let _ = builder.write_module(&result.name, rust_output);
+                }
+
                 info!(
                     module = %result.name,
                     state = ?unit.state,
@@ -2103,7 +2134,27 @@ async fn migrate_file_modular(
         return Ok(ModularResult::FallbackToChunked);
     }
 
-    // Assemble final output from all module outputs
+    // Phase 1: Finalize crate output — write lib.rs and run cargo check
+    if let Some(ref builder) = crate_builder {
+        builder.write_lib_rs()
+            .map_err(|e| CoreError::Orchestration(format!("write lib.rs: {e}")))?;
+
+        let compile_result = noricum_tools::compiler::check_crate_compiles(builder.output_dir())
+            .map_err(CoreError::Tool)?;
+
+        if compile_result.success {
+            info!(function = %name, "Phase 1: multi-file crate compiles successfully");
+        } else {
+            let error_count = compile_result.stderr.lines().count();
+            warn!(
+                function = %name,
+                errors = error_count,
+                "Phase 1: multi-file crate has compilation errors"
+            );
+        }
+    }
+
+    // Assemble final output from all module outputs (for backward-compat single-string)
     let combined = assemble_module_outputs(&module_outputs, type_contract.as_deref());
     let avg_score = if !module_outputs.is_empty() {
         best_combined_score / module_outputs.len() as u32

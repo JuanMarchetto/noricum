@@ -183,6 +183,9 @@ struct MigrateOpts {
     /// Maximum allowed unsafe blocks in output (default: 0 = use translation baseline)
     #[arg(long)]
     max_unsafe: Option<u32>,
+    /// Output directory for multi-file Rust crate (instead of single .rs file)
+    #[arg(long)]
+    crate_output: Option<PathBuf>,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -228,6 +231,7 @@ async fn main() {
                 module_target_loc: opts.module_target_loc,
                 warm_start: opts.warm_start,
                 max_unsafe: opts.max_unsafe,
+                crate_output: opts.crate_output,
             })
             .await
         }
