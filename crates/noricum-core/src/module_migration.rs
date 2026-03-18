@@ -75,6 +75,98 @@ pub(crate) fn should_retranslate(error_count: usize, retranslation_attempts: u32
     error_count > RETRANSLATE_ERROR_THRESHOLD && retranslation_attempts == 0
 }
 
+/// Repair a single module within a crate context.
+///
+/// Compiles the entire crate via `cargo check`, extracts errors for the target module,
+/// and runs mechanical rules + LLM repair on just that module's source.
+/// Returns `true` if the module (and whole crate) compiles after repair.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn repair_module_in_crate(
+    builder: &mut noricum_tools::crate_builder::CrateBuilder,
+    module_name: &str,
+    c_source: &str,
+    client: &noricum_agents::LlmClient,
+    repair_model: &str,
+    max_iters: u32,
+    repair_base_temperature: Option<f64>,
+    max_unsafe_blocks: Option<u32>,
+) -> Result<bool, crate::CoreError> {
+    let mut iteration = 0u32;
+    let baseline_unsafe = {
+        let source = builder.read_module(module_name)
+            .map_err(|e| crate::CoreError::Orchestration(format!("read module: {e}")))?;
+        noricum_tools::ast::count_unsafe_blocks_ast(&source)
+    };
+    let unsafe_ceiling = max_unsafe_blocks.unwrap_or(baseline_unsafe).max(baseline_unsafe);
+
+    while iteration < max_iters {
+        // Compile the whole crate, filtering errors for this module
+        let compile_result = noricum_tools::compiler::check_module_compiles(
+            builder.output_dir(), module_name,
+        ).map_err(crate::CoreError::Tool)?;
+
+        if compile_result.success {
+            return Ok(true);
+        }
+
+        let current_source = builder.read_module(module_name)
+            .map_err(|e| crate::CoreError::Orchestration(format!("read module: {e}")))?;
+
+        // Apply mechanical rules first (R0-R14)
+        let errors = noricum_tools::repair_rules::parse_rustc_errors(&compile_result.stderr);
+        let fixed = noricum_tools::repair_rules::apply_all_rules(&current_source, &errors);
+
+        if fixed != current_source {
+            builder.write_module(module_name, &fixed)
+                .map_err(|e| crate::CoreError::Orchestration(format!("write module: {e}")))?;
+
+            // Re-check after rules
+            let re_check = noricum_tools::compiler::check_module_compiles(
+                builder.output_dir(), module_name,
+            ).map_err(crate::CoreError::Tool)?;
+
+            if re_check.success {
+                return Ok(true);
+            }
+        }
+
+        // LLM repair on this module's source
+        let error_strings: Vec<String> = errors.iter().map(|e| {
+            format!("{}: {} (line {})", e.code, e.message, e.line)
+        }).collect();
+
+        let repaired = noricum_agents::repair::repair_function_full(
+            client,
+            repair_model,
+            &current_source,
+            &error_strings,
+            &[], // no diff feedback at module level
+            c_source,
+            iteration + 1,
+            max_iters,
+            repair_base_temperature,
+            None,
+        ).await;
+
+        match repaired {
+            Ok(new_source) => {
+                let new_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&new_source);
+                if new_unsafe <= unsafe_ceiling {
+                    builder.write_module(module_name, &new_source)
+                        .map_err(|e| crate::CoreError::Orchestration(format!("write module: {e}")))?;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(module = %module_name, error = %e, "repair LLM call failed");
+            }
+        }
+
+        iteration += 1;
+    }
+
+    Ok(false)
+}
+
 /// Check if Rust output has substance relative to C source (not empty stubs).
 pub(crate) fn has_substance(rust_source: &str, c_source: &str) -> bool {
     let c_nl = c_source.lines().filter(|l| !l.trim().is_empty()).count();
