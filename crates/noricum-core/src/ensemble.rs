@@ -3,7 +3,7 @@
 //! Determines when to trigger ensemble translation and applies
 //! the result back to the FunctionUnit.
 
-use noricum_agents::ensemble_translation::{EnsembleResult, TranslationCandidate};
+use noricum_agents::ensemble_translation::EnsembleResult;
 use noricum_ir::{FunctionUnit, MigrationState};
 use tracing::info;
 

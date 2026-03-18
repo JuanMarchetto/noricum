@@ -384,6 +384,10 @@ fn skip_braced_block_lines(lines: &[&str], start: usize) -> usize {
 /// - Remove `type Alias = ...` lines
 fn fix_contract_compilation_issues(source: &str) -> String {
     let mut result = String::with_capacity(source.len());
+    let re_multi_trait =
+        regex::Regex::new(r"(?:Box<|Option<Box<)?dyn\s+[\w:]+(?:\s*\+\s*[\w:]+)+>?>?").ok();
+    let re_bare_dyn = regex::Regex::new(r"dyn\s+[\w:]+").ok();
+    let re_raw_ptr = regex::Regex::new(r"\*(?:mut|const)\s+[\w:]+").ok();
     for line in source.lines() {
         let trimmed = line.trim();
 
@@ -401,8 +405,7 @@ fn fix_contract_compilation_issues(source: &str) -> String {
         // Replace Box<dyn TraitA + TraitB> → usize (E0225)
         if fixed.contains("dyn ") && fixed.contains(" + ") {
             // Multi-trait objects are invalid — replace entire type with usize
-            let re_pattern = regex::Regex::new(r"(?:Box<|Option<Box<)?dyn\s+[\w:]+(?:\s*\+\s*[\w:]+)+>?>?").ok();
-            if let Some(re) = re_pattern {
+            if let Some(ref re) = re_multi_trait {
                 fixed = re.replace_all(&fixed, "usize").to_string();
             }
         }
@@ -411,8 +414,7 @@ fn fix_contract_compilation_issues(source: &str) -> String {
         if fixed.contains(": dyn ") || fixed.contains("(dyn ") {
             // Use a simple regex and then check the char before the match to avoid
             // replacing `dyn` inside `Box<dyn ...>` or `(dyn ...` contexts.
-            let re_pattern = regex::Regex::new(r"dyn\s+[\w:]+").ok();
-            if let Some(re) = re_pattern {
+            if let Some(ref re) = re_bare_dyn {
                 let mut result = String::new();
                 let mut last_end = 0;
                 for m in re.find_iter(&fixed) {
@@ -440,8 +442,7 @@ fn fix_contract_compilation_issues(source: &str) -> String {
             fixed = fixed.replace("*mut c_void", "usize");
             fixed = fixed.replace("*const c_void", "usize");
             // Generic pointer patterns
-            let re_pattern = regex::Regex::new(r"\*(?:mut|const)\s+[\w:]+").ok();
-            if let Some(re) = re_pattern {
+            if let Some(ref re) = re_raw_ptr {
                 fixed = re.replace_all(&fixed, "usize").to_string();
             }
         }

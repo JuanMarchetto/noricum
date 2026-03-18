@@ -216,9 +216,9 @@ pub fn evaluate_candidate_with_specs(
     );
 
     // Optional Gate: Spec validation (only if compiles and traces available)
-    if candidate.compiles {
-        if let Some(traces) = traces {
-            if !traces.is_empty() {
+    if candidate.compiles
+        && let Some(traces) = traces
+            && !traces.is_empty() {
                 match noricum_tools::spec_mining::validate_against_specs(rust_source, traces) {
                     Ok(spec_result) => {
                         candidate.specs_passed = Some(spec_result.passed);
@@ -239,8 +239,6 @@ pub fn evaluate_candidate_with_specs(
                     }
                 }
             }
-        }
-    }
 
     candidate
 }
@@ -421,7 +419,6 @@ pub async fn generate_candidates(
             let provider_config = provider_config.clone();
             let cc = cc.clone();
             let label = cc.label.clone();
-            let difficulty = difficulty;
 
             let handle = tokio::spawn(async move {
                 generate_single_candidate(&c_source, &analysis, &provider_config, &cc, difficulty)

@@ -80,7 +80,7 @@ pub(crate) fn should_retranslate(error_count: usize, retranslation_attempts: u32
 /// Compiles the entire crate via `cargo check`, extracts errors for the target module,
 /// and runs mechanical rules + LLM repair on just that module's source.
 /// Returns `true` if the module (and whole crate) compiles after repair.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) async fn repair_module_in_crate(
     builder: &mut noricum_tools::crate_builder::CrateBuilder,
     module_name: &str,
