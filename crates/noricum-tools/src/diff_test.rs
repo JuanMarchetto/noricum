@@ -347,6 +347,91 @@ fn approximate_match(a: &str, b: &str, eps: f64) -> bool {
     true
 }
 
+/// Run a differential test using a generated Rust crate.
+///
+/// Compiles the C source to an executable, then builds the Rust crate
+/// as a binary (via `cargo build`), runs both, and compares outputs.
+pub fn run_diff_test_crate(
+    c_source: &str,
+    crate_dir: &Path,
+) -> Result<DiffTestResult, ToolError> {
+    let tmp = tempfile::tempdir()?;
+
+    // Compile C
+    let c_file = tmp.path().join("test.c");
+    let c_exe = tmp.path().join("test_c");
+    std::fs::write(&c_file, c_source)?;
+    let c_compiled = compile_c_exe(&c_file, &c_exe)?;
+
+    // Build Rust crate as binary
+    let cargo_toml = crate_dir.join("Cargo.toml");
+    let (rust_compiled, build_stderr) = if cargo_toml.exists() {
+        let output = Command::new("cargo")
+            .arg("build")
+            .arg("--manifest-path")
+            .arg(&cargo_toml)
+            .arg("--release")
+            .output()
+            .map_err(|_| ToolError::CommandNotFound("cargo".to_string()))?;
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            debug!(stderr = %stderr, "cargo build failed for crate diff test");
+        }
+        (output.status.success(), stderr)
+    } else {
+        (false, "Cargo.toml not found".to_string())
+    };
+
+    if !c_compiled || !rust_compiled {
+        return Ok(DiffTestResult {
+            passed: false,
+            c_output: String::new(),
+            rust_output: String::new(),
+            c_compiled,
+            rust_compiled,
+            c_exit_code: 0,
+            rust_exit_code: 0,
+            c_stderr: String::new(),
+            rust_stderr: build_stderr,
+        });
+    }
+
+    // Find the built binary — read the package name from Cargo.toml
+    let crate_name = {
+        let toml_content = std::fs::read_to_string(&cargo_toml)?;
+        toml_content
+            .lines()
+            .find(|l| l.trim().starts_with("name"))
+            .and_then(|l| {
+                let after_eq = l.split('=').nth(1)?;
+                let trimmed = after_eq.trim().trim_matches('"');
+                Some(trimmed.to_string())
+            })
+            .unwrap_or_else(|| "output".to_string())
+    };
+    let rs_exe = crate_dir
+        .join("target/release")
+        .join(&crate_name);
+
+    // Run both
+    let c_result = run_exe(&c_exe, None, &[])?;
+    let rs_result = run_exe(&rs_exe, None, &[])?;
+
+    let passed = c_result.stdout == rs_result.stdout && c_result.exit_code == rs_result.exit_code;
+
+    Ok(DiffTestResult {
+        passed,
+        c_output: c_result.stdout,
+        rust_output: rs_result.stdout,
+        c_compiled,
+        rust_compiled,
+        c_exit_code: c_result.exit_code,
+        rust_exit_code: rs_result.exit_code,
+        c_stderr: c_result.stderr,
+        rust_stderr: rs_result.stderr,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,5 +772,44 @@ fn main() {
     #[test]
     fn test_approximate_match_different_line_count() {
         assert!(!approximate_match("a\nb\n", "a\n", 0.001));
+    }
+
+    #[test]
+    fn test_diff_test_crate_basic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"test_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [[bin]]\nname = \"test_crate\"\npath = \"src/main.rs\"\n",
+        ).unwrap();
+
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            "pub mod utils;\n",
+        ).unwrap();
+
+        std::fs::write(
+            src_dir.join("utils.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        ).unwrap();
+
+        std::fs::write(
+            src_dir.join("main.rs"),
+            "use test_crate::utils::add;\nfn main() { println!(\"{}\", add(3, 4)); }\n",
+        ).unwrap();
+
+        let c_source = r#"
+#include <stdio.h>
+int add(int a, int b) { return a + b; }
+int main() { printf("%d\n", add(3, 4)); return 0; }
+"#;
+
+        let result = run_diff_test_crate(c_source, tmp.path()).unwrap();
+        assert!(result.c_compiled, "C should compile");
+        assert!(result.rust_compiled, "crate should compile as binary. stderr: {}", result.rust_stderr);
+        assert!(result.passed, "C output: {:?}, Rust output: {:?}", result.c_output, result.rust_output);
     }
 }
