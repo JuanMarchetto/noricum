@@ -13,3 +13,4 @@
 proptest-regressions/
 .worktrees/
 check
+*.rlib
