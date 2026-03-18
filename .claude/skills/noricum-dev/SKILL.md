@@ -59,9 +59,32 @@ Pending -> Extracted -> Characterized -> C2RustDone -> Analyzed -> Refined -> Va
 - Stall detection: 2 consecutive unchanged error counts → re-translate at temp 0.7
 - Chunk targets: 400 LOC (medium), 500 LOC (very large)
 
+## Pipeline Improvements (P30-P33, learned from miniz_zip.c 9 runs)
+- **P30: Hybrid Repair Engine** — 3-phase: rule engine (free) → surgical per-function (cheap) → legacy whole-file (expensive)
+- **P31: Assembly Cleanup** — fence stripping, syntax error parsing, use import merging
+- **P32: Brace-Balance Validation** — detect/fix truncated module outputs before assembly
+- **P32b: Smart Truncate + Re-translate** — truncate at last balanced brace, re-translate truncated modules
+- **P33: Type Contract** — types-first modular migration:
+  - `generate_type_contract()` in `type_contract.rs` — single LLM call before module translation
+  - `ModuleSplit` struct returns `shared_context` from `split_into_modules()`
+  - `resolve_header_types()` reads `#include`'d .h files for complete type definitions
+  - Assembly seeds P27 dedup from contract type names
+  - Key learning: shared_context only has .c file content; .h headers must be resolved separately
+- **P34: Graceful Budget Degradation** — adaptive budget `modules*10+25`, soft limits at 80/95/100%
+- **P34b: Skip Phase 3 for Assembly** — Phase 3 legacy repair destroys assembled output; skip it
+
+## Type Contract Prompt Rules (learned from Runs 10-12 manual fix)
+- Function pointer fields → `Option<fn(args) -> ret>`, NOT `Box<dyn Any>`
+- Size/offset/length constants → `pub const NAME: usize`, NOT `u32`
+- Use native `bool` everywhere, never define `type MzBool = i32`
+- Struct fields use CamelCase types but snake_case field names (Rust convention)
+- Every struct must have ALL fields — never empty forward declarations
+
 ## Key Patterns
 - Functions migrate independently, ordered by dependency graph (topological sort)
 - Every migration must pass differential testing (byte-exact stdout match)
 - Translation cache: `.noricum-cache/` keyed by SHA-256 of C source
 - RAG patterns: successful migrations auto-added to PatternStore for future context
 - Structural chunking: data model (structs/constructors) in chunk 0, logic functions in later chunks
+- For multi-file C projects: type definitions live in .h headers, not .c files — must resolve includes
+- Type contract prompt must enforce idiomatic Rust (no raw pointers, no C-style aliases, complete structs)

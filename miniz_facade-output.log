@@ -1,0 +1,474 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running `target/debug/noricum migrate tests/fixtures/miniz/miniz.c --provider deepseek --skip-c2rust --diff-test --artifacts-dir .noricum-artifacts/miniz_facade --report miniz_facade-report.html`
+[2m2026-03-17T21:51:58.548883Z[0m [32m INFO[0m [2mnoricum::commands::migrate[0m[2m:[0m migrating single file [3mfile[0m[2m=[0m/home/marche/noricum/tests/fixtures/miniz/miniz.c
+[2m2026-03-17T21:51:58.549094Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m starting async migration [3mfunction[0m[2m=[0mminiz [3mfile[0m[2m=[0m/home/marche/noricum/tests/fixtures/miniz/miniz.c
+[2m2026-03-17T21:51:58.549302Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m artifact store initialized [3martifacts_dir[0m[2m=[0m.noricum-artifacts/miniz_facade/miniz-20260317-215158
+[2m2026-03-17T21:51:58.596401Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m pre-flight budget estimate [3mfunction[0m[2m=[0mminiz [3mestimated_tokens[0m[2m=[0m201855 [3mc_lines[0m[2m=[0m646 [3meffective_repair_iters[0m[2m=[0m5
+[2m2026-03-17T21:51:58.596441Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m state -> Extracted [3mfunction[0m[2m=[0mminiz [3mstate[0m[2m=[0mExtracted
+[2m2026-03-17T21:51:58.607096Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m difficulty classified [3mfunction[0m[2m=[0mminiz [3mdifficulty[0m[2m=[0mHard
+[2m2026-03-17T21:51:58.607143Z[0m [32m INFO[0m [2mnoricum_agents::providers[0m[2m:[0m selected model [3mprovider[0m[2m=[0m"deepseek" [3mmodel[0m[2m=[0mdeepseek-reasoner [3mdifficulty[0m[2m=[0mHard
+[2m2026-03-17T21:51:58.607161Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m calling analysis agent [3mfunction[0m[2m=[0mminiz [3mmodel[0m[2m=[0mdeepseek-reasoner [3mprovider[0m[2m=[0mDeepSeek
+[2m2026-03-17T21:51:58.607174Z[0m [32m INFO[0m [2mnoricum_agents::analysis[0m[2m:[0m starting analysis [3mfunction[0m[2m=[0m"miniz" [3mmodel[0m[2m=[0m"deepseek-reasoner" [3mtemperature[0m[2m=[0m0.2
+[2m2026-03-17T21:52:38.463157Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m state -> Analyzed [3mfunction[0m[2m=[0mminiz [3mstate[0m[2m=[0mAnalyzed [3mpatterns[0m[2m=[0m["error_codes", "function_pointers", "malloc_free", "void_pointers", "static_tables", "pointer_arithmetic", "bitwise_operations", "state_machines"] [3mstrategy[0m[2m=[0mData model first: translate mz_stream and related structs to Rust, then implement zlib API as safe wrappers around existing Rust compression crates (flate2, miniz_oxide) rather than direct translation. For standalone checksum functions (adler32, crc32), translate directly using const arrays and iterator patterns. [3manalysis_ms[0m[2m=[0m39855
+[2m2026-03-17T21:52:38.480952Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m injecting RAG patterns into translation prompt [3mfunction[0m[2m=[0mminiz [3mpatterns[0m[2m=[0m"global_state_to_struct, void_ptr_to_generic, typedef_to_type_alias"
+[2m2026-03-17T21:52:38.480989Z[0m [32m INFO[0m [2mnoricum_agents::providers[0m[2m:[0m selected model [3mprovider[0m[2m=[0m"deepseek" [3mmodel[0m[2m=[0mdeepseek-reasoner [3mdifficulty[0m[2m=[0mHard
+[2m2026-03-17T21:52:38.480997Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m calling translation agent [3mfunction[0m[2m=[0mminiz [3mmodel[0m[2m=[0mdeepseek-reasoner
+[2m2026-03-17T21:52:38.481062Z[0m [32m INFO[0m [2mnoricum_agents::translation[0m[2m:[0m starting translation [3mmodel[0m[2m=[0m"deepseek-reasoner" [3mdifficulty[0m[2m=[0mhard [3mpattern_count[0m[2m=[0m3 [3mtemperature[0m[2m=[0m0.3
+[2m2026-03-17T21:56:43.382453Z[0m [33m WARN[0m [2mnoricum_core::orchestrator[0m[2m:[0m initial translation has too many unsafe blocks, re-translating with temperature 0.5 [3mfunction[0m[2m=[0mminiz [3munsafe_count[0m[2m=[0m9
+[2m2026-03-17T21:56:43.382499Z[0m [32m INFO[0m [2mnoricum_agents::translation[0m[2m:[0m starting translation [3mmodel[0m[2m=[0m"deepseek-reasoner" [3mdifficulty[0m[2m=[0mhard [3mpattern_count[0m[2m=[0m3 [3mtemperature[0m[2m=[0m0.5
+[2m2026-03-17T22:00:29.294982Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m re-translation reduced unsafe blocks [3mfunction[0m[2m=[0mminiz [3mold_unsafe[0m[2m=[0m9 [3mnew_unsafe[0m[2m=[0m0
+[2m2026-03-17T22:00:29.299433Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m state -> Refined [3mfunction[0m[2m=[0mminiz [3mstate[0m[2m=[0mRefined [3mtranslation_ms[0m[2m=[0m470814
+[2m2026-03-17T22:00:29.299628Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m running validation pipeline [3mfunction[0m[2m=[0mminiz
+[2m2026-03-17T22:00:30.114473Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m validation complete [3mfunction[0m[2m=[0mminiz [3mcompiles[0m[2m=[0mfalse [3munsafe_count[0m[2m=[0m0 [3midiomatic_score[0m[2m=[0m100 [3mdiff_test[0m[2m=[0mNone [3mpassed[0m[2m=[0mfalse
+[2m2026-03-17T22:00:30.115039Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m validation result [3mfunction[0m[2m=[0mminiz [3mstate[0m[2m=[0mRepairing(1) [3mcompiles[0m[2m=[0mfalse [3midiomatic_score[0m[2m=[0m100 [3munsafe_count[0m[2m=[0m0 [3mdiff_test[0m[2m=[0mNone
+[2m2026-03-17T22:00:30.115073Z[0m [32m INFO[0m [2mnoricum_agents::providers[0m[2m:[0m P16: using fast model for repair [3mprovider[0m[2m=[0m"deepseek" [3mmodel[0m[2m=[0m"deepseek-chat"
+[2m2026-03-17T22:00:30.118687Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m entering repair iteration [3mfunction[0m[2m=[0mminiz [3miteration[0m[2m=[0m1 [3mmax[0m[2m=[0m5 [3mmodel[0m[2m=[0mdeepseek-chat
+[2m2026-03-17T22:00:30.118713Z[0m [32m INFO[0m [2mnoricum_agents::repair[0m[2m:[0m starting repair [3mmodel[0m[2m=[0m"deepseek-chat" [3merror_count[0m[2m=[0m39 [3mdiff_count[0m[2m=[0m0 [3miteration[0m[2m=[0m1
+[2m2026-03-17T22:02:00.818309Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m running validation pipeline [3mfunction[0m[2m=[0mminiz
+[2m2026-03-17T22:02:00.936110Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m validation complete [3mfunction[0m[2m=[0mminiz [3mcompiles[0m[2m=[0mfalse [3munsafe_count[0m[2m=[0m0 [3midiomatic_score[0m[2m=[0m100 [3mdiff_test[0m[2m=[0mNone [3mpassed[0m[2m=[0mfalse
+[2m2026-03-17T22:02:00.936331Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m repair iteration result [3mfunction[0m[2m=[0mminiz [3miteration[0m[2m=[0m1 [3mstate[0m[2m=[0mRepairing(2) [3mcompiles[0m[2m=[0mfalse [3midiomatic_score[0m[2m=[0m100 [3munsafe_count[0m[2m=[0m0 [3mdiff_test[0m[2m=[0mNone
+[2m2026-03-17T22:02:00.937047Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m entering repair iteration [3mfunction[0m[2m=[0mminiz [3miteration[0m[2m=[0m2 [3mmax[0m[2m=[0m5 [3mmodel[0m[2m=[0mdeepseek-chat
+[2m2026-03-17T22:02:00.937061Z[0m [32m INFO[0m [2mnoricum_agents::repair[0m[2m:[0m starting repair [3mmodel[0m[2m=[0m"deepseek-chat" [3merror_count[0m[2m=[0m3 [3mdiff_count[0m[2m=[0m0 [3miteration[0m[2m=[0m2
+[2m2026-03-17T22:03:30.873366Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m running validation pipeline [3mfunction[0m[2m=[0mminiz
+[2m2026-03-17T22:03:31.025400Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m validation complete [3mfunction[0m[2m=[0mminiz [3mcompiles[0m[2m=[0mfalse [3munsafe_count[0m[2m=[0m0 [3midiomatic_score[0m[2m=[0m100 [3mdiff_test[0m[2m=[0mNone [3mpassed[0m[2m=[0mfalse
+[2m2026-03-17T22:03:31.025629Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m repair iteration result [3mfunction[0m[2m=[0mminiz [3miteration[0m[2m=[0m2 [3mstate[0m[2m=[0mRepairing(3) [3mcompiles[0m[2m=[0mfalse [3midiomatic_score[0m[2m=[0m100 [3munsafe_count[0m[2m=[0m0 [3mdiff_test[0m[2m=[0mNone
+[2m2026-03-17T22:03:31.026553Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m entering repair iteration [3mfunction[0m[2m=[0mminiz [3miteration[0m[2m=[0m3 [3mmax[0m[2m=[0m5 [3mmodel[0m[2m=[0mdeepseek-chat
+[2m2026-03-17T22:03:31.026577Z[0m [33m WARN[0m [2mnoricum_core::orchestrator[0m[2m:[0m repair stalled — error count unchanged [3mfunction[0m[2m=[0mminiz [3mstall_count[0m[2m=[0m1 [3merror_count[0m[2m=[0m3
+[2m2026-03-17T22:03:31.026592Z[0m [32m INFO[0m [2mnoricum_agents::repair[0m[2m:[0m starting repair [3mmodel[0m[2m=[0m"deepseek-chat" [3merror_count[0m[2m=[0m3 [3mdiff_count[0m[2m=[0m0 [3miteration[0m[2m=[0m3
+[2m2026-03-17T22:05:02.364515Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m running validation pipeline [3mfunction[0m[2m=[0mminiz
+[2m2026-03-17T22:05:02.514495Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m validation complete [3mfunction[0m[2m=[0mminiz [3mcompiles[0m[2m=[0mfalse [3munsafe_count[0m[2m=[0m0 [3midiomatic_score[0m[2m=[0m100 [3mdiff_test[0m[2m=[0mNone [3mpassed[0m[2m=[0mfalse
+[2m2026-03-17T22:05:02.514714Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m repair iteration result [3mfunction[0m[2m=[0mminiz [3miteration[0m[2m=[0m3 [3mstate[0m[2m=[0mRepairing(4) [3mcompiles[0m[2m=[0mfalse [3midiomatic_score[0m[2m=[0m100 [3munsafe_count[0m[2m=[0m0 [3mdiff_test[0m[2m=[0mNone
+[2m2026-03-17T22:05:02.515635Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m entering repair iteration [3mfunction[0m[2m=[0mminiz [3miteration[0m[2m=[0m4 [3mmax[0m[2m=[0m5 [3mmodel[0m[2m=[0mdeepseek-chat
+[2m2026-03-17T22:05:02.515650Z[0m [33m WARN[0m [2mnoricum_core::orchestrator[0m[2m:[0m repair stalled — error count unchanged [3mfunction[0m[2m=[0mminiz [3mstall_count[0m[2m=[0m2 [3merror_count[0m[2m=[0m3
+[2m2026-03-17T22:05:02.515669Z[0m [33m WARN[0m [2mnoricum_core::orchestrator[0m[2m:[0m repair stalled — attempting re-translation with temperature 0.7 [3mfunction[0m[2m=[0mminiz [3mstall_count[0m[2m=[0m2
+[2m2026-03-17T22:05:02.541221Z[0m [32m INFO[0m [2mnoricum_agents::translation[0m[2m:[0m starting translation [3mmodel[0m[2m=[0m"deepseek-chat" [3mdifficulty[0m[2m=[0mhard [3mpattern_count[0m[2m=[0m3 [3mtemperature[0m[2m=[0m0.7
+[2m2026-03-17T22:06:34.309512Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m re-translation complete, resetting repair loop [3mfunction[0m[2m=[0mminiz
+[2m2026-03-17T22:06:34.309548Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m running validation pipeline [3mfunction[0m[2m=[0mminiz
+[2m2026-03-17T22:06:34.550308Z[0m [33m WARN[0m [2mnoricum_validation[0m[2m:[0m diff test skipped: no main() and harness generation failed [3mfunction[0m[2m=[0mminiz
+[2m2026-03-17T22:06:34.550343Z[0m [32m INFO[0m [2mnoricum_validation[0m[2m:[0m validation complete [3mfunction[0m[2m=[0mminiz [3mcompiles[0m[2m=[0mtrue [3munsafe_count[0m[2m=[0m0 [3midiomatic_score[0m[2m=[0m93 [3mdiff_test[0m[2m=[0mNone [3mpassed[0m[2m=[0mtrue
+[2m2026-03-17T22:06:34.551796Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m new best version from re-translation [3mfunction[0m[2m=[0mminiz [3mbest_score[0m[2m=[0m93 [3mbest_unsafe[0m[2m=[0m0 [3mbest_compiles[0m[2m=[0mtrue
+[2m2026-03-17T22:06:34.551948Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m re-translation passed validation directly [3mfunction[0m[2m=[0mminiz
+[2m2026-03-17T22:06:34.551981Z[0m [32m INFO[0m [2mnoricum_agents::providers[0m[2m:[0m selected model [3mprovider[0m[2m=[0m"deepseek" [3mmodel[0m[2m=[0mdeepseek-reasoner [3mdifficulty[0m[2m=[0mHard
+[2m2026-03-17T22:06:34.551995Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m calling test generation agent [3mfunction[0m[2m=[0mminiz [3mmodel[0m[2m=[0mdeepseek-reasoner
+[2m2026-03-17T22:06:34.552007Z[0m [32m INFO[0m [2mnoricum_agents::test_gen[0m[2m:[0m starting test generation [3mfunction[0m[2m=[0m"miniz" [3mmodel[0m[2m=[0m"deepseek-reasoner" [3mtemperature[0m[2m=[0m0.4
+[2m2026-03-17T22:07:39.824122Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m test generation succeeded [3mfunction[0m[2m=[0mminiz [3mtest_code_len[0m[2m=[0m6686 [3mtest_gen_ms[0m[2m=[0m65270
+[2m2026-03-17T22:07:39.829928Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m async migration complete [3mfunction[0m[2m=[0mminiz [3mstate[0m[2m=[0mValidated [3midiomatic_score[0m[2m=[0mSome(93) [3munsafe_count[0m[2m=[0mSome(0) [3mtotal_ms[0m[2m=[0m941280 [3mllm_calls[0m[2m=[0m8 [3mrepair_iters[0m[2m=[0m3
+[2m2026-03-17T22:07:39.831037Z[0m [32m INFO[0m [2mnoricum_core::orchestrator[0m[2m:[0m all pipeline artifacts saved [3martifacts_dir[0m[2m=[0m.noricum-artifacts/miniz_facade/miniz-20260317-215158
+Migration result for: miniz
+  State: Validated
+  Difficulty: Hard
+  Idiomatic score: 93/100
+  Unsafe blocks: 0
+  Output: output/miniz.rs
+
+--- Generated Rust ---
+use std::num::Wrapping;
+
+// Adler-32 checksum implementation
+pub fn mz_adler32(adler: u32, ptr: &[u8]) -> u32 {
+    if ptr.is_empty() {
+        return 1; // MZ_ADLER32_INIT
+    }
+
+    let mut s1 = Wrapping(adler & 0xFFFF);
+    let mut s2 = Wrapping(adler >> 16);
+    let mut remaining = ptr.len();
+    let mut idx = 0;
+
+    while remaining > 0 {
+        let block_len = if remaining < 5552 { remaining } else { 5552 };
+        let block_end = idx + block_len;
+        
+        // Process 8 bytes at a time when possible
+        let mut i = idx;
+        while i + 7 < block_end {
+            s1 += Wrapping(ptr[i] as u32);
+            s2 += s1;
+            s1 += Wrapping(ptr[i + 1] as u32);
+            s2 += s1;
+            s1 += Wrapping(ptr[i + 2] as u32);
+            s2 += s1;
+            s1 += Wrapping(ptr[i + 3] as u32);
+            s2 += s1;
+            s1 += Wrapping(ptr[i + 4] as u32);
+            s2 += s1;
+            s1 += Wrapping(ptr[i + 5] as u32);
+            s2 += s1;
+            s1 += Wrapping(ptr[i + 6] as u32);
+            s2 += s1;
+            s1 += Wrapping(ptr[i + 7] as u32);
+            s2 += s1;
+            i += 8;
+        }
+        
+        // Process remaining bytes in the block
+        for &byte in &ptr[i..block_end] {
+            s1 += Wrapping(byte as u32);
+            s2 += s1;
+        }
+        
+        s1 %= 65521;
+        s2 %= 65521;
+        remaining -= block_len;
+        idx = block_end;
+    }
+    
+    ((s2.0 << 16) | s1.0) as u32
+}
+
+// CRC-32 implementation using lookup table
+pub fn mz_crc32(crc: u32, ptr: &[u8]) -> u32 {
+    static CRC_TABLE: [u32; 256] = [
+        0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F, 0xE963A535,
+        0x9E6495A3, 0x0EDB8832, 0x79DCB8A4, 0xE0D5E91E, 0x97D2D988, 0x09B64C2B, 0x7EB17CBD,
+        0xE7B82D07, 0x90BF1D91, 0x1DB71064, 0x6AB020F2, 0xF3B97148, 0x84BE41DE, 0x1ADAD47D,
+        0x6DDDE4EB, 0xF4D4B551, 0x83D385C7, 0x136C9856, 0x646BA8C0, 0xFD62F97A, 0x8A65C9EC,
+        0x14015C4F, 0x63066CD9, 0xFA0F3D63, 0x8D080DF5, 0x3B6E20C8, 0x4C69105E, 0xD56041E4,
+        0xA2677172, 0x3C03E4D1, 0x4B04D447, 0xD20D85FD, 0xA50AB56B, 0x35B5A8FA, 0x42B2986C,
+        0xDBBBC9D6, 0xACBCF940, 0x32D86CE3, 0x45DF5C75, 0xDCD60DCF, 0xABD13D59, 0x26D930AC,
+        0x51DE003A, 0xC8D75180, 0xBFD06116, 0x21B4F4B5, 0x56B3C423, 0xCFBA9599, 0xB8BDA50F,
+        0x2802B89E, 0x5F058808, 0xC60CD9B2, 0xB10BE924, 0x2F6F7C87, 0x58684C11, 0xC1611DAB,
+        0xB6662D3D, 0x76DC4190, 0x01DB7106, 0x98D220BC, 0xEFD5102A, 0x71B18589, 0x06B6B51F,
+        0x9FBFE4A5, 0xE8B8D433, 0x7807C9A2, 0x0F00F934, 0x9609A88E, 0xE10E9818, 0x7F6A0DBB,
+        0x086D3D2D, 0x91646C97, 0xE6635C01, 0x6B6B51F4, 0x1C6C6162, 0x856530D8, 0xF262004E,
+        0x6C0695ED, 0x1B01A57B, 0x8208F4C1, 0xF50FC457, 0x65B0D9C6, 0x12B7E950, 0x8BBEB8EA,
+        0xFCB9887C, 0x62DD1DDF, 0x15DA2D49, 0x8CD37CF3, 0xFBD44C65, 0x4DB26158, 0x3AB551CE,
+        0xA3BC0074, 0xD4BB30E2, 0x4ADFA541, 0x3DD895D7, 0xA4D1C46D, 0xD3D6F4FB, 0x4369E96A,
+        0x346ED9FC, 0xAD678846, 0xDA60B8D0, 0x44042D73, 0x33031DE5, 0xAA0A4C5F, 0xDD0D7CC9,
+        0x5005713C, 0x270241AA, 0xBE0B1010, 0xC90C2086, 0x5768B525, 0x206F85B3, 0xB966D409,
+        0xCE61E49F, 0x5EDEF90E, 0x29D9C998, 0xB0D09822, 0xC7D7A8B4, 0x59B33D17, 0x2EB40D81,
+        0xB7BD5C3B, 0xC0BA6CAD, 0xEDB88320, 0x9ABFB3B6, 0x03B6E20C, 0x74B1D29A, 0xEAD54739,
+        0x9DD277AF, 0x04DB2615, 0x73DC1683, 0xE3630B12, 0x94643B84, 0x0D6D6A3E, 0x7A6A5AA8,
+        0xE40ECF0B, 0x9309FF9D, 0x0A00AE27, 0x7D079EB1, 0xF00F9344, 0x8708A3D2, 0x1E01F268,
+        0x6906C2FE, 0xF762575D, 0x806567CB, 0x196C3671, 0x6E6B06E7, 0xFED41B76, 0x89D32BE0,
+        0x10DA7A5A, 0x67DD4ACC, 0xF9B9DF6F, 0x8EBEEFF9, 0x17B7BE43, 0x60B08ED5, 0xD6D6A3E8,
+        0xA1D1937E, 0x38D8C2C4, 0x4FDFF252, 0xD1BB67F1, 0xA6BC5767, 0x3FB506DD, 0x48B2364B,
+        0xD80D2BDA, 0xAF0A1B4C, 0x36034AF6, 0x41047A60, 0xDF60EFC3, 0xA867DF55, 0x316E8EEF,
+        0x4669BE79, 0xCB61B38C, 0xBC66831A, 0x256FD2A0, 0x5268E236, 0xCC0C7795, 0xBB0B4703,
+        0x220216B9, 0x5505262F, 0xC5BA3BBE, 0xB2BD0B28, 0x2BB45A92, 0x5CB36A04, 0xC2D7FFA7,
+        0xB5D0CF31, 0x2CD99E8B, 0x5BDEAE1D, 0x9B64C2B0, 0xEC63F226, 0x756AA39C, 0x026D930A,
+        0x9C0906A9, 0xEB0E363F, 0x72076785, 0x05005713, 0x95BF4A82, 0xE2B87A14, 0x7BB12BAE,
+        0x0CB61B38, 0x92D28E9B, 0xE5D5BE0D, 0x7CDCEFB7, 0x0BDBDF21, 0x86D3D2D4, 0xF1D4E242,
+        0x68DDB3F8, 0x1FDA836E, 0x81BE16CD, 0xF6B9265B, 0x6FB077E1, 0x18B74777, 0x88085AE6,
+        0xFF0F6A70, 0x66063BCA, 0x11010B5C, 0x8F659EFF, 0xF862AE69, 0x616BFFD3, 0x166CCF45,
+        0xA00AE278, 0xD70DD2EE, 0x4E048354, 0x3903B3C2, 0xA7672661, 0xD06016F7, 0x4969474D,
+        0x3E6E77DB, 0xAED16A4A, 0xD9D65ADC, 0x40DF0B66, 0x37D83BF0, 0xA9BCAE53, 0xDEBB9EC5,
+        0x47B2CF7F, 0x30B5FFE9, 0xBDBDF21C, 0xCABAC28A, 0x53B39330, 0x24B4A3A6, 0xBAD03605,
+        0xCDD70693, 0x54DE5729, 0x23D967BF, 0xB3667A2E, 0xC4614AB8, 0x5D681B02, 0x2A6F2B94,
+        0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D,
+    ];
+
+    let mut crc32 = crc ^ 0xFFFFFFFF;
+    let mut chunks = ptr.chunks_exact(4);
+
+    // Process 4 bytes at a time
+    for chunk in &mut chunks {
+        crc32 = (crc32 >> 8) ^ CRC_TABLE[((crc32 ^ chunk[0] as u32) & 0xFF) as usize];
+        crc32 = (crc32 >> 8) ^ CRC_TABLE[((crc32 ^ chunk[1] as u32) & 0xFF) as usize];
+        crc32 = (crc32 >> 8) ^ CRC_TABLE[((crc32 ^ chunk[2] as u32) & 0xFF) as usize];
+        crc32 = (crc32 >> 8) ^ CRC_TABLE[((crc32 ^ chunk[3] as u32) & 0xFF) as usize];
+    }
+
+    // Process remaining bytes
+    for &byte in chunks.remainder() {
+        crc32 = (crc32 >> 8) ^ CRC_TABLE[((crc32 ^ byte as u32) & 0xFF) as usize];
+    }
+
+    !crc32
+}
+
+// Error codes as enum for type safety
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MzError {
+    Ok,
+    StreamEnd,
+    NeedDict,
+    Errno,
+    StreamError,
+    DataError,
+    MemError,
+    BufError,
+    VersionError,
+    ParamError,
+}
+
+impl MzError {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MzError::Ok => "",
+            MzError::StreamEnd => "stream end",
+            MzError::NeedDict => "need dictionary",
+            MzError::Errno => "file error",
+            MzError::StreamError => "stream error",
+            MzError::DataError => "data error",
+            MzError::MemError => "out of memory",
+            MzError::BufError => "buf error",
+            MzError::VersionError => "version error",
+            MzError::ParamError => "parameter error",
+        }
+    }
+}
+
+// Convert integer error code to enum
+pub fn mz_error(err: i32) -> Option<&'static str> {
+    match err {
+        0 => Some(""), // MZ_OK
+        1 => Some("stream end"), // MZ_STREAM_END
+        2 => Some("need dictionary"), // MZ_NEED_DICT
+        -1 => Some("file error"), // MZ_ERRNO
+        -2 => Some("stream error"), // MZ_STREAM_ERROR
+        -3 => Some("data error"), // MZ_DATA_ERROR
+        -4 => Some("out of memory"), // MZ_MEM_ERROR
+        -5 => Some("buf error"), // MZ_BUF_ERROR
+        -6 => Some("version error"), // MZ_VERSION_ERROR
+        -10 => Some("parameter error"), // MZ_PARAM_ERROR
+        _ => None,
+    }
+}
+
+// Version string
+pub fn mz_version() -> &'static str {
+    "10.2.0" // MZ_VERSION
+}
+
+// Compression bound calculation
+pub fn mz_compress_bound(source_len: u32) -> u32 {
+    // Conservative upper bound as in original C code
+    let base = 128 + (source_len * 110) / 100;
+    let extra = 128 + source_len + ((source_len / (31 * 1024)) + 1) * 5;
+    std::cmp::max(base, extra)
+}
+
+--- Differential Test ---
+[2m2026-03-17T22:07:40.009104Z[0m [32m INFO[0m [2mnoricum_tools::diff_test[0m[2m:[0m differential test: compilation failure [3mc_compiled[0m[2m=[0mfalse [3mrust_compiled[0m[2m=[0mfalse
+  FAILED:
+    C compilation failed
+    Rust compilation failed
+
+--- Generated Tests ---
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_adler32_empty() {
+        // Empty buffer should return initial value
+        let data = [];
+        let result = mz_adler32(1, &data);
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_adler32_simple() {
+        // Test with simple string
+        let data = b"Hello, world!";
+        let result = mz_adler32(1, data);
+        // Expected value computed from known implementation
+        assert_eq!(result, 0x205e048b);
+    }
+
+    #[test]
+    fn test_adler32_large() {
+        // Test with larger data to exercise block processing
+        let data = vec![42u8; 10000];
+        let result = mz_adler32(1, &data);
+        // Verify with successive calls
+        let half1 = mz_adler32(1, &data[..5000]);
+        let half2 = mz_adler32(half1, &data[5000..]);
+        assert_eq!(result, half2);
+    }
+
+    #[test]
+    fn test_adler32_rolling() {
+        // Test that Adler32 is rolling checksum
+        let data1 = b"Hello";
+        let data2 = b", world!";
+        
+        let full = mz_adler32(1, b"Hello, world!");
+        let partial = mz_adler32(1, data1);
+        let continued = mz_adler32(partial, data2);
+        
+        assert_eq!(full, continued);
+    }
+
+    #[test]
+    fn test_adler32_zero() {
+        // Test with zero initial value
+        let data = b"test";
+        let result = mz_adler32(0, data);
+        // Adler32 with zero seed should work
+        assert!(result > 0);
+    }
+
+    #[test]
+    fn test_crc32_empty() {
+        // Empty buffer should return initial value
+        let data = [];
+        let result = mz_crc32(0, &data);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_crc32_simple() {
+        // Test with simple string - CRC32 of "123456789"
+        let data = b"123456789";
+        let result = mz_crc32(0, data);
+        // Known CRC32 value for "123456789"
+        assert_eq!(result, 0xcbf43926);
+    }
+
+    #[test]
+    fn test_crc32_known_sequence() {
+        // Test with known CRC32 test vectors
+        let data = b"The quick brown fox jumps over the lazy dog";
+        let result = mz_crc32(0, data);
+        // Known CRC32 value for this phrase
+        assert_eq!(result, 0x414fa339);
+    }
+
+    #[test]
+    fn test_crc32_rolling() {
+        // Test that CRC32 can be computed incrementally
+        let data1 = b"Hello, ";
+        let data2 = b"world!";
+        
+        let crc1 = mz_crc32(0, data1);
+        let crc2 = mz_crc32(crc1, data2);
+        let full = mz_crc32(0, b"Hello, world!");
+        
+        assert_eq!(crc2, full);
+    }
+
+    #[test]
+    fn test_crc32_large_all_zeros() {
+        // Test with large zero-filled buffer
+        let data = vec![0u8; 10000];
+        let result = mz_crc32(0, &data);
+        // CRC32 of all zeros should be 0
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_crc32_initial_value() {
+        // Test with non-zero initial CRC value
+        let data = b"test";
+        let result1 = mz_crc32(0xFFFFFFFF, data);
+        let result2 = mz_crc32(0, data);
+        // Results should differ
+        assert_ne!(result1, result2);
+    }
+
+    #[test]
+    fn test_mz_error_valid_codes() {
+        // Test all valid error codes
+        assert_eq!(mz_error(0), Some(""));
+        assert_eq!(mz_error(1), Some("stream end"));
+        assert_eq!(mz_error(2), Some("need dictionary"));
+        assert_eq!(mz_error(-1), Some("file error"));
+        assert_eq!(mz_error(-2), Some("stream error"));
+        assert_eq!(mz_error(-3), Some("data error"));
+        assert_eq!(mz_error(-4), Some("out of memory"));
+        assert_eq!(mz_error(-5), Some("buf error"));
+        assert_eq!(mz_error(-6), Some("version error"));
+        assert_eq!(mz_error(-10), Some("parameter error"));
+    }
+
+    #[test]
+    fn test_mz_error_invalid_code() {
+        // Test invalid error code returns None
+        assert_eq!(mz_error(999), None);
+        assert_eq!(mz_error(-999), None);
+    }
+
+    #[test]
+    fn test_mz_version() {
+        // Version should match expected format
+        let version = mz_version();
+        assert!(!version.is_empty());
+        // Version should contain numbers and dots
+        assert!(version.contains('.'));
+    }
+
+    #[test]
+    fn test_mz_compress_bound_zero() {
+        // Bound for zero length
+        let bound = mz_compress_bound(0);
+        // Minimum bound should be at least 128
+        assert!(bound >= 128);
+    }
+
+    #[test]
+    fn test_mz_compress_bound_small() {
+        // Bound for small input
+        let bound = mz_compress_bound(100);
+        // Should be larger than input
+        assert!(bound > 100);
+        // Specific calculation: 128 + (100*110)/100 = 238, 128+100+((100/31744)+1)*5 = 233, max is 238
+        assert_eq!(bound, 238);
+    }
+
+    #[test]
+    fn test_mz_compress_bound_large() {
+        // Bound for large input
+        let bound = mz_compress_bound(100000);
+        // Should be larger than input
+        assert!(bound > 100000);
+        // Verify calculation
+        let base = 128 + (100000 * 110) / 100;
+        let extra = 128 + 100000 + ((100000 / (31 * 1024)) + 1) * 5;
+        let expected = std::cmp::max(base, extra);
+        assert_eq!(bound, expected);
+    }
+
+    #[test]
+    fn test_mz_compress_bound_overflow_safety() {
+        // Test with maximum u32 value
+        let bound = mz_compress_bound(u32::MAX);
+        // Should not panic and return some value
+        assert!(bound > 0);
+    }
+
+    #[test]
+    fn test_adler32_crc32_consistency() {
+        // Test that same data produces different but consistent results
+        let data = b"Consistency test data";
+        
+        let adler1 = mz_adler32(1, data);
+        let adler2 = mz_adler32(1, data);
+        assert_eq!(adler1, adler2);
+        
+        let crc1 = mz_crc32(0, data);
+        let crc2 = mz_crc32(0, data);
+        assert_eq!(crc1, crc2);
+        
+        // Adler and CRC should be different
+        assert_ne!(adler1, crc1);
+    }
+
+    #[test]
+    fn test_adler32_overflow_regression() {
+        // Test with data that would cause overflow without Wrapping
+        let data = vec![255u8; 5553]; // Just over block size
+        let result = mz_adler32(1, &data);
+        // Should not panic
+        assert!(result > 0);
+    }
+
+    #[test]
+    fn test_crc32_partial_chunks() {
+        // Test CRC32 with data not aligned to 4 bytes
+        let data = b"123"; // 3 bytes
+        let result = mz_crc32(0, data);
+        // Should compute correctly
+        assert_eq!(result, 0x884863d2);
+        
+        let data2 = b"12345"; // 5 bytes
+        let result2 = mz_crc32(0, data2);
+        // Should compute correctly
+        assert_eq!(result2, 0x31fddb15);
+    }
+}
+
+Note: This code was generated by an LLM and verified by differential testing
+against specific inputs. Review before deploying to production.
+  HTML report: miniz_facade-report.html
