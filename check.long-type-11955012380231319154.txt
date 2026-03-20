@@ -1,1 +1,0 @@
-(dyn for<'a, 'b> std::ops::Fn(&'a mut (dyn std::any::Any + 'static), u64, &'b [u8]) -> std::result::Result<usize, ()> + 'static)

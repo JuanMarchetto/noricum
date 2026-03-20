@@ -1,5 +1,0 @@
-[2m2026-03-07T03:40:12.463965Z[0m [32m INFO[0m [2mnoricum::commands::review[0m[2m:[0m starting behavioral equivalence review [3mc_path[0m[2m=[0mtests/fixtures/simple/linked_list.c [3mrust_path[0m[2m=[0moutput/simple/linked_list.rs
-[2m2026-03-07T03:40:12.678426Z[0m [32m INFO[0m [2mnoricum_tools::diff_test[0m[2m:[0m differential test complete [3mpassed[0m[2m=[0mtrue [3mc_len[0m[2m=[0m3 [3mrust_len[0m[2m=[0m3 [3mc_exit[0m[2m=[0m0 [3mrust_exit[0m[2m=[0m0
-[2m2026-03-07T03:40:12.709148Z[0m [32m INFO[0m [2mnoricum_agents::providers[0m[2m:[0m selected model [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0mclaude-sonnet-4-0 [3mdifficulty[0m[2m=[0mMedium
-[2m2026-03-07T03:40:12.709186Z[0m [32m INFO[0m [2mnoricum_agents::behavioral_review[0m[2m:[0m starting behavioral equivalence review [3mc_lines[0m[2m=[0m50 [3mrust_lines[0m[2m=[0m36 [3mmodel[0m[2m=[0m"claude-sonnet-4-0"
-[2m2026-03-07T03:40:33.758898Z[0m [32m INFO[0m [2mnoricum_agents::behavioral_review[0m[2m:[0m behavioral review complete [3mverdict[0m[2m=[0mLIKELY EQUIVALENT [3mconfidence[0m[2m=[0m85

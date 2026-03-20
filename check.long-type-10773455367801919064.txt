@@ -1,1 +1,0 @@
-std::option::Option<std::boxed::Box<(dyn std::ops::Fn(*mut std::ffi::c_void, *mut std::ffi::c_void) + 'static)>>
