@@ -419,6 +419,7 @@ fn build_translation_prompt(c_source: &str, interface_skeletons: &[(PathBuf, Str
 
 /// Select model for a single module based on its interface LOC,
 /// using a cheaper model when the module is small.
+/// Respects the `--provider` flag for model selection.
 fn select_module_model(interface_loc: u32, config: &MigrationConfig) -> String {
     if config.ollama_model.is_some() {
         return config
@@ -427,11 +428,17 @@ fn select_module_model(interface_loc: u32, config: &MigrationConfig) -> String {
             .unwrap_or("qwen2.5-coder:32b")
             .to_string();
     }
-    // Per-module: use Haiku for small modules, Sonnet for medium
-    match interface_loc {
-        0..=100 => "claude-haiku-4-5-20251001".to_string(),
-        101..=500 => "claude-sonnet-4-6".to_string(),
-        _ => "claude-opus-4-6".to_string(),
+    let provider = config
+        .primary_provider
+        .as_deref()
+        .unwrap_or("anthropic");
+    match provider {
+        "deepseek" => "deepseek-chat".to_string(),
+        _ => match interface_loc {
+            0..=100 => "claude-haiku-4-5-20251001".to_string(),
+            101..=500 => "claude-sonnet-4-6".to_string(),
+            _ => "claude-opus-4-6".to_string(),
+        },
     }
 }
 
@@ -1177,6 +1184,18 @@ mod tests {
             model.contains("sonnet"),
             "medium module should use Sonnet: {model}"
         );
+    }
+
+    #[test]
+    fn test_select_module_model_deepseek() {
+        let config = MigrationConfig {
+            primary_provider: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+        // All sizes should route to deepseek-chat
+        assert_eq!(select_module_model(50, &config), "deepseek-chat");
+        assert_eq!(select_module_model(200, &config), "deepseek-chat");
+        assert_eq!(select_module_model(600, &config), "deepseek-chat");
     }
 
     #[test]
