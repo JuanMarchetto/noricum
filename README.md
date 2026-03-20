@@ -4,9 +4,9 @@
 
 [![CI](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanMarchetto/noricum/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-317%2B%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
+[![Tests](https://img.shields.io/badge/tests-435%2B%20passing-brightgreen)](https://github.com/JuanMarchetto/noricum)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
-[![LOC](https://img.shields.io/badge/LOC-~18%2C000-blue)](https://github.com/JuanMarchetto/noricum)
+[![LOC](https://img.shields.io/badge/LOC-~38%2C000-blue)](https://github.com/JuanMarchetto/noricum)
 
 <!-- Demo GIF: replace with actual recording -->
 <!-- ![Noricum Demo](demo.gif) -->
@@ -64,18 +64,18 @@ Validated migrations on real-world C libraries (LLM-powered pipeline):
 
 | Source | Lines | Functions | Score | Unsafe | Diff Test | Repairs |
 |--------|-------|-----------|-------|--------|-----------|---------|
+| **`http_parser.c`** | **3,680** | **58** | **100** | **0** | **PASS** | **7** |
+| **`expr_eval.c`** | **1,686** | **74** | **100** | **0** | **PASS** | **0** |
 | **`cjson_full_combined.c`** | **1,441** | **~60** | **95+** | **0** | **PASS** | **0** |
-| **`expr_eval.c`** | **1,686** | **74** | **100/100** | **0** | **PASS** | **0** |
-| **`genann.c`** | **642** | **18** | **100/100** | **0** | **PASS** | **1** |
-| **`cjson_combined.c`** | **520** | **12** | **100/100** | **0** | **PASS** | **1** |
-| `hash_table.c` | 204 | 8 | 89/100 | 0 | PASS | 0 |
-| `miniz_test.c` | 154 | 2 | 93/100 | 0 | PASS | 0 |
+| **`olive.c`** | **1,022** | **24** | **100** | **0** | **PASS** | **0** |
+| **`genann.c`** | **642** | **18** | **100** | **0** | **PASS** | **1** |
+| **`cjson_combined.c`** | **520** | **12** | **100** | **0** | **PASS** | **1** |
+| `hash_table.c` | 204 | 8 | 89 | 0 | PASS | 0 |
+| `miniz_test.c` | 154 | 2 | 93 | 0 | PASS | 0 |
 
 Plus 9 smaller fixtures (13-50 LOC each): all pass with 0 unsafe, scores 92-100.
 
 **0 unsafe blocks across all validated files. All diff tests pass byte-exact.**
-
-**Tested range:** Files up to ~1,700 LOC migrate reliably. A 4,429 LOC file (miniz compression library) exceeded the current pipeline's capacity — see [Known Limitations](#known-limitations).
 
 ### Flagship Migrations
 
@@ -121,9 +121,22 @@ Key transformations:
 - glibc RNG reimplemented (TYPE_3 degree-31 LFSR)
 - `FILE*` I/O → `std::io::Read`/`Write` traits
 
+### CRUST-Bench Evaluation (98 projects)
+
+Evaluated on [CRUST-Bench](https://github.com/nicholasgasior/CRUST-Bench), a benchmark of 98 real-world C-to-Rust migration tasks with test suites. Uses cost-optimized multi-provider routing (DeepSeek for translation, Claude for repair).
+
+| Metric | Result |
+|--------|--------|
+| **Test pass (PASS)** | **26/98 (26.5%)** |
+| **Compiles (BUILD_OK)** | **15/98 (15.3%)** |
+| **Compile rate** | **41.8%** |
+| **Total score** | **3,350 / 9,800** |
+
+Notable PASS projects: CircularBuffer, FastHamming, coroutine, fft, geofence, kd3, murmurhash_c, rbtree-lab, roaring-bitmap, carrays, libbeaufort, rubiksolver, ulidgen, and 13 others.
+
 ### Known Limitations
 
-- **Scale ceiling:** Reliable up to ~1,700 LOC single-file migrations. Files >2,000 LOC use chunked translation which may introduce cross-chunk inconsistencies. A 4,429 LOC file (miniz compression) resulted in `FallbackUnsafe` — documented in [docs/research/miniz-migration-attempt.md](docs/research/miniz-migration-attempt.md)
+- **Scale ceiling:** Reliable up to ~1,700 LOC single-file migrations. Files >2,000 LOC use modular migration (automatic module splitting + assembly). Successfully migrated miniz_zip.c (4,895 LOC → 8,304 LOC Rust) with manual assembly assistance
 - **C only:** C++ is not currently supported. Target is C11 (`-std=gnu11` with POSIX extensions)
 - **LLM dependency:** Full pipeline requires an Anthropic API key (Claude). Ollama local fallback is available but produces lower quality output. Cost per migration: ~$0.02 for small files, ~$5-15 for complex 1,000+ LOC files
 - **Non-deterministic:** LLM outputs vary between runs. The same C file may produce different (but equivalent) Rust translations
