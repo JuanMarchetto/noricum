@@ -31,6 +31,7 @@ pub struct MigrateParams {
     pub max_unsafe: Option<u32>,
     pub crate_output: Option<std::path::PathBuf>,
     pub ensemble: bool,
+    pub task_configs: Vec<String>,
 }
 
 pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
@@ -53,12 +54,19 @@ pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
         );
     }
 
+    let force_ollama =
+        opts.ollama_model.is_some() || opts.provider.as_deref() == Some("ollama");
     let config = MigrationConfig {
-        // Force Ollama when --ollama-model is explicitly provided
-        anthropic_api_key: if opts.ollama_model.is_some() {
+        // Force Ollama: clear API keys so fallback chain doesn't intercept
+        anthropic_api_key: if force_ollama {
             None
         } else {
             MigrationConfig::default().anthropic_api_key
+        },
+        deepseek_api_key: if force_ollama {
+            None
+        } else {
+            MigrationConfig::default().deepseek_api_key
         },
         primary_provider: opts.provider,
         fuzz_test: opts.fuzz,
@@ -83,6 +91,21 @@ pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
             Some(0) => None,
             Some(n) => Some(n),
             None => MigrationConfig::default().max_llm_calls,
+        },
+        task_routing: {
+            let mut routing = noricum_agents::TaskRouting::default();
+            for spec in &opts.task_configs {
+                match noricum_agents::providers::parse_task_routing_spec(spec) {
+                    Ok((task, task_config)) => {
+                        info!(task = %task, ?task_config, "P35: task routing override");
+                        routing.set(task, task_config);
+                    }
+                    Err(e) => {
+                        anyhow::bail!("invalid --task-config '{spec}': {e}");
+                    }
+                }
+            }
+            routing
         },
         ..MigrationConfig::default()
     };

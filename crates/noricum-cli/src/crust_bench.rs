@@ -1013,6 +1013,7 @@ fn create_llm_client(config: &MigrationConfig) -> Result<LlmClient> {
             .ollama_model
             .clone()
             .unwrap_or_else(|| "qwen2.5-coder:32b".to_string()),
+        ollama_num_ctx: config.ollama_num_ctx.unwrap_or(131072),
     };
     providers::create_llm_client(&provider_config)
         .map_err(|e| anyhow::anyhow!("failed to create LLM client: {e}"))

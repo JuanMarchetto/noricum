@@ -904,6 +904,195 @@ fn combine_accumulated_chunks(chunks: &[String]) -> String {
     output
 }
 
+/// P34: Incremental completion pass — translate missing functions in batches.
+///
+/// Given an existing (partial) Rust translation and the full C source, identifies
+/// which C functions are missing from the Rust output and translates them in
+/// batches. Each batch sends the existing Rust code as context so the LLM can
+/// reference existing types and signatures.
+///
+/// Returns the merged Rust source with newly translated functions appended.
+/// Designed for models with limited output capacity (e.g., local models via Ollama)
+/// that cannot generate 1000+ LOC in a single pass.
+pub async fn translate_completion_pass(
+    client: &LlmClient,
+    model: &str,
+    c_source: &str,
+    existing_rust: &str,
+    max_batch_loc: usize,
+    max_passes: usize,
+    temperature: f64,
+) -> Result<CompletionResult, AgentError> {
+    use noricum_tools::ast::{extract_c_functions, find_missing_c_functions};
+
+    let c_functions = extract_c_functions(c_source);
+    let total_c_fns = c_functions.len();
+
+    info!(
+        total_c_functions = total_c_fns,
+        "P34: starting incremental completion"
+    );
+
+    let mut rust_output = existing_rust.to_string();
+    let mut passes_done = 0;
+
+    for pass in 0..max_passes {
+        let missing = find_missing_c_functions(&c_functions, &rust_output);
+
+        if missing.is_empty() {
+            info!(pass, "P34: all functions present, completion done");
+            break;
+        }
+
+        info!(
+            pass,
+            missing = missing.len(),
+            total = total_c_fns,
+            "P34: found missing functions"
+        );
+
+        // Group missing functions into a batch that fits within max_batch_loc
+        let mut batch_source = String::new();
+        let mut batch_names = Vec::new();
+        let mut batch_loc = 0;
+
+        for cf in &missing {
+            let fn_loc = cf.body.lines().count().max(1);
+            if batch_loc + fn_loc > max_batch_loc && !batch_names.is_empty() {
+                break; // batch full
+            }
+            // Find the complete function text in the C source
+            if let Some(start) = c_source.find(&format!("{}(", cf.name)) {
+                // Walk back to find the return type
+                let line_start = c_source[..start].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                // Walk forward to find the closing brace
+                if let Some(body_start) = c_source[start..].find('{') {
+                    let abs_body_start = start + body_start;
+                    let mut depth = 0;
+                    let mut end = abs_body_start;
+                    for (i, ch) in c_source[abs_body_start..].char_indices() {
+                        match ch {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = abs_body_start + i + 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    batch_source.push_str(&c_source[line_start..end]);
+                    batch_source.push_str("\n\n");
+                }
+            }
+            batch_names.push(cf.name.clone());
+            batch_loc += fn_loc;
+        }
+
+        if batch_names.is_empty() {
+            warn!("P34: could not extract any missing function source, stopping");
+            break;
+        }
+
+        info!(
+            pass,
+            batch_size = batch_names.len(),
+            batch_loc,
+            "P34: translating batch"
+        );
+
+        // Build the completion prompt
+        let prompt = format!(
+            "You are completing a C-to-Rust migration. The following Rust code has already been \
+             translated and compiles. You need to add the MISSING functions listed below.\n\n\
+             ## Existing Rust code (DO NOT repeat this, only add new functions)\n\
+             ```rust\n{}\n```\n\n\
+             ## Missing C functions to translate\n\
+             ```c\n{}\n```\n\n\
+             ## Instructions\n\
+             - Translate ONLY the missing functions listed above to idiomatic, safe Rust.\n\
+             - Use the types and patterns from the existing Rust code (e.g., the enum, struct, impl blocks).\n\
+             - Add new functions as standalone `fn` or inside existing `impl` blocks as appropriate.\n\
+             - Do NOT redefine any existing types, enums, or structs.\n\
+             - Do NOT repeat any existing functions.\n\
+             - Output ONLY the new Rust functions, nothing else.\n\
+             - Missing functions to add: {}\n",
+            rust_output,
+            batch_source,
+            batch_names.join(", ")
+        );
+
+        let max_tokens = ((batch_loc as u64) * 8).clamp(4096, 16384);
+
+        let response = client
+            .run_prompt(model, TRANSLATION_PREAMBLE, temperature, max_tokens, &prompt)
+            .await?;
+
+        let new_code = crate::extract_rust_code(&response);
+
+        if new_code.trim().is_empty() {
+            warn!(pass, "P34: empty response from completion pass");
+            break;
+        }
+
+        // Merge: append new functions to existing code
+        // Strip any use statements that are already present
+        let mut additions = String::new();
+        for line in new_code.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("use ") && rust_output.contains(trimmed) {
+                continue; // skip duplicate use
+            }
+            // Skip type redefinitions
+            if (trimmed.starts_with("pub enum ") || trimmed.starts_with("enum ")
+                || trimmed.starts_with("pub struct ") || trimmed.starts_with("struct "))
+                && rust_output.contains(trimmed)
+            {
+                continue;
+            }
+            additions.push_str(line);
+            additions.push('\n');
+        }
+
+        if !additions.trim().is_empty() {
+            rust_output.push_str("\n\n");
+            rust_output.push_str(additions.trim());
+        }
+
+        passes_done = pass + 1;
+    }
+
+    let final_missing = find_missing_c_functions(&c_functions, &rust_output);
+    info!(
+        passes = passes_done,
+        total_c = total_c_fns,
+        still_missing = final_missing.len(),
+        "P34: completion passes done"
+    );
+
+    Ok(CompletionResult {
+        rust_source: rust_output,
+        passes: passes_done,
+        total_c_functions: total_c_fns,
+        missing_after: final_missing.iter().map(|f| f.name.clone()).collect(),
+    })
+}
+
+/// Result of P34 incremental completion.
+#[derive(Debug, Clone)]
+pub struct CompletionResult {
+    /// Merged Rust source with all translated functions.
+    pub rust_source: String,
+    /// Number of completion passes performed.
+    pub passes: usize,
+    /// Total C functions in the original source.
+    pub total_c_functions: usize,
+    /// Function names still missing after all passes.
+    pub missing_after: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

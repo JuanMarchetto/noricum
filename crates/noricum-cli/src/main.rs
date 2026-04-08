@@ -190,6 +190,14 @@ struct MigrateOpts {
     /// when initial translation fails. Costs more but improves success rate.
     #[arg(long, default_value_t = false)]
     ensemble: bool,
+    /// P35: Per-task model routing. Format: "task:provider/model/temp/num_ctx".
+    /// Can be specified multiple times. Examples:
+    ///   --task-config "analysis:ollama/gemma4:26b/0.2/131072"
+    ///   --task-config "translation:anthropic/claude-opus-4-6/0.3"
+    ///   --task-config "repair:ollama/gemma4:26b"
+    /// Tasks: analysis, translation, repair, completion, test_gen, type_contract
+    #[arg(long = "task-config", value_name = "SPEC")]
+    task_configs: Vec<String>,
 }
 
 fn setup_tracing(verbosity: u8) {
@@ -237,6 +245,7 @@ async fn main() {
                 max_unsafe: opts.max_unsafe,
                 crate_output: opts.crate_output,
                 ensemble: opts.ensemble,
+                task_configs: opts.task_configs,
             })
             .await
         }

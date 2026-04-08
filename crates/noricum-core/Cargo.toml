@@ -4,6 +4,7 @@ description = "Core orchestrator for C-to-Rust migration pipeline"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 noricum-ir = { workspace = true }

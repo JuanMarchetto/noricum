@@ -8,9 +8,6 @@
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
 [![LOC](https://img.shields.io/badge/LOC-~38%2C000-blue)](https://github.com/JuanMarchetto/noricum)
 
-<!-- Demo GIF: replace with actual recording -->
-<!-- ![Noricum Demo](demo.gif) -->
-
 > Noricum takes your C source, translates it to idiomatic Rust using LLM agents, then verifies behavioral equivalence by compiling both and comparing outputs byte-by-byte. If they differ, the LLM fixes it automatically.
 
 Noricum combines a deterministic pipeline with LLM-powered agents and differential
@@ -161,7 +158,13 @@ Notable PASS projects: CircularBuffer, FastHamming, coroutine, fft, geofence, kd
 
 ## Quick Start
 
-Build from source:
+Install with cargo:
+
+```bash
+cargo install --git https://github.com/JuanMarchetto/noricum noricum-cli
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/JuanMarchetto/noricum

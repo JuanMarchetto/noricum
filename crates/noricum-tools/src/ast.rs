@@ -1081,6 +1081,63 @@ pub fn extract_rust_signatures(rust_source: &str) -> Vec<String> {
         .collect()
 }
 
+/// P34: Extract function names from Rust source code.
+///
+/// Returns a list of function names found via `fn name(` pattern.
+/// Used to detect which C functions are missing from the Rust translation.
+pub fn extract_rust_function_names(rust_source: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"(?m)^\s*(?:pub\s+)?(?:pub\(crate\)\s+)?(?:async\s+)?fn\s+(\w+)\s*\(")
+        .expect("invalid regex");
+    re.captures_iter(rust_source)
+        .map(|cap| cap[1].to_string())
+        .collect()
+}
+
+/// P34: Find C functions that are missing from the Rust translation.
+///
+/// Compares C function names against Rust function names. Returns the C functions
+/// whose names (or snake_case equivalents) don't appear in the Rust output.
+pub fn find_missing_c_functions<'a>(
+    c_functions: &'a [CFunction],
+    rust_source: &str,
+) -> Vec<&'a CFunction> {
+    let rust_names: std::collections::HashSet<String> = extract_rust_function_names(rust_source)
+        .into_iter()
+        .map(|n| n.to_lowercase())
+        .collect();
+    // Also check the raw source for function names that might be in impl blocks
+    let rust_lower = rust_source.to_lowercase();
+
+    c_functions
+        .iter()
+        .filter(|cf| {
+            let c_name = cf.name.to_lowercase();
+            let snake = to_snake_case(&cf.name);
+            // Check: exact name, snake_case version, or substring in source
+            !rust_names.contains(&c_name)
+                && !rust_names.contains(&snake)
+                && !rust_lower.contains(&format!("fn {}(", c_name))
+                && !rust_lower.contains(&format!("fn {}(", snake))
+        })
+        .collect()
+}
+
+/// Convert a C function name (camelCase or PascalCase) to snake_case.
+fn to_snake_case(name: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            // Don't add underscore between consecutive uppercase (e.g. "cJSON" -> "c_json")
+            let prev = name.chars().nth(i - 1).unwrap_or('_');
+            if prev.is_lowercase() || prev.is_ascii_digit() {
+                result.push('_');
+            }
+        }
+        result.push(c.to_lowercase().next().unwrap_or(c));
+    }
+    result
+}
+
 /// P27: Extract complete type definitions (struct, enum, const, type alias) from Rust source.
 ///
 /// Returns the full definition text for each type, including the body.
@@ -1512,6 +1569,54 @@ pub fn read_archive(a: &ZipArchive) -> usize {
         assert!(defs[3].contains("impl ZipArchive"));
         // Functions should NOT be captured
         assert!(!defs.iter().any(|d| d.contains("fn read_archive")));
+    }
+
+    #[test]
+    fn test_extract_rust_function_names() {
+        let rust = r#"
+use std::io;
+
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+fn helper() {}
+pub(crate) fn internal_stuff() {}
+
+impl Foo {
+    pub fn method(&self) -> bool { true }
+    fn private_method(&self) {}
+}
+"#;
+        let names = extract_rust_function_names(rust);
+        assert!(names.contains(&"add".to_string()));
+        assert!(names.contains(&"helper".to_string()));
+        assert!(names.contains(&"internal_stuff".to_string()));
+        assert!(names.contains(&"method".to_string()));
+        assert!(names.contains(&"private_method".to_string()));
+    }
+
+    #[test]
+    fn test_find_missing_c_functions() {
+        let c_source = r#"
+int add(int a, int b) { return a + b; }
+void greet(const char *name) { printf("Hi %s\n", name); }
+int multiply(int a, int b) { return a * b; }
+"#;
+        let rust = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn greet(name: &str) {}";
+        let c_funcs = extract_c_functions(c_source);
+        assert_eq!(c_funcs.len(), 3);
+
+        let missing = find_missing_c_functions(&c_funcs, rust);
+        assert_eq!(missing.len(), 1, "only multiply should be missing");
+        assert_eq!(missing[0].name, "multiply");
+    }
+
+    #[test]
+    fn test_find_missing_c_functions_snake_case() {
+        let c_source = "int getValue(int x) { return x; }\nint setValue(int x) { return x; }";
+        let rust = "fn get_value(x: i32) -> i32 { x }";
+        let c_funcs = extract_c_functions(c_source);
+        let missing = find_missing_c_functions(&c_funcs, rust);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "setValue");
     }
 
     #[test]

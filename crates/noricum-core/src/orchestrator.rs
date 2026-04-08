@@ -56,6 +56,8 @@ pub struct MigrationConfig {
     pub ollama_url: Option<String>,
     /// Ollama model name override. Defaults to "qwen2.5-coder:32b".
     pub ollama_model: Option<String>,
+    /// Ollama context window size (num_ctx). Defaults to 131072 (128k).
+    pub ollama_num_ctx: Option<u64>,
     /// Maximum number of repair iterations before falling back to unsafe.
     pub max_repair_iterations: u32,
     /// Minimum idiomatic score (0-100) required to pass validation.
@@ -110,6 +112,8 @@ pub struct MigrationConfig {
     pub crate_output_dir: Option<std::path::PathBuf>,
     /// Whether ensemble translation is enabled (P38).
     pub ensemble_enabled: bool,
+    /// P35: Per-task model routing overrides.
+    pub task_routing: noricum_agents::TaskRouting,
 }
 
 impl Default for MigrationConfig {
@@ -120,6 +124,7 @@ impl Default for MigrationConfig {
             deepseek_api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
             ollama_url: None,
             ollama_model: None,
+            ollama_num_ctx: None,
             max_repair_iterations: 5,
             min_idiomatic_score: 60,
             generate_tests: true,
@@ -142,6 +147,7 @@ impl Default for MigrationConfig {
             max_unsafe_blocks: None,
             crate_output_dir: None,
             ensemble_enabled: false,
+            task_routing: noricum_agents::TaskRouting::default(),
         }
     }
 }
@@ -169,6 +175,7 @@ impl From<&MigrationConfig> for ProviderConfig {
                 .ollama_model
                 .clone()
                 .unwrap_or_else(|| "qwen2.5-coder:32b".to_string()),
+            ollama_num_ctx: config.ollama_num_ctx.unwrap_or(131072),
         }
     }
 }
@@ -1187,6 +1194,66 @@ pub async fn migrate_file(
         }
         info!(function = %name, state = ?unit.state, translation_ms = unit.metrics.translation_ms, "state -> Refined");
         check_budget(config.max_tokens_budget, config.max_llm_calls, &unit.metrics)?;
+    }
+
+    // --- Stage 5.5: P34 Incremental Completion (for local models) ---
+    // When translation output is significantly shorter than the C source, run
+    // completion passes to fill in missing functions. This handles models with
+    // limited output capacity (e.g., Ollama/Gemma) that truncate large translations.
+    if let Some(ref rust_src) = unit.rust_output {
+        let c_functions = noricum_tools::ast::extract_c_functions(&unit.c_source);
+        let missing = noricum_tools::ast::find_missing_c_functions(&c_functions, rust_src);
+        let completeness = if c_functions.is_empty() {
+            1.0
+        } else {
+            1.0 - (missing.len() as f64 / c_functions.len() as f64)
+        };
+
+        if !missing.is_empty() && completeness < 0.8 {
+            info!(
+                function = %name,
+                total_c = c_functions.len(),
+                missing = missing.len(),
+                completeness = format!("{:.0}%", completeness * 100.0),
+                "P34: translation incomplete, starting completion passes"
+            );
+
+            let model_sel = select_model(&provider_config, difficulty, "translation")?;
+            let max_passes = 5;
+            let max_batch = 400;
+
+            match noricum_agents::translation::translate_completion_pass(
+                &client,
+                &model_sel.model,
+                &unit.c_source,
+                rust_src,
+                max_batch,
+                max_passes,
+                0.3,
+            )
+            .await
+            {
+                Ok(result) => {
+                    info!(
+                        function = %name,
+                        passes = result.passes,
+                        total_c = result.total_c_functions,
+                        still_missing = result.missing_after.len(),
+                        "P34: completion passes done"
+                    );
+                    unit.rust_output = Some(result.rust_source);
+                    unit.metrics.llm_calls += result.passes as u32;
+                    if let Some(ref store) = artifacts {
+                        let _ = store.save_translation_final(
+                            unit.rust_output.as_deref().unwrap_or(""),
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(function = %name, error = %e, "P34: completion pass failed, continuing with partial translation");
+                }
+            }
+        }
     }
 
     // --- Stage 6: Validate ---

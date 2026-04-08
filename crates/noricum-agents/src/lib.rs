@@ -15,7 +15,10 @@ pub mod test_gen;
 /// Translation agent for converting C source code to idiomatic Rust.
 pub mod translation;
 
-pub use providers::{LlmClient, TokenUsage};
+pub use providers::{
+    LlmClient, LlmClientPool, PipelineTask, ResolvedTask, TaskModelConfig, TaskRouting,
+    TokenUsage,
+};
 
 use thiserror::Error;
 
