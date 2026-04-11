@@ -81,6 +81,12 @@ pub const WHITE: u8 = 0;
 pub const GRAY: u8 = 1;
 pub const BLACK: u8 = 2;
 
+/// Maximum number of slots the incremental sweep processes in one
+/// [`GlobalState::gc_step`] call. Matches `GCSWEEPMAX` in Lua 5.4's
+/// `lgc.c`. Keeps a single step bounded so long sweeps don't
+/// dominate a VM timeslice.
+pub const GC_SWEEP_MAX: u32 = 20;
+
 // ---------------------------------------------------------------------------
 // GcState — 5-state machine. Matches stage-3-gc-design.md §4.1.
 // ---------------------------------------------------------------------------
@@ -319,21 +325,8 @@ impl GlobalState {
                 GcStepResult::Progressed(1)
             }
             GcState::Sweep => {
-                // Skeleton: advance the cursor one arena per call
-                // without freeing anything. Commit 5 replaces this
-                // with the real sweep loop.
-                match self.gc_sweep_cursor.kind.next() {
-                    Some(next_kind) => {
-                        self.gc_sweep_cursor = SweepCursor {
-                            kind: next_kind,
-                            slot: 0,
-                        };
-                    }
-                    None => {
-                        self.gc_state = GcState::End;
-                    }
-                }
-                GcStepResult::Progressed(1)
+                let swept = self.sweep_step(GC_SWEEP_MAX);
+                GcStepResult::Progressed(swept.max(1) as i64)
             }
             GcState::End => {
                 self.gc_state = GcState::Pause;
@@ -649,6 +642,147 @@ impl GlobalState {
             self.mark_object(child);
         }
     }
+
+    // --- Sweep phase (commit 5) ------------------------------------
+    //
+    // Incremental sweep: walk at most `max_slots` slots per call,
+    // starting from `gc_sweep_cursor`. For each live slot whose
+    // mark byte is `WHITE`, call the matching `free_*` method on
+    // `Heap` — which bumps the generation counter so any stale
+    // handle becomes a loud panic on next access.
+    //
+    // When the cursor falls off the end of an arena, advance to
+    // the next `HeapKind` with slot reset to 0. When the cursor
+    // falls off `HeapKind::UserData`, transition to `GcState::End`.
+    //
+    // Black slots are left in place. The next cycle's
+    // `start_collection` clears them back to `WHITE`, so no
+    // explicit "paint black to white" pass is needed here. This is
+    // the single-white simplification; the dual-white refinement
+    // (needed for correct handling of objects allocated during
+    // sweep) lands alongside the write barriers in commit 6.
+
+    /// Sweep up to `max_slots` cursor positions. Returns how many
+    /// slots were visited (not how many were freed). Updates
+    /// `gc_sweep_cursor` as it walks and transitions to
+    /// [`GcState::End`] when every arena has been exhausted.
+    fn sweep_step(&mut self, max_slots: u32) -> u32 {
+        let mut swept: u32 = 0;
+        while swept < max_slots {
+            let cursor = self.gc_sweep_cursor;
+            let arena_len = self.arena_len(cursor.kind) as u32;
+            if cursor.slot >= arena_len {
+                // Done with this arena — advance to the next kind.
+                match cursor.kind.next() {
+                    Some(next_kind) => {
+                        self.gc_sweep_cursor = SweepCursor {
+                            kind: next_kind,
+                            slot: 0,
+                        };
+                        continue;
+                    }
+                    None => {
+                        // Every arena exhausted — cycle is done.
+                        self.gc_state = GcState::End;
+                        return swept;
+                    }
+                }
+            }
+            self.sweep_one_slot(cursor.kind, cursor.slot);
+            self.gc_sweep_cursor.slot += 1;
+            swept += 1;
+        }
+        swept
+    }
+
+    /// Free the slot at `(kind, slot)` if it holds a live object
+    /// whose mark byte is `WHITE`. No-op for freed slots and for
+    /// reachable (BLACK) objects.
+    fn sweep_one_slot(&mut self, kind: HeapKind, slot: u32) {
+        let slot_usize = slot as usize;
+        match kind {
+            HeapKind::String => {
+                if self.heap.strings[slot_usize].is_some()
+                    && self.heap.marks_strings[slot_usize] == WHITE
+                {
+                    let gen = self.heap.generations_strings[slot_usize];
+                    self.heap.free_string(StringHandle::new(slot, gen));
+                }
+            }
+            HeapKind::Table => {
+                if self.heap.tables[slot_usize].is_some()
+                    && self.heap.marks_tables[slot_usize] == WHITE
+                {
+                    let gen = self.heap.generations_tables[slot_usize];
+                    self.heap.free_table(TableHandle::new(slot, gen));
+                }
+            }
+            HeapKind::Proto => {
+                if self.heap.protos[slot_usize].is_some()
+                    && self.heap.marks_protos[slot_usize] == WHITE
+                {
+                    let gen = self.heap.generations_protos[slot_usize];
+                    self.heap.free_proto(ProtoHandle::new(slot, gen));
+                }
+            }
+            HeapKind::LClosure => {
+                if self.heap.lclosures[slot_usize].is_some()
+                    && self.heap.marks_lclosures[slot_usize] == WHITE
+                {
+                    let gen = self.heap.generations_lclosures[slot_usize];
+                    self.heap.free_lclosure(LClosureHandle::new(slot, gen));
+                }
+            }
+            HeapKind::CClosure => {
+                if self.heap.cclosures[slot_usize].is_some()
+                    && self.heap.marks_cclosures[slot_usize] == WHITE
+                {
+                    let gen = self.heap.generations_cclosures[slot_usize];
+                    self.heap.free_cclosure(CClosureHandle::new(slot, gen));
+                }
+            }
+            HeapKind::UpVal => {
+                if self.heap.upvals[slot_usize].is_some()
+                    && self.heap.marks_upvals[slot_usize] == WHITE
+                {
+                    let gen = self.heap.generations_upvals[slot_usize];
+                    self.heap.free_upval(UpValHandle::new(slot, gen));
+                }
+            }
+            HeapKind::Thread => {
+                if self.heap.threads[slot_usize].is_some()
+                    && self.heap.marks_threads[slot_usize] == WHITE
+                {
+                    let gen = self.heap.generations_threads[slot_usize];
+                    self.heap.free_thread(ThreadHandle::new(slot, gen));
+                }
+            }
+            HeapKind::UserData => {
+                if self.heap.userdata[slot_usize].is_some()
+                    && self.heap.marks_userdata[slot_usize] == WHITE
+                {
+                    let gen = self.heap.generations_userdata[slot_usize];
+                    self.heap.free_userdata(UserDataHandle::new(slot, gen));
+                }
+            }
+        }
+    }
+
+    /// How many slots currently exist in the arena for `kind`.
+    /// Used by [`GlobalState::sweep_step`] to decide when the
+    /// cursor has fallen off the end of an arena.
+    fn arena_len(&self, kind: HeapKind) -> usize {
+        match kind {
+            HeapKind::String => self.heap.strings.len(),
+            HeapKind::Table => self.heap.tables.len(),
+            HeapKind::Proto => self.heap.protos.len(),
+            HeapKind::LClosure => self.heap.lclosures.len(),
+            HeapKind::CClosure => self.heap.cclosures.len(),
+            HeapKind::UpVal => self.heap.upvals.len(),
+            HeapKind::Thread => self.heap.threads.len(),
+            HeapKind::UserData => self.heap.userdata.len(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -769,33 +903,19 @@ mod tests {
     }
 
     #[test]
-    fn sweep_phase_skeleton_visits_every_heap_kind_before_transitioning_to_end() {
-        // Commit 4b leaves sweep as skeleton — still one step per
-        // arena. Commit 5 replaces this.
+    fn sweep_phase_completes_empty_heap_in_a_single_step() {
+        // With the real sweep (commit 5), arenas with zero slots
+        // advance the cursor without visiting any slot. Since
+        // GC_SWEEP_MAX (20) is larger than the number of
+        // HeapKind variants (8), a single gc_step in the Sweep
+        // state walks the cursor through every arena and
+        // transitions to End.
         let mut g = GlobalState::default();
         while g.gc_state != GcState::Sweep {
             g.gc_step();
         }
-        let mut kinds_touched: Vec<HeapKind> = vec![g.gc_sweep_cursor.kind];
-        while g.gc_state == GcState::Sweep {
-            g.gc_step();
-            if g.gc_state == GcState::Sweep {
-                kinds_touched.push(g.gc_sweep_cursor.kind);
-            }
-        }
-        assert_eq!(
-            kinds_touched,
-            vec![
-                HeapKind::String,
-                HeapKind::Table,
-                HeapKind::Proto,
-                HeapKind::LClosure,
-                HeapKind::CClosure,
-                HeapKind::UpVal,
-                HeapKind::Thread,
-                HeapKind::UserData,
-            ]
-        );
+        assert_eq!(g.gc_state, GcState::Sweep);
+        g.gc_step();
         assert_eq!(g.gc_state, GcState::End);
     }
 
@@ -961,21 +1081,31 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_object_stays_white_after_full_cycle() {
+    fn unreachable_object_gets_freed_by_full_cycle() {
         // Allocate a table that nothing references, then run the
-        // full cycle. The table's mark byte must still be WHITE.
-        // (Sweep doesn't free it yet — commit 5 — but the mark
-        // phase correctly refuses to visit it.)
+        // full cycle. Commit 5 sweep must free the slot and bump
+        // its generation counter, while the registry-rooted table
+        // survives as BLACK.
         let mut g = GlobalState::default();
         let orphan = g.heap.alloc_table(Table::default());
-        // Also plant a reachable object via the registry so the
-        // cycle has non-empty work and the orphan's whiteness
-        // isn't an artifact of a totally empty GC pass.
         let reg = g.heap.alloc_table(Table::default());
         g.registry = Some(reg);
         drive_full_cycle(&mut g);
         assert_eq!(g.heap.marks_tables[reg.slot as usize], BLACK);
-        assert_eq!(g.heap.marks_tables[orphan.slot as usize], WHITE);
+        // Orphan slot has been freed and its generation bumped.
+        assert!(
+            g.heap.tables[orphan.slot as usize].is_none(),
+            "orphan must be freed by sweep"
+        );
+        assert_eq!(
+            g.heap.generations_tables[orphan.slot as usize],
+            orphan.generation + 1,
+            "free_table must bump the generation counter"
+        );
+        assert!(
+            g.heap.free_tables.contains(&orphan.slot),
+            "swept slot must be on the free list"
+        );
     }
 
     #[test]
@@ -1021,5 +1151,160 @@ mod tests {
         // And the reachable objects must all be BLACK by now.
         assert_eq!(g.heap.marks_tables[reg.slot as usize], BLACK);
         assert_eq!(g.heap.marks_strings[name.slot as usize], BLACK);
+    }
+
+    // ---- commit 5: sweep-phase tests -------------------------------
+
+    #[test]
+    fn sweep_frees_unreachable_string_and_pushes_slot_to_free_list() {
+        let mut g = GlobalState::default();
+        let ghost = g.heap.alloc_string(fresh_string(b"doomed"));
+        drive_full_cycle(&mut g);
+        assert!(
+            g.heap.strings[ghost.slot as usize].is_none(),
+            "unreachable string should be freed"
+        );
+        assert_eq!(
+            g.heap.generations_strings[ghost.slot as usize],
+            ghost.generation + 1
+        );
+        assert!(g.heap.free_strings.contains(&ghost.slot));
+    }
+
+    #[test]
+    fn sweep_preserves_reachable_string_referenced_through_registry() {
+        // A string referenced via the registry's hash part must
+        // survive a full cycle — the mark phase reaches it via the
+        // table walker, and sweep leaves it alone.
+        let mut g = GlobalState::default();
+        let alive = g.heap.alloc_string(fresh_string(b"keep-me"));
+        let mut reg_table = Table::default();
+        reg_table
+            .hash
+            .insert(TableKey::Integer(1), TValue::ShortString(alive));
+        let reg = g.heap.alloc_table(reg_table);
+        g.registry = Some(reg);
+        drive_full_cycle(&mut g);
+        assert!(
+            g.heap.strings[alive.slot as usize].is_some(),
+            "reachable string must survive sweep"
+        );
+        assert_eq!(g.heap.string(alive).bytes, b"keep-me");
+    }
+
+    #[test]
+    fn sweep_frees_every_kind_of_unreachable_object() {
+        // One unreachable object per arena kind. Sweep must walk
+        // every arena and free each of them. Verifies that
+        // `sweep_one_slot` has a branch for every HeapKind.
+        let mut g = GlobalState::default();
+        let s = g.heap.alloc_string(fresh_string(b"s"));
+        let t = g.heap.alloc_table(Table::default());
+        let p = g.heap.alloc_proto(Proto::default());
+        let l = g.heap.alloc_lclosure(LClosure {
+            proto: p,
+            upvalues: vec![],
+        });
+        let uv = g.heap.alloc_upval(UpVal {
+            state: UpValState::Closed(TValue::Integer(0)),
+        });
+        let th = g.heap.alloc_thread(Thread::default());
+
+        drive_full_cycle(&mut g);
+
+        assert!(g.heap.strings[s.slot as usize].is_none());
+        assert!(g.heap.tables[t.slot as usize].is_none());
+        assert!(g.heap.protos[p.slot as usize].is_none());
+        assert!(g.heap.lclosures[l.slot as usize].is_none());
+        assert!(g.heap.upvals[uv.slot as usize].is_none());
+        assert!(g.heap.threads[th.slot as usize].is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "points to a reused slot")]
+    fn stale_handle_from_swept_slot_panics_on_access_after_realloc() {
+        // Sweep frees a slot (bumping its generation). A new alloc
+        // reuses that slot with a new generation. The old handle
+        // must now panic — the R1 guarantee layered on top of sweep:
+        // use-after-free is deterministic, not silent.
+        let mut g = GlobalState::default();
+        let stale = g.heap.alloc_string(fresh_string(b"stale"));
+        drive_full_cycle(&mut g); // sweep frees `stale`
+        let _fresh = g.heap.alloc_string(fresh_string(b"fresh"));
+        let _ = g.heap.string(stale); // must panic
+    }
+
+    #[test]
+    fn sweep_preserves_deeply_nested_reachable_closure_tree() {
+        // main_thread -> LClosure -> Proto -> source + const
+        //              ^          -> UpVal (closed) -> captured str
+        // Every object in the tree must survive.
+        let mut g = GlobalState::default();
+        let src = g.heap.alloc_string(fresh_string(b"@main.lua"));
+        let konst = g.heap.alloc_string(fresh_string(b"answer"));
+        let uv_str = g.heap.alloc_string(fresh_string(b"captured"));
+        let p = Proto {
+            source: Some(src),
+            constants: vec![TValue::ShortString(konst)],
+            ..Proto::default()
+        };
+        let proto = g.heap.alloc_proto(p);
+        let uv = g.heap.alloc_upval(UpVal {
+            state: UpValState::Closed(TValue::ShortString(uv_str)),
+        });
+        let closure = g.heap.alloc_lclosure(LClosure {
+            proto,
+            upvalues: vec![uv],
+        });
+        let mut main = Thread::default();
+        main.stack.push(TValue::LuaClosure(closure));
+        let th = g.heap.alloc_thread(main);
+        g.main_thread = Some(th);
+
+        drive_full_cycle(&mut g);
+
+        // Every handle along the tree must still resolve without
+        // panicking — the generation checks in the accessors are
+        // the proof of survival.
+        assert_eq!(g.heap.string(src).bytes, b"@main.lua");
+        assert_eq!(g.heap.string(konst).bytes, b"answer");
+        assert_eq!(g.heap.string(uv_str).bytes, b"captured");
+        assert!(g.heap.protos[proto.slot as usize].is_some());
+        assert!(g.heap.upvals[uv.slot as usize].is_some());
+        assert!(g.heap.lclosures[closure.slot as usize].is_some());
+        assert!(g.heap.threads[th.slot as usize].is_some());
+    }
+
+    #[test]
+    fn two_sequential_cycles_collect_the_changing_dead_set() {
+        // Cycle 1: registry holds `reg`; `orphan` is unreachable
+        // and gets collected. Cycle 2: swap registry to `new_reg`
+        // so `reg` becomes unreachable. The start_collection
+        // BLACK -> WHITE reset is what lets `reg` become collectable
+        // in cycle 2; without it, it would stay BLACK forever.
+        let mut g = GlobalState::default();
+        let orphan = g.heap.alloc_table(Table::default());
+        let reg = g.heap.alloc_table(Table::default());
+        g.registry = Some(reg);
+
+        drive_full_cycle(&mut g);
+        assert!(g.heap.tables[orphan.slot as usize].is_none());
+        assert!(g.heap.tables[reg.slot as usize].is_some());
+        assert_eq!(g.heap.marks_tables[reg.slot as usize], BLACK);
+
+        // Swap the registry. `reg` is now unreachable.
+        let new_reg = g.heap.alloc_table(Table::default());
+        g.registry = Some(new_reg);
+
+        drive_full_cycle(&mut g);
+        assert!(
+            g.heap.tables[reg.slot as usize].is_none(),
+            "`reg` must be collected once detached from the registry"
+        );
+        assert!(
+            g.heap.tables[new_reg.slot as usize].is_some(),
+            "new registry table must survive the second cycle"
+        );
+        assert_eq!(g.heap.marks_tables[new_reg.slot as usize], BLACK);
     }
 }
