@@ -285,6 +285,37 @@ impl TValue {
     }
 }
 
+/// Manual `PartialEq` for `TValue`. Derivable in principle but the
+/// auto-generated `LightCFunction` comparison trips clippy's
+/// `unpredictable_function_pointer_comparisons` lint because fn
+/// pointers can be merged across codegen units. Casting both sides
+/// to `usize` for that one branch bypasses the lint and matches
+/// Lua's C semantics (two `lua_CFunction`s are equal iff they
+/// point to the same code).
+impl PartialEq for TValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TValue::Nil, TValue::Nil) => true,
+            (TValue::False, TValue::False) => true,
+            (TValue::True, TValue::True) => true,
+            (TValue::LightUserData(a), TValue::LightUserData(b)) => a == b,
+            (TValue::Integer(a), TValue::Integer(b)) => a == b,
+            (TValue::Number(a), TValue::Number(b)) => a == b,
+            (TValue::ShortString(a), TValue::ShortString(b)) => a == b,
+            (TValue::LongString(a), TValue::LongString(b)) => a == b,
+            (TValue::Table(a), TValue::Table(b)) => a == b,
+            (TValue::LuaClosure(a), TValue::LuaClosure(b)) => a == b,
+            (TValue::LightCFunction(a), TValue::LightCFunction(b)) => {
+                (*a as usize) == (*b as usize)
+            }
+            (TValue::CClosure(a), TValue::CClosure(b)) => a == b,
+            (TValue::UserData(a), TValue::UserData(b)) => a == b,
+            (TValue::Thread(a), TValue::Thread(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TableKey — the subset of TValue that can appear as a table key.
 // ---------------------------------------------------------------------------

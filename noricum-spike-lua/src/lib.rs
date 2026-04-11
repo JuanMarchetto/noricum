@@ -28,6 +28,7 @@ pub mod lobject;
 pub mod lopcodes;
 pub mod lstate;
 pub mod lstring;
+pub mod ltable;
 pub mod ltm;
 pub mod lzio;
 
