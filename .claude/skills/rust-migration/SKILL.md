@@ -285,6 +285,135 @@ Result: C implementation available as ground truth via `unsafe extern` block, Ru
 
 **Reference implementation:** `feat/interactive-spike` branch of noricum, commits `cf4a07f` through `454e560`. Read those 5 commits for the full pattern in action.
 
+## Architectural Elimination — free features via Rust design choices
+
+When porting a C container format, audit every complexity source in the C code and classify it:
+
+- **Data-flow driven** (compression, CRC, actual algorithms) — must be ported or delegated.
+- **Architecture-driven** (branches that exist because of a particular data flow choice the C code made) — candidate for elimination. Choose a different Rust architecture and the feature disappears.
+- **Legacy baggage** (5 wrapper variants, 32-bit fallbacks, deprecated aliases) — don't port unless consumers need them.
+
+**Two validated eliminations from the miniz_zip spike:**
+
+1. **Data descriptors (flag bit 3, sizes-after-data):** miniz_zip has ~60 LOC to parse data descriptor blocks. The Rust reader uses the central directory as the authoritative source for all sizes/CRC/offsets, so the local file header's placeholder zeros are simply ignored. Zero new code was written. The feature became architectural.
+
+2. **`Box<dyn Read + Write + Seek>` trait object:** miniz_zip uses function-pointer callbacks for source abstraction (~200 LOC of indirection). Run 14 of the autonomous pipeline tried to port this to a trait object with multiple non-auto traits — which is INVALID Rust and killed the run. The interactive spike replaced it with a concrete `ZipSource` enum that implements the three traits by delegation. ~160 LOC collapsed, failure mode became impossible by construction.
+
+**Other candidates that collapsed on the same port:** 32-bit fallback branches (use u64 everywhere), 8 writer init variants reduced to `ZipWriter::create(path)`, reader/writer mode flag inside one struct → two distinct types where misuse is a compile error.
+
+**Recognition rule:** any C feature that exists because of constrained-system micro-optimizations (64KB stack, no malloc, 32-bit fields) or pre-zip64 backward compatibility is a prime elimination candidate. Modern Rust targets don't care about those constraints.
+
+**Document eliminations in commit messages** as `ELIMINATED via [architecture choice]` — preserves the audit trail and explains to future readers why the Rust port is smaller.
+
+## Fixture Generation via Dev-Dependencies
+
+For binary formats with an existing idiomatic Rust crate, use the crate as a **dev-dependency** to generate test fixtures at test time. Do NOT commit large binary fixtures to the repo, and do NOT hand-craft format bytes unless you're testing a specific edge case.
+
+```toml
+[dev-dependencies]
+zip = { version = "2", default-features = false,
+        features = ["deflate-flate2", "flate2", "aes-crypto", "time"] }
+```
+
+```rust
+#[test]
+fn extension_test_zip64_via_zip_rs() {
+    use zip::CompressionMethod;
+    use zip::write::{SimpleFileOptions, ZipWriter};
+
+    let path = tmp_archive("zip64");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zw = ZipWriter::new(file);
+    let opts = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .large_file(true);               // forces zip64 extras
+    for i in 0..3 {
+        zw.start_file(format!("entry{i}.txt"), opts).unwrap();
+        zw.write_all(format!("content {i}").as_bytes()).unwrap();
+    }
+    zw.finish().unwrap();
+
+    // Test the archive against the Rust reader under development.
+    let mut rust = RustZipReader::open(&path).unwrap();
+    // ...
+}
+```
+
+**Tradeoff:** the dev-dep pulls transitive crates (flate2, miniz_oxide, aes, sha1, hmac, pbkdf2) into the dev build tree. Keep `default-features = false` and enumerate the exact features you need. The runtime binary is unaffected.
+
+**When to hand-craft instead:** when you need to test an exact byte-level edge case (e.g., "flag bit 3 set with the optional descriptor magic, followed by sentinel sizes in the central dir") that the dev-dep crate doesn't produce by default. The spike's `extension_test_data_descriptor_reader_handles_bit3` handcrafts the archive byte-by-byte for this reason.
+
+## Real-World Fuzzing via `SPIKE_REAL_ARCHIVES` Pattern
+
+Add an `#[ignore]`d integration test that runs only when an env var points to a directory of real-world format artifacts. Default `cargo test` stays hermetic; the fuzzing pass is opt-in.
+
+```rust
+#[test]
+#[ignore = "requires SPIKE_REAL_ARCHIVES env var pointing to a directory of .zip files"]
+fn real_world_diff_test() {
+    let dir = match std::env::var("SPIKE_REAL_ARCHIVES") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => return,
+    };
+    // Walk every file with a format-matching extension, open with both
+    // oracle and Rust reader, byte-compare.
+    const ZIP_EXTS: &[&str] = &["zip", "jar", "war", "ear", "apk", "docx",
+                                 "xlsx", "pptx", "epub", "kmz"];
+    // ...
+}
+```
+
+**How to run:**
+```sh
+SPIKE_REAL_ARCHIVES=/path/to/dir cargo test --test differential_zip \
+    real_world -- --ignored --nocapture
+```
+
+**What to download:** a mix of producers to cover format variability. For ZIP specifically, the miniz_zip spike used:
+- 3 Windows binary releases (sharkdp tooling: bat, fd, hyperfine)
+- 3 Rust source tag archives (ripgrep, serde, tokio)
+- 1 Java archive from Maven Central (commons-lang3.jar)
+- 1 Java archive, Office document, or APK for XML-heavy binary content
+- 2 large source archives (Go 14k entries, Python 5k entries) for scale
+
+Result on that corpus: **9/9 archives byte-matched, 21,331 total entries extracted** against the C oracle. Zero divergences.
+
+**Failure modes to expect:** a mismatch here is a genuine bug in the reader. An oracle-only failure (C reader cannot open but Rust can) might mean the fixture isn't actually the claimed format (happened once with a docx that was actually HTML due to a URL redirect).
+
+## WinZip AES Counter Gotcha
+
+WinZip's AES extension uses AES-CTR mode with a NON-STANDARD counter layout that differs from NIST AES-CTR. The counter:
+- Starts at 1, not 0
+- Is LE-encoded in the LOW 4 bytes of the 16-byte counter block
+- Upper 12 bytes are zero and never change
+
+This means you **cannot** use the `ctr` crate directly — it defaults to a different layout. Roll your own:
+
+```rust
+fn decrypt_ctr<C>(key: &[u8], data: &mut [u8])
+where
+    C: BlockEncrypt + KeyInit,
+{
+    let cipher = C::new_from_slice(key).expect("key length");
+    const BLOCK: usize = 16;
+    let mut counter: u32 = 1;  // ZIP-specific: starts at 1
+    let mut i = 0;
+    while i < data.len() {
+        let mut block = [0u8; BLOCK];
+        block[..4].copy_from_slice(&counter.to_le_bytes());  // LE in low 4 bytes
+        // upper 12 bytes stay zero
+        let mut keystream = GenericArray::clone_from_slice(&block);
+        cipher.encrypt_block(&mut keystream);
+        let take = core::cmp::min(BLOCK, data.len() - i);
+        for j in 0..take { data[i + j] ^= keystream[j]; }
+        counter = counter.wrapping_add(1);
+        i += BLOCK;
+    }
+}
+```
+
+**Related AES constants:** salt length = key length / 2, password verification = 2 bytes, HMAC-SHA1 truncated to 10 bytes, PBKDF2 iterations = 1000, AE-2 variant sets central dir CRC32 to zero (skip CRC check when 0).
+
 ## Common Pitfalls (from production migrations)
 - `bool` vs `int`: C returns 0/1 as int; Rust `bool` prints `true/false` → keep as `i32`
 - Integer overflow: C wraps silently; Rust panics in debug → use `wrapping_add` etc.
