@@ -1,6 +1,6 @@
 # Lua 5.4 → Safe Rust: Full Port Plan
 
-**Status:** Stage 1 COMPLETE (foundation modules green). Stage 2 not yet started.
+**Status:** Stage 2 COMPLETE (type contract populated with behavior). Stage 3 (GC) is the next block.
 **Branch:** `feat/interactive-spike-lua`
 **Scope:** Complete migration. No cuts. Drop-in ABI. See `docs/methodology/full-port-mode.md` for methodology and `memory/project_lua_full_port.md` for the seven lock-in decisions.
 **Started:** 2026-04-11
@@ -101,11 +101,13 @@ Updated at every session shutdown.
 | 1 | lopcodes | 140 | 435 | 10 diff + 10 unit | ✅ GREEN | 2026-04-11 (S3) |
 | 1 | lmem | 215 | 130 | 7 diff + 7 unit | ✅ GREEN | 2026-04-11 (S3) |
 | 1 | lzio | 89 | 295 | 13 diff + 7 unit | ✅ GREEN | 2026-04-11 (S3) |
-| 2 | lobject | 718 | — | — | ⏳ PENDING | — |
-| 2 | lstring | 353 | — | — | ⏳ PENDING | — |
-| 2 | lstate | 425 | — | — | ⏳ PENDING | — |
-| 2 | ltm | 364 | — | — | ⏳ PENDING | — |
-| 2 | lfunc | 314 | — | — | ⏳ PENDING | — |
+| 2 | lobject (utilities) | 718 | 500 | 7 diff + 9 unit | ✅ GREEN | 2026-04-11 (S4) |
+| 2 | lobject (raw_arith) | — | 325 | 13 diff + 16 unit | ✅ GREEN | 2026-04-11 (S4) |
+| 2 | heap (alloc/free) | — | 410 | 0 diff + 8 unit | ✅ GREEN | 2026-04-11 (S4) |
+| 2 | lstring | 353 | 230 | 8 diff + 9 unit | ✅ GREEN | 2026-04-11 (S4) |
+| 2 | lfunc | 314 | 360 | 0 diff + 9 unit | ✅ GREEN | 2026-04-11 (S4) |
+| 2 | ltm | 364 | 300 | 2 diff + 11 unit | ✅ GREEN | 2026-04-11 (S4) |
+| 2 | lstate (bootstrap) | 425 | 280 | 0 diff + 9 unit | ✅ GREEN | 2026-04-11 (S4) |
 | 3 | lgc | 1804 | — | — | ⏳ PENDING | — |
 | 4 | ltable | 1355 | — | — | ⏳ PENDING | — |
 | 4 | lapi | 1479 | — | — | ⏳ PENDING | — |
@@ -161,9 +163,15 @@ Chronological. Every architectural call gets an entry.
 - **2026-04-11 / lmem growth-strategy precondition:** `grow_array_size` documents and enforces `limit >= MIN_SIZE_ARRAY` as a debug_assert precondition. C Lua's `luaM_growaux_` has the same invariant but releases it as a no-op `lua_assert`, so the divergence was silent in C release builds. Diff-test earned-its-keep moment.
 - **2026-04-11 / Mbuffer skipped in lzio:** Lua's `Mbuffer` (growable byte scratch buffer used by the lexer) is not ported — the Stage 6 lexer will use `Vec<u8>` directly. Every `Mbuffer` macro is a trivial `Vec` method.
 - **2026-04-11 / Opcode and OpMode keep C names:** `OpCode` variants preserve the `OP_MOVE` / `OP_LOADI` / etc. spelling, and `OpMode` variants keep `iABC` / `ivABC` / etc. despite the Rust camelCase convention. Rationale: these are on-wire format identifiers documented with those exact names in the Lua 5.4 spec. Renaming creates a permanent decoder ring between the Rust port and the C source for every reader. Gated with `#![allow(non_camel_case_types, non_upper_case_globals)]`.
+- **2026-04-11 / Div-by-zero error object is `TValue::Nil` placeholder:** Stage 2 `lobject::raw_arith` returns `Err(LuaError::Runtime(TValue::Nil))` on integer div-by-zero. Should be a TValue holding the "attempt to divide by zero" error string, but string interning had not landed in the contract at commit time. Stage 5 (ldo) will retrofit the real message when metamethod-aware arithmetic replaces the raw version.
+- **2026-04-11 / LClosure upvalues pre-initialized eagerly:** `Heap::new_lclosure(proto, nupvals)` creates nupvals Closed(Nil) upvalues during allocation, fusing C's `luaF_newLclosure` + `luaF_initupvals` pair. The C split exists because of GC barriers that fire differently on uninitialized allocations; with manual arenas we don't need it yet and avoiding the "placeholder handle" window simplifies every Stage 5 call site.
+- **2026-04-11 / Thread::open_upvals is unsorted in Stage 2:** C keeps `L->openupval` sorted descending by level for O(min(n, pos)) lookup during close. Our Rust port uses an unsorted `Vec<UpValHandle>`; profiling in Stage 5 can decide whether to sort. Semantics are identical, cost is `O(n)` per lookup where `n` is typically < 10.
+- **2026-04-11 / `GlobalState::hash_seed` added to the contract:** Moved the hash seed from a per-call-site parameter to a field on `GlobalState` so `init_metamethod_names`, `intern_short`, and future stages share it without plumbing. Matches `global_State::seed` in `lstate.h`. Set by `LuaState::new(hash_seed)` at bootstrap.
+- **2026-04-11 / `lobject::raw_arith` is separate from `luaO_arith`:** Ported just the raw arithmetic (no metamethod fallback). The `luaO_arith` wrapper that chains through `luaT_trybinTM` on non-numeric operands is Stage 4/5 because it needs `ltable::getshortstr` and VM frame machinery. Stage 2 callers use `raw_arith` directly and get `Ok(None)` for "try metamethod".
 
 ## Session log
 
 - **Session 1 (2026-04-11, Phase 0):** Oracle harness complete. `wrapper.{c,h}`, `src/lib.rs` FFI layer, `fixtures/gen_fixtures.py` (6 fixtures), `tests/differential_lua.rs` (`oracle_selftest` green). Duration: ~30 min.
 - **Session 2 (2026-04-11, Hour 0 / contract):** Lock-in decisions taken, full-port methodology doc written, plan doc created, `contract.rs` type architecture landed (604 LOC, 6 unit tests). Piccolo cloned to `/tmp/piccolo-ref` for inspiration reading only. 3 atomic commits on `feat/interactive-spike-lua`. Duration: ~45 min.
 - **Session 3 (2026-04-11, Stage 1 complete):** All four Stage 1 modules ported with oracle diff tests — lctype (250 LOC / 8 diff tests / byte-exact 257-entry table), lopcodes (435 LOC / 10 diff tests / byte-exact 85-opcode table + full decoder parity + `luaP_isOT`/`luaP_isIT` on every opcode), lmem growth strategy (130 LOC / 7 diff tests / real `luaM_growaux_` invoked via `lua_pcall`), lzio (295 LOC / 13 diff tests / read+get_addr+fill parity across chunk boundaries 1..=100). 4 atomic commits. Test count: 7 → 75. Duration: ~75 min.
+- **Session 4 (2026-04-11, Stage 2 complete):** Seven atomic commits landing the full Stage 2 type-contract-with-behavior block. lobject utility helpers (500 LOC / 7 diff tests / ceillog2, codeparam/applyparam, hexavalue, utf8esc). lobject::raw_arith (325 LOC / 13 diff tests / full 14-op cross product over int×int, float×float, mixed, and shifts, with real `luaO_rawarith` invoked under `lua_pcall` to catch div-by-zero). heap (410 LOC / 8 unit tests / 8-object-kind alloc/free/access with LIFO free lists). lstring (230 LOC / 8 diff tests / byte-exact `luaS_hash` via oracle shim — bytecode-compat guard for decision 6). lfunc (360 LOC / 9 unit tests / Proto/Closure/UpVal lifecycle including find-or-create + partial close). ltm (300 LOC / 2 diff tests / all 25 metamethod event names byte-exact vs `G(L)->tmname[i]`). lstate (280 LOC / 9 unit tests / LuaState::new + Thread push/pop/set_top). Test count: 75 → 176. Duration: ~90 min.
