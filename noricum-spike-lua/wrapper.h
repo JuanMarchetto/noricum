@@ -62,6 +62,30 @@ int wr_lctype_isprint(int c);
 int wr_lctype_isxdigit(int c);
 int wr_lctype_tolower(int c);    /* Only defined for 'A'..'Z'; returns (c | 0x20). */
 
+/* lopcodes — opcode metadata + instruction helpers (lopcodes.{c,h}). */
+int wr_lopcodes_num_opcodes(void);
+int wr_lopcodes_opmode(int op);       /* luaP_opmodes[op]; -1 if op out of range. */
+int wr_lopcodes_get_opcode(unsigned int i);   /* GET_OPCODE(i) */
+int wr_lopcodes_getarg_a(unsigned int i);
+int wr_lopcodes_getarg_b(unsigned int i);
+int wr_lopcodes_getarg_c(unsigned int i);
+int wr_lopcodes_getarg_k(unsigned int i);
+int wr_lopcodes_getarg_vb(unsigned int i);
+int wr_lopcodes_getarg_vc(unsigned int i);
+int wr_lopcodes_getarg_bx(unsigned int i);
+int wr_lopcodes_getarg_sbx(unsigned int i);
+int wr_lopcodes_getarg_ax(unsigned int i);
+int wr_lopcodes_getarg_sj(unsigned int i);
+int wr_lopcodes_is_ot(unsigned int i);
+int wr_lopcodes_is_it(unsigned int i);
+/* Opcode enum values, exposed so the Rust side can assert that its
+ * OpCode discriminants match C without redeclaring the enum. */
+int wr_lopcodes_op_tailcall(void);
+int wr_lopcodes_op_setlist(void);
+int wr_lopcodes_op_call(void);
+int wr_lopcodes_op_return(void);
+int wr_lopcodes_op_extraarg(void);
+
 #ifdef __cplusplus
 }
 #endif

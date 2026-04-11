@@ -20,8 +20,9 @@
 
 pub mod contract;
 pub mod lctype;
+pub mod lopcodes;
 
-use std::os::raw::{c_char, c_int, c_long, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 
 pub type SpikeHandle = *mut c_void;
 
@@ -46,6 +47,28 @@ unsafe extern "C" {
     pub fn wr_lctype_isprint(c: c_int) -> c_int;
     pub fn wr_lctype_isxdigit(c: c_int) -> c_int;
     pub fn wr_lctype_tolower(c: c_int) -> c_int;
+
+    // lopcodes oracle shims.
+    pub fn wr_lopcodes_num_opcodes() -> c_int;
+    pub fn wr_lopcodes_opmode(op: c_int) -> c_int;
+    pub fn wr_lopcodes_get_opcode(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_a(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_b(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_c(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_k(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_vb(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_vc(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_bx(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_sbx(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_ax(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_getarg_sj(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_is_ot(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_is_it(i: c_uint) -> c_int;
+    pub fn wr_lopcodes_op_tailcall() -> c_int;
+    pub fn wr_lopcodes_op_setlist() -> c_int;
+    pub fn wr_lopcodes_op_call() -> c_int;
+    pub fn wr_lopcodes_op_return() -> c_int;
+    pub fn wr_lopcodes_op_extraarg() -> c_int;
 }
 
 // TODO: add `pub mod contract;` once the Rust-side type architecture is

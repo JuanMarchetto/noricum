@@ -4,6 +4,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "lctype.h"
+#include "lopcodes.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -118,3 +119,40 @@ int wr_lctype_tolower(int c) {
     if (c >= 'A' && c <= 'Z') return c | 0x20;
     return c;
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * lopcodes oracle shims. Expose the opmode table byte-by-byte, all
+ * instruction-decoding macros as real functions, and the two helper
+ * functions luaP_isOT / luaP_isIT. Also export a handful of opcode
+ * discriminants so the Rust side can pin its enum.
+ * ---------------------------------------------------------------------------
+ */
+
+int wr_lopcodes_num_opcodes(void) { return NUM_OPCODES; }
+
+int wr_lopcodes_opmode(int op) {
+    if (op < 0 || op >= NUM_OPCODES) return -1;
+    return (int) luaP_opmodes[op];
+}
+
+int wr_lopcodes_get_opcode(unsigned int i) { return (int) GET_OPCODE((Instruction) i); }
+int wr_lopcodes_getarg_a(unsigned int i)   { return GETARG_A((Instruction) i); }
+int wr_lopcodes_getarg_b(unsigned int i)   { return GETARG_B((Instruction) i); }
+int wr_lopcodes_getarg_c(unsigned int i)   { return GETARG_C((Instruction) i); }
+int wr_lopcodes_getarg_k(unsigned int i)   { return GETARG_k((Instruction) i) ? 1 : 0; }
+int wr_lopcodes_getarg_vb(unsigned int i)  { return GETARG_vB((Instruction) i); }
+int wr_lopcodes_getarg_vc(unsigned int i)  { return GETARG_vC((Instruction) i); }
+int wr_lopcodes_getarg_bx(unsigned int i)  { return GETARG_Bx((Instruction) i); }
+int wr_lopcodes_getarg_sbx(unsigned int i) { return GETARG_sBx((Instruction) i); }
+int wr_lopcodes_getarg_ax(unsigned int i)  { return GETARG_Ax((Instruction) i); }
+int wr_lopcodes_getarg_sj(unsigned int i)  { return GETARG_sJ((Instruction) i); }
+
+int wr_lopcodes_is_ot(unsigned int i) { return luaP_isOT((Instruction) i); }
+int wr_lopcodes_is_it(unsigned int i) { return luaP_isIT((Instruction) i); }
+
+int wr_lopcodes_op_tailcall(void) { return (int) OP_TAILCALL; }
+int wr_lopcodes_op_setlist(void)  { return (int) OP_SETLIST; }
+int wr_lopcodes_op_call(void)     { return (int) OP_CALL; }
+int wr_lopcodes_op_return(void)   { return (int) OP_RETURN; }
+int wr_lopcodes_op_extraarg(void) { return (int) OP_EXTRAARG; }
