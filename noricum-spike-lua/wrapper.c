@@ -10,6 +10,7 @@
 #include "lobject.h"
 #include "lstring.h"
 #include "lstate.h"
+#include "ltm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -407,4 +408,27 @@ unsigned int wr_lstring_hash(const char* bytes, size_t len, unsigned int seed) {
     }
     lua_close(L);
     return h;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * ltm oracle — metamethod event name table.
+ * ---------------------------------------------------------------------------
+ */
+
+int wr_ltm_tm_n(void) { return TM_N; }
+
+int wr_ltm_event_name(int i, unsigned char* out_buf, size_t cap) {
+    if (i < 0 || i >= TM_N) return -1;
+    lua_State* L = luaL_newstate();
+    if (!L) return 0;
+    /* luaL_newstate invokes luaT_init which interns the event names. */
+    TString* name = G(L)->tmname[i];
+    size_t len;
+    const char* bytes = getlstr(name, len);
+    if (len > cap) len = cap;
+    memcpy(out_buf, bytes, len);
+    int result = (int) len;
+    lua_close(L);
+    return result;
 }

@@ -26,6 +26,7 @@ pub mod lmem;
 pub mod lobject;
 pub mod lopcodes;
 pub mod lstring;
+pub mod ltm;
 pub mod lzio;
 
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
@@ -136,6 +137,14 @@ unsafe extern "C" {
     /// the given byte sequence. Short and long strings both route
     /// through the same static `luaS_hash` internally.
     pub fn wr_lstring_hash(bytes: *const c_char, len: usize, seed: c_uint) -> c_uint;
+
+    /// Total number of tag methods (TM_N).
+    pub fn wr_ltm_tm_n() -> c_int;
+
+    /// Copy the nth interned metamethod event name into `out_buf`.
+    /// Returns the byte length on success, -1 for out-of-range `i`,
+    /// or 0 on oracle state init failure.
+    pub fn wr_ltm_event_name(i: c_int, out_buf: *mut u8, cap: usize) -> c_int;
 }
 
 // TODO: add `pub mod contract;` once the Rust-side type architecture is

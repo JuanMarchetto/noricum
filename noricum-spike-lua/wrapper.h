@@ -161,6 +161,17 @@ int wr_lobject_rawarith(int op,
  * prefer a non-zero sanity seed when checking for errors. */
 unsigned int wr_lstring_hash(const char* bytes, size_t len, unsigned int seed);
 
+/* ltm — metamethod event names (TMS enum).
+ *
+ * Spins up an ephemeral lua_State, runs luaT_init (invoked implicitly by
+ * luaL_newstate), and copies the nth interned event name into out_buf.
+ * Returns the byte length of the copied name on success, -1 if `i` is
+ * out of range, or 0 on state init failure. */
+int wr_ltm_event_name(int i, unsigned char* out_buf, size_t cap);
+
+/* ltm — total number of events. Returns TM_N from ltm.h. */
+int wr_ltm_tm_n(void);
+
 #ifdef __cplusplus
 }
 #endif

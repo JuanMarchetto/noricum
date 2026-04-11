@@ -492,6 +492,15 @@ pub struct GlobalState {
     pub main_thread: Option<ThreadHandle>,
     /// String interning table: hash → list of short-string handles.
     pub string_intern: HashMap<u32, Vec<StringHandle>>,
+    /// Hash seed used by `lstring::hash_bytes` for every string intern.
+    /// Matches `global_State::seed` in `lstate.h`. Set at bootstrap
+    /// time by `LuaState::new`.
+    pub hash_seed: u32,
+    /// Interned metamethod name handles indexed by `ltm::TagMethod`.
+    /// Populated by `init_metamethod_names` during state bootstrap;
+    /// stays `None` on an uninitialized `GlobalState::default()`.
+    /// Matches the `G(L)->tmname[TM_N]` array in `lstate.h`.
+    pub tm_names: Vec<StringHandle>,
 }
 
 /// The public VM handle. At the drop-in ABI boundary this is passed
