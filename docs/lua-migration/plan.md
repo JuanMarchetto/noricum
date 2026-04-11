@@ -1,6 +1,6 @@
 # Lua 5.4 → Safe Rust: Full Port Plan
 
-**Status:** Stage 4 v1 COMPLETE — ltable + lapi + lauxlib landed as a series of sub-commits (4.1.1–4.1.3 ltable, 4.2.1–4.2.5 lapi, 4.3.1–4.3.2 lauxlib). 331 tests green. Stage 3 v2 still deferred. Stage 4 deferrals: call/pcall, push_cclosure with upvalues, push_fstring, lua_error, openlibs, load* (all need Stage 5+).
+**Status:** Stage 5 IN PROGRESS — ldo + lvm skeleton landed (5.1–5.10). 390 tests green. End-to-end Lua function execution works: bytecode for `for i = 1, 10 do sum = sum + i end` runs and produces 55. Opcodes implemented: MOVE, LOAD{I,K,FALSE,TRUE,NIL}, all ARITH + K/I variants, JMP, EQ/LT/LE, TEST/TESTSET, NEW/GET/SET TABLE (+I/FIELD), CALL, FORPREP/FORLOOP, RETURN/RETURN0/RETURN1. Deferred: closures (OP_CLOSURE), upvalues, metamethod dispatch, varargs, tailcalls, generic-for, concat/len, string comparisons.
 **Branch:** `feat/interactive-spike-lua`
 **Scope:** Complete migration. No cuts. Drop-in ABI. See `docs/methodology/full-port-mode.md` for methodology and `memory/project_lua_full_port.md` for the seven lock-in decisions.
 **Started:** 2026-04-11
