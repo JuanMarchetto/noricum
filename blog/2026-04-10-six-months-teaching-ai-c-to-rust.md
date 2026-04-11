@@ -147,7 +147,7 @@ This is the centerpiece. The part of the post that, as far as I know, nobody els
 
 I have run Noricum against this file **fourteen times**. As of Run 14, the latest assembly has **598 compilation errors**. The best result I have ever achieved was Run 6, which assembled at **1 error** — a truncated function body at a module boundary that cascaded a brace imbalance through the rest of the file.
 
-Here is the timeline. All of it is in Noricum's `MEMORY.md` which is committed to the repo, and all the specific pipeline improvements are in the git log.
+Here is the timeline. The specific pipeline improvements are visible in the git log as commits P0 through P38.
 
 ### Run 1 — DeepSeek R1, no modular split (pre-P12)
 The file was treated as two modules based on a naive split. One module compiled (363 LOC, score 78). The other was 4,766 lines of stub functions (score 15) because the LLM could not fit enough context into one prompt to produce real implementations. 85 minutes wall time, 19 LLM calls, cost ~$4. Status: **FallbackUnsafe**.
@@ -310,7 +310,7 @@ I think that post is the one the Rust community needs right now, and I am the on
 
 **What comes next.** Run 15 is scheduled. Pipeline phase P39 is already in draft and targets the specific cross-module type contract mismatch mode that has dominated Runs 11 through 14. I am also planning to run Noricum against MIT Lincoln Laboratory's public DARPA TRACTOR Battery 01 benchmark as an independent baseline. The follow-up post will either be "miniz_zip compiles" or "Run 20 and here is what changed." Whichever comes first.
 
-If you made it this far, thank you. The repo is [here](https://github.com/JuanMarchetto/noricum). The MEMORY.md file in the repo root has the raw log of every run, every pipeline change, and every lesson I extracted. It is not polished, it is the actual working notes.
+If you made it this far, thank you. The repo is [here](https://github.com/JuanMarchetto/noricum). All the benchmark sources, diff-test harnesses, and the pipeline itself are MIT-licensed and reproducible.
 
 Juan Marchetto
 juanpatriciomarchetto@gmail.com

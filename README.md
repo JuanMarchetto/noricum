@@ -15,7 +15,7 @@ verification to migrate C code to safe, idiomatic Rust.
 
 > **Note:** Noricum-generated code is verified by differential testing against specific inputs, not formally proven correct for all possible inputs. Always review migrated code before deploying to production.
 
-**[Blog Post](blog/2026-03-06-c-to-rust-llm-agent.md)** | **[Quick Start](#quick-start)** | **[Benchmarks](#benchmark-results)**
+**[Blog](https://noricum.dev/blog/)** | **[Quick Start](#quick-start)** | **[Benchmarks](#benchmark-results)**
 
 ## Why Noricum
 

@@ -341,7 +341,7 @@
 <p>This is the centerpiece. The part of the post that, as far as I know, nobody else has published.</p>
 <p><strong>miniz_zip.c</strong>. 4,895 lines of C. Part of <a href="https://github.com/richgel999/miniz">richgel999/miniz</a>, which is a widely-used standalone zlib replacement. miniz_zip is the zip archive handling portion, which I picked deliberately because it combines several of the hardest patterns in C: dense pointer arithmetic, global mutable state, file I/O, a callback-based API for custom IO, manual memory pools, and a state machine for archive parsing that spans several functions.</p>
 <p>I have run Noricum against this file <strong>fourteen times</strong>. As of Run 14, the latest assembly has <strong>598 compilation errors</strong>. The best result I have ever achieved was Run 6, which assembled at <strong>1 error</strong> — a truncated function body at a module boundary that cascaded a brace imbalance through the rest of the file.</p>
-<p>Here is the timeline. All of it is in Noricum&rsquo;s <code>MEMORY.md</code> which is committed to the repo, and all the specific pipeline improvements are in the git log.</p>
+<p>Here is the timeline. The specific pipeline improvements are visible in the git log as commits P0 through P38.</p>
 <h3 id="run-1-deepseek-r1-no-modular-split-pre-p12">Run 1 — DeepSeek R1, no modular split (pre-P12)</h3>
 <p>The file was treated as two modules based on a naive split. One module compiled (363 LOC, score 78). The other was 4,766 lines of stub functions (score 15) because the LLM could not fit enough context into one prompt to produce real implementations. 85 minutes wall time, 19 LLM calls, cost ~$4. Status: <strong>FallbackUnsafe</strong>.</p>
 <p><strong>Lesson:</strong> Large files need real sub-division, not naive splitting.</p>
@@ -467,7 +467,7 @@
 <p>I am publishing this now instead of waiting for a clean miniz_zip success because the failure taxonomy is more valuable than another success story. Every consulting firm in this space will tell you they can migrate your code. Every academic paper reports a high success rate on files under 1,000 LOC. Nobody publishes &ldquo;here is a file we failed on fourteen times and these are every way it failed.&rdquo;</p>
 <p>I think that post is the one the Rust community needs right now, and I am the one who can write it without it costing anyone their contract or their academic credibility.</p>
 <p><strong>What comes next.</strong> Run 15 is scheduled. Pipeline phase P39 is already in draft and targets the specific cross-module type contract mismatch mode that has dominated Runs 11 through 14. I am also planning to run Noricum against MIT Lincoln Laboratory&rsquo;s public DARPA TRACTOR Battery 01 benchmark as an independent baseline. The follow-up post will either be &ldquo;miniz_zip compiles&rdquo; or &ldquo;Run 20 and here is what changed.&rdquo; Whichever comes first.</p>
-<p>If you made it this far, thank you. The repo is <a href="https://github.com/JuanMarchetto/noricum">here</a>. The MEMORY.md file in the repo root has the raw log of every run, every pipeline change, and every lesson I extracted. It is not polished, it is the actual working notes.</p>
+<p>If you made it this far, thank you. The repo is <a href="https://github.com/JuanMarchetto/noricum">here</a>. All the benchmark sources, diff-test harnesses, and the pipeline itself are MIT-licensed and reproducible.</p>
 <p>Juan Marchetto
 juanpatriciomarchetto@gmail.com
 Argentina, April 2026</p>
