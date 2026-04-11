@@ -48,7 +48,21 @@
 
 #![allow(dead_code)]
 
-use crate::contract::{LuaState, Thread};
+use crate::contract::{
+    LuaInteger, LuaNumber, LuaState, LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TLIGHTUSERDATA, LUA_TNIL,
+    LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE, LUA_TTHREAD, LUA_TUSERDATA, TValue, Thread,
+};
+use crate::lobject::{to_integer_ns, to_number_ns};
+
+// ---------------------------------------------------------------------------
+// Public constants matching `lua.h`. `LUA_TNONE` is exposed here because
+// it's the "out of range" sentinel returned by [`LuaState::type_at`] and
+// has no slot in the contract's type-tag table.
+// ---------------------------------------------------------------------------
+
+/// Returned by [`LuaState::type_at`] for indices that don't refer to any
+/// valid stack value. Matches the `LUA_TNONE` constant in `lua.h`.
+pub const LUA_TNONE: i32 = -1;
 
 // ---------------------------------------------------------------------------
 // Private helpers — current thread access and index translation.
@@ -68,6 +82,35 @@ impl LuaState {
     #[inline]
     fn current_thread_mut(&mut self) -> &mut Thread {
         self.global.heap.thread_mut(self.current_thread)
+    }
+
+    /// Like [`LuaState::index_to_slot`] but returns `None` on
+    /// out-of-range indices instead of panicking. Used by the
+    /// non-fatal queries in 4.2.2 (`type_at`, `is_*`, `to_*`) so
+    /// callers can safely probe indices without pre-bound-checking.
+    fn try_index_to_slot(&self, idx: i32) -> Option<u32> {
+        let top = self.current_thread().top;
+        if idx > 0 {
+            let slot = (idx - 1) as u32;
+            if slot < top { Some(slot) } else { None }
+        } else if idx < 0 {
+            let magnitude = idx.unsigned_abs();
+            if magnitude <= top && magnitude > 0 {
+                Some(top - magnitude)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Read the value at `idx` without panicking. Returns `None`
+    /// when the index is out of range or zero.
+    #[inline]
+    fn value_at(&self, idx: i32) -> Option<TValue> {
+        let slot = self.try_index_to_slot(idx)?;
+        Some(self.current_thread().stack[slot as usize])
     }
 
     /// Translate a Lua-style index (1-based positive, -1-based
@@ -210,12 +253,215 @@ impl LuaState {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 4.2.2 — type and access functions. These are the read side of
+// the Lua API: every `lua_is*` / `lua_to*` / `lua_type*` entry point.
+// None of them mutate the stack; they're pure observations used by C
+// code to inspect values the interpreter pushed.
+// ---------------------------------------------------------------------------
+
+impl LuaState {
+    /// Integer type tag at `idx`, or [`LUA_TNONE`] for out-of-range
+    /// indices. Matches `lua_type`. Uses the `LUA_T*` base constants
+    /// from `lua.h`, not the subtype-aware `LUA_V*` variant tags on
+    /// [`TValue::variant_tag`].
+    pub fn type_at(&self, idx: i32) -> i32 {
+        let Some(v) = self.value_at(idx) else {
+            return LUA_TNONE;
+        };
+        match v {
+            TValue::Nil => LUA_TNIL as i32,
+            TValue::False | TValue::True => LUA_TBOOLEAN as i32,
+            TValue::LightUserData(_) => LUA_TLIGHTUSERDATA as i32,
+            TValue::Integer(_) | TValue::Number(_) => LUA_TNUMBER as i32,
+            TValue::ShortString(_) | TValue::LongString(_) => LUA_TSTRING as i32,
+            TValue::Table(_) => LUA_TTABLE as i32,
+            TValue::LuaClosure(_) | TValue::LightCFunction(_) | TValue::CClosure(_) => {
+                LUA_TFUNCTION as i32
+            }
+            TValue::UserData(_) => LUA_TUSERDATA as i32,
+            TValue::Thread(_) => LUA_TTHREAD as i32,
+        }
+    }
+
+    /// Lua-visible name for a type tag. Matches `lua_typename`.
+    /// Returns `"no value"` for `LUA_TNONE` and the static
+    /// [`TValue::type_name`] string for everything else.
+    pub const fn type_name(tt: i32) -> &'static str {
+        match tt {
+            LUA_TNONE => "no value",
+            x if x == LUA_TNIL as i32 => "nil",
+            x if x == LUA_TBOOLEAN as i32 => "boolean",
+            x if x == LUA_TLIGHTUSERDATA as i32 => "userdata",
+            x if x == LUA_TNUMBER as i32 => "number",
+            x if x == LUA_TSTRING as i32 => "string",
+            x if x == LUA_TTABLE as i32 => "table",
+            x if x == LUA_TFUNCTION as i32 => "function",
+            x if x == LUA_TUSERDATA as i32 => "userdata",
+            x if x == LUA_TTHREAD as i32 => "thread",
+            _ => "unknown",
+        }
+    }
+
+    /// Matches `lua_isnil`.
+    pub fn is_nil(&self, idx: i32) -> bool {
+        matches!(self.value_at(idx), Some(TValue::Nil))
+    }
+
+    /// Matches `lua_isnone`. Index is out of range entirely.
+    pub fn is_none(&self, idx: i32) -> bool {
+        self.value_at(idx).is_none()
+    }
+
+    /// Matches `lua_isnoneornil`.
+    pub fn is_none_or_nil(&self, idx: i32) -> bool {
+        match self.value_at(idx) {
+            None | Some(TValue::Nil) => true,
+            Some(_) => false,
+        }
+    }
+
+    /// Matches `lua_isboolean`.
+    pub fn is_boolean(&self, idx: i32) -> bool {
+        matches!(self.value_at(idx), Some(TValue::False | TValue::True))
+    }
+
+    /// Matches `lua_isinteger` — true only for exact integer
+    /// subtype, not for integer-valued floats.
+    pub fn is_integer(&self, idx: i32) -> bool {
+        matches!(self.value_at(idx), Some(TValue::Integer(_)))
+    }
+
+    /// Matches `lua_isnumber` — true for both integer and float
+    /// subtypes. C Lua additionally coerces strings that look
+    /// like numbers; that coercion needs the string-to-number
+    /// machinery from Stage 4.2.3 / later.
+    pub fn is_number(&self, idx: i32) -> bool {
+        matches!(
+            self.value_at(idx),
+            Some(TValue::Integer(_) | TValue::Number(_))
+        )
+    }
+
+    /// Matches `lua_isstring`. C Lua also returns true for any
+    /// number (since `lua_tolstring` would coerce it). Same
+    /// caveat — coercion lands with the number-to-string path.
+    pub fn is_string(&self, idx: i32) -> bool {
+        matches!(
+            self.value_at(idx),
+            Some(TValue::ShortString(_) | TValue::LongString(_))
+        )
+    }
+
+    /// Matches `lua_istable`.
+    pub fn is_table(&self, idx: i32) -> bool {
+        matches!(self.value_at(idx), Some(TValue::Table(_)))
+    }
+
+    /// Matches `lua_isfunction`. True for all three function
+    /// flavors (Lua closure, C closure, light C function).
+    pub fn is_function(&self, idx: i32) -> bool {
+        matches!(
+            self.value_at(idx),
+            Some(TValue::LuaClosure(_) | TValue::CClosure(_) | TValue::LightCFunction(_))
+        )
+    }
+
+    /// Matches `lua_iscfunction`. True for C closures and light
+    /// C functions, false for Lua closures.
+    pub fn is_cfunction(&self, idx: i32) -> bool {
+        matches!(
+            self.value_at(idx),
+            Some(TValue::CClosure(_) | TValue::LightCFunction(_))
+        )
+    }
+
+    /// Matches `lua_isuserdata`. True for both full and light
+    /// userdata.
+    pub fn is_userdata(&self, idx: i32) -> bool {
+        matches!(
+            self.value_at(idx),
+            Some(TValue::UserData(_) | TValue::LightUserData(_))
+        )
+    }
+
+    /// Matches `lua_isthread`.
+    pub fn is_thread(&self, idx: i32) -> bool {
+        matches!(self.value_at(idx), Some(TValue::Thread(_)))
+    }
+
+    /// Matches `lua_toboolean`: `nil` and `false` are false,
+    /// everything else (including `0` and the empty string) is
+    /// true.
+    pub fn to_boolean(&self, idx: i32) -> bool {
+        match self.value_at(idx) {
+            Some(v) => v.is_truthy(),
+            None => false,
+        }
+    }
+
+    /// Matches `lua_tointegerx` with string coercion disabled.
+    /// Returns `None` when the value at `idx` isn't an integer
+    /// subtype and isn't an integer-valued float. Uses
+    /// [`crate::lobject::to_integer_ns`] for the F2Ieq semantics
+    /// Stage 2 already ported.
+    pub fn to_integer_x(&self, idx: i32) -> Option<LuaInteger> {
+        to_integer_ns(&self.value_at(idx)?)
+    }
+
+    /// Matches `lua_tonumberx` with string coercion disabled.
+    /// Returns `None` when the value isn't numeric. Integers are
+    /// promoted to `f64`.
+    pub fn to_number_x(&self, idx: i32) -> Option<LuaNumber> {
+        to_number_ns(&self.value_at(idx)?)
+    }
+
+    /// Matches `lua_tolstring` in the "no implicit coercion"
+    /// mode. Returns the raw byte payload of a short or long
+    /// string without mutating the stack. C Lua's version
+    /// rewrites numbers in place as their decimal
+    /// representation; we defer that to the Stage 5 format
+    /// conversion path because it needs the write side of the
+    /// API plus the number-printer.
+    pub fn to_lstring(&self, idx: i32) -> Option<&[u8]> {
+        let slot = self.try_index_to_slot(idx)?;
+        let v = self.current_thread().stack[slot as usize];
+        match v {
+            TValue::ShortString(h) | TValue::LongString(h) => {
+                Some(self.global.heap.string(h).bytes.as_slice())
+            }
+            _ => None,
+        }
+    }
+
+    /// Raw length of the value at `idx`. Matches `lua_rawlen`:
+    /// byte length for strings, [`crate::ltable::Heap::table_len`]
+    /// border for tables, payload length for full userdata, and
+    /// `0` for anything else.
+    pub fn raw_len(&self, idx: i32) -> u64 {
+        let Some(v) = self.value_at(idx) else {
+            return 0;
+        };
+        match v {
+            TValue::ShortString(h) | TValue::LongString(h) => {
+                self.global.heap.string(h).bytes.len() as u64
+            }
+            TValue::Table(h) => self.global.heap.table_len(h),
+            TValue::UserData(h) => self.global.heap.userdata_get(h).data.len() as u64,
+            _ => 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use crate::contract::{LuaState, TValue};
+    use super::LUA_TNONE;
+    use crate::contract::{
+        LuaState, TValue, LUA_TBOOLEAN, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE,
+    };
 
     fn state_with_values(values: &[TValue]) -> LuaState {
         let mut state = LuaState::new(0);
@@ -407,5 +653,177 @@ mod tests {
     fn index_to_slot_rejects_negative_overflow() {
         let state = state_with_values(&[TValue::Integer(1)]);
         let _ = state.index_to_slot(-5);
+    }
+
+    // ---- 4.2.2 type and access functions --------------------------
+
+    #[test]
+    fn type_at_returns_lua_tnone_for_out_of_range_index() {
+        let state = LuaState::new(0);
+        assert_eq!(state.type_at(1), LUA_TNONE);
+        assert_eq!(state.type_at(-1), LUA_TNONE);
+    }
+
+    #[test]
+    fn type_at_maps_every_tvalue_to_the_matching_base_tag() {
+        let mut state = LuaState::new(0);
+        let s = state.global.heap.alloc_string(crate::contract::LuaString {
+            bytes: b"x".to_vec(),
+            hash: 0,
+            reserved: 0,
+            is_long: false,
+            hash_ready: false,
+        });
+        let t = state.global.heap.alloc_table(crate::contract::Table::default());
+        {
+            let thread = state.current_thread_mut();
+            thread.push(TValue::Nil);
+            thread.push(TValue::True);
+            thread.push(TValue::Integer(1));
+            thread.push(TValue::Number(1.5));
+            thread.push(TValue::ShortString(s));
+            thread.push(TValue::Table(t));
+        }
+        assert_eq!(state.type_at(1), LUA_TNIL as i32);
+        assert_eq!(state.type_at(2), LUA_TBOOLEAN as i32);
+        assert_eq!(state.type_at(3), LUA_TNUMBER as i32);
+        assert_eq!(state.type_at(4), LUA_TNUMBER as i32);
+        assert_eq!(state.type_at(5), LUA_TSTRING as i32);
+        assert_eq!(state.type_at(6), LUA_TTABLE as i32);
+    }
+
+    #[test]
+    fn type_name_handles_lua_tnone_and_regular_tags() {
+        assert_eq!(LuaState::type_name(LUA_TNONE), "no value");
+        assert_eq!(LuaState::type_name(LUA_TNIL as i32), "nil");
+        assert_eq!(LuaState::type_name(LUA_TNUMBER as i32), "number");
+        assert_eq!(LuaState::type_name(LUA_TTABLE as i32), "table");
+    }
+
+    #[test]
+    fn is_nil_distinguishes_nil_from_absent_slot() {
+        let state = state_with_values(&[TValue::Nil, TValue::Integer(1)]);
+        assert!(state.is_nil(1));
+        assert!(!state.is_nil(2));
+        // Out-of-range is NOT nil — it's none.
+        assert!(!state.is_nil(3));
+        assert!(state.is_none(3));
+        assert!(state.is_none_or_nil(1));
+        assert!(state.is_none_or_nil(3));
+        assert!(!state.is_none_or_nil(2));
+    }
+
+    #[test]
+    fn is_integer_vs_is_number_distinguishes_subtypes() {
+        let state = state_with_values(&[TValue::Integer(1), TValue::Number(1.5)]);
+        assert!(state.is_integer(1));
+        assert!(!state.is_integer(2));
+        assert!(state.is_number(1));
+        assert!(state.is_number(2));
+    }
+
+    #[test]
+    fn is_function_covers_all_three_function_flavors() {
+        // LuaClosure -> is_function true, is_cfunction false.
+        let mut state = LuaState::new(0);
+        let proto = state.global.heap.alloc_proto(crate::contract::Proto::default());
+        let closure = state.global.heap.alloc_lclosure(crate::contract::LClosure {
+            proto,
+            upvalues: vec![],
+        });
+        state
+            .current_thread_mut()
+            .push(TValue::LuaClosure(closure));
+        assert!(state.is_function(1));
+        assert!(!state.is_cfunction(1));
+    }
+
+    #[test]
+    fn to_boolean_nil_and_false_are_false_rest_is_true() {
+        let state = state_with_values(&[
+            TValue::Nil,
+            TValue::False,
+            TValue::True,
+            TValue::Integer(0),
+        ]);
+        assert!(!state.to_boolean(1));
+        assert!(!state.to_boolean(2));
+        assert!(state.to_boolean(3));
+        // 0 is truthy in Lua (unlike C).
+        assert!(state.to_boolean(4));
+        // Out-of-range is false.
+        assert!(!state.to_boolean(99));
+    }
+
+    #[test]
+    fn to_integer_converts_integer_subtypes_exactly() {
+        let state = state_with_values(&[
+            TValue::Integer(42),
+            TValue::Number(7.0),   // exact integer float
+            TValue::Number(7.5),   // non-integer float
+            TValue::Nil,
+        ]);
+        assert_eq!(state.to_integer_x(1), Some(42));
+        assert_eq!(state.to_integer_x(2), Some(7));
+        assert_eq!(state.to_integer_x(3), None);
+        assert_eq!(state.to_integer_x(4), None);
+    }
+
+    #[test]
+    fn to_number_promotes_integers_to_float() {
+        let state = state_with_values(&[
+            TValue::Integer(42),
+            TValue::Number(1.5),
+            TValue::Nil,
+        ]);
+        assert_eq!(state.to_number_x(1), Some(42.0));
+        assert_eq!(state.to_number_x(2), Some(1.5));
+        assert_eq!(state.to_number_x(3), None);
+    }
+
+    #[test]
+    fn to_lstring_returns_raw_bytes_for_string_slots() {
+        let mut state = LuaState::new(0);
+        let h = state.global.heap.alloc_string(crate::contract::LuaString {
+            bytes: b"hello".to_vec(),
+            hash: 0,
+            reserved: 0,
+            is_long: false,
+            hash_ready: false,
+        });
+        state.current_thread_mut().push(TValue::ShortString(h));
+        assert_eq!(state.to_lstring(1), Some(b"hello".as_slice()));
+        // Non-string returns None (no coercion in Stage 4.2.2).
+        state.current_thread_mut().push(TValue::Integer(42));
+        assert_eq!(state.to_lstring(2), None);
+    }
+
+    #[test]
+    fn raw_len_reports_byte_length_for_strings() {
+        let mut state = LuaState::new(0);
+        let h = state.global.heap.alloc_string(crate::contract::LuaString {
+            bytes: b"12345".to_vec(),
+            hash: 0,
+            reserved: 0,
+            is_long: false,
+            hash_ready: false,
+        });
+        state.current_thread_mut().push(TValue::ShortString(h));
+        assert_eq!(state.raw_len(1), 5);
+    }
+
+    #[test]
+    fn raw_len_reports_table_border_via_table_len() {
+        let mut state = LuaState::new(0);
+        let t = state.global.heap.alloc_table(crate::contract::Table {
+            array: vec![
+                TValue::Integer(1),
+                TValue::Integer(2),
+                TValue::Integer(3),
+            ],
+            ..crate::contract::Table::default()
+        });
+        state.current_thread_mut().push(TValue::Table(t));
+        assert_eq!(state.raw_len(1), 3);
     }
 }
