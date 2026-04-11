@@ -16,7 +16,7 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use spike::contract::ZipReader as RustZipReader;
+use spike::contract::{ZipReader as RustZipReader, ZipWriter as RustZipWriter};
 use spike::{
     wr_reader_close, wr_reader_extract, wr_reader_get_num_files, wr_reader_locate, wr_reader_open,
     wr_reader_stat,
@@ -276,7 +276,7 @@ fn reader_diff_test_multi_small_zip() {
 fn snapshot_via_rust(path: &Path) -> Result<ArchiveSnapshot, String> {
     let mut reader = RustZipReader::open(path).map_err(|e| format!("rust open: {e:?}"))?;
     let n = reader.num_entries();
-    let headers: Vec<_> = reader.entries().iter().cloned().collect();
+    let headers: Vec<_> = reader.entries().to_vec();
 
     let mut entries = Vec::with_capacity(n);
     for (idx, hdr) in headers.into_iter().enumerate() {
@@ -345,6 +345,167 @@ fn reader_full_diff_oracle_vs_rust() {
     );
 }
 
+/// The writer-side differential proof: write a set of entries via the
+/// Rust writer, then open the resulting archive via the C oracle and
+/// verify every entry extracts to exactly the bytes we put in. Any
+/// deviation fails the test. This is what "the Rust writer produces a
+/// valid miniz-compatible archive" means in practice.
+#[test]
+fn writer_diff_roundtrip_via_c_oracle() {
+    let fixtures: Vec<(&str, Vec<u8>)> = vec![
+        ("hello.txt", b"hello\n".to_vec()),
+        ("empty.bin", Vec::new()),
+        ("pattern.txt", b"aaaaaaaaaaaaaaaaaaaaaa\n".to_vec()),
+        ("random.bin", (0..8192u32).map(|i| (i as u8).wrapping_mul(37)).collect()),
+        ("unicode_ascii.txt", "nihongo content\n".as_bytes().to_vec()),
+        ("deeply/nested/path/file.txt", b"nested body\n".to_vec()),
+        ("dir1/a.txt", b"A\n".to_vec()),
+        ("dir1/b.txt", b"B\n".to_vec()),
+        ("dir2/c.txt", b"C\n".to_vec()),
+        (
+            "big.bin",
+            (0..100_000u32).map(|i| ((i * 7) % 251) as u8).collect(),
+        ),
+    ];
+
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "noricum-spike-writer-diff-{}.zip",
+        std::process::id()
+    ));
+
+    // Build archive with Rust writer.
+    {
+        let mut w = RustZipWriter::create(&path).expect("create");
+        for (name, body) in &fixtures {
+            w.add_mem(name, body).expect("add");
+        }
+        w.finalize().expect("finalize");
+        w.close().expect("close");
+    }
+
+    // Open and extract with C oracle.
+    let c_path = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+    let h = unsafe { wr_reader_open(c_path.as_ptr()) };
+    assert!(!h.is_null(), "C oracle failed to open Rust-written archive");
+
+    let n = unsafe { wr_reader_get_num_files(h) };
+    assert_eq!(n as usize, fixtures.len(), "entry count mismatch");
+
+    for (idx, (expected_name, expected_body)) in fixtures.iter().enumerate() {
+        // Stat check: name + size + crc32 via oracle.
+        let mut name_buf = vec![0i8; 512];
+        let mut size: usize = 0;
+        let mut crc32: u32 = 0;
+        let rc = unsafe {
+            wr_reader_stat(
+                h,
+                idx as i32,
+                name_buf.as_mut_ptr(),
+                name_buf.len(),
+                &mut size,
+                &mut crc32,
+            )
+        };
+        assert_eq!(rc, 0, "C stat failed on entry {idx}");
+
+        let name_bytes: Vec<u8> = name_buf
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
+        let name = String::from_utf8_lossy(&name_bytes);
+        assert_eq!(
+            name.as_ref(),
+            *expected_name,
+            "name mismatch at entry {idx}"
+        );
+        assert_eq!(size, expected_body.len(), "size mismatch at {name}");
+
+        // Extract and byte-compare.
+        let mut body = vec![0u8; expected_body.len()];
+        if !expected_body.is_empty() {
+            let rc = unsafe {
+                wr_reader_extract(h, idx as i32, body.as_mut_ptr() as *mut _, body.len())
+            };
+            assert_eq!(rc, 0, "C extract failed on entry {idx} ({name})");
+        }
+        assert_eq!(&body, expected_body, "byte mismatch at {name}");
+    }
+
+    unsafe { wr_reader_close(h) };
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Writer + Reader closed loop via Rust on the ENTIRE corpus pattern
+/// (from fixtures/gen_fixtures.py): generate the same logical content
+/// with the Rust writer, then read it back with the Rust reader, then
+/// also read it back with the C oracle. All three views must agree.
+#[test]
+fn writer_diff_rust_writer_rust_reader_c_oracle_all_three_agree() {
+    let entries: Vec<(&str, Vec<u8>)> = vec![
+        ("hello.txt", b"hello\n".to_vec()),
+        ("multi/0.txt", b"zero\n".to_vec()),
+        ("multi/1.txt", b"one\n".to_vec()),
+        ("multi/2.txt", b"two\n".to_vec()),
+        ("compressible.txt", vec![b'x'; 4096]),
+        ("random.bin", (0..512u32).map(|i| (i as u8) ^ 0xAA).collect()),
+    ];
+
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "noricum-spike-three-way-{}.zip",
+        std::process::id()
+    ));
+
+    // Write via Rust.
+    {
+        let mut w = RustZipWriter::create(&path).expect("create");
+        for (name, body) in &entries {
+            w.add_mem(name, body).expect("add");
+        }
+        w.finalize().expect("finalize");
+    }
+
+    // View 1: Rust reader.
+    let mut rust_reader = RustZipReader::open(&path).expect("rust reader");
+    assert_eq!(rust_reader.num_entries(), entries.len());
+    let rust_headers: Vec<_> = rust_reader.entries().to_vec();
+    let rust_extracted: Vec<Vec<u8>> = (0..rust_headers.len())
+        .map(|i| rust_reader.extract_to_mem(i).expect("rust extract"))
+        .collect();
+
+    // View 2: C oracle reader.
+    let oracle = snapshot_via_oracle(&path).expect("oracle");
+    assert_eq!(oracle.entries.len(), entries.len());
+
+    // Compare all three views.
+    for (i, (name, body)) in entries.iter().enumerate() {
+        assert_eq!(rust_headers[i].file_name, *name, "rust name at {i}");
+        assert_eq!(oracle.entries[i].name, *name, "oracle name at {i}");
+        assert_eq!(&rust_extracted[i], body, "rust body at {name}");
+        // Oracle only snapshots first 64 bytes — compare prefix.
+        let body_prefix = &body[..body.len().min(FIRST_BYTES_CAP)];
+        assert_eq!(
+            &oracle.entries[i].first_bytes,
+            body_prefix,
+            "oracle body prefix at {name}"
+        );
+        assert_eq!(
+            oracle.entries[i].size,
+            body.len(),
+            "oracle size at {name}"
+        );
+        assert_eq!(
+            oracle.entries[i].crc32,
+            rust_headers[i].crc32,
+            "crc32 mismatch at {name}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Byte-for-byte comparison on a handful of fixtures where the content is
 /// small enough that we can afford the direct equality check on the full
 /// body, not just the first 64 bytes.
@@ -364,7 +525,7 @@ fn reader_byte_equal_small_fixtures() {
         let n = rust_reader.num_entries();
 
         // Fetch the names and sizes up front to avoid borrow-issues during extract.
-        let headers: Vec<_> = rust_reader.entries().iter().cloned().collect();
+        let headers: Vec<_> = rust_reader.entries().to_vec();
 
         for (idx, hdr) in headers.iter().enumerate() {
             let rust_body = rust_reader.extract_to_mem(idx).expect("rust extract");

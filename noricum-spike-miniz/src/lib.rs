@@ -9,6 +9,7 @@
 
 pub mod contract;
 pub mod reader;
+pub mod writer;
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 
