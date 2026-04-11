@@ -23,6 +23,7 @@ pub mod heap;
 pub mod lapi;
 pub mod lauxlib;
 pub mod lctype;
+pub mod ldo;
 pub mod lfunc;
 pub mod lgc;
 pub mod lmem;

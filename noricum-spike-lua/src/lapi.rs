@@ -71,9 +71,10 @@ pub const LUA_TNONE: i32 = -1;
 impl LuaState {
     /// Borrow the currently running thread. Short-circuits through
     /// `current_thread` into the heap so every lapi call has a
-    /// single-line path to the stack.
+    /// single-line path to the stack. `pub(crate)` so sibling
+    /// modules like `ldo` can reuse the single-line path.
     #[inline]
-    fn current_thread(&self) -> &Thread {
+    pub(crate) fn current_thread(&self) -> &Thread {
         self.global.heap.thread(self.current_thread)
     }
 
