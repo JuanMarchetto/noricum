@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blog — Noricum</title>
+  <meta name="description" content="Essays and research notes from the Noricum project — autonomous C→Rust migration with verified behavioral equivalence.">
+  <meta name="author" content="Juan Patricio Marchetto">
+
+  <meta property="og:title" content="Noricum — Blog">
+  <meta property="og:description" content="Essays and research notes from the Noricum project.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://noricum.dev/blog/">
+  <meta property="og:site_name" content="Noricum">
+
+  <link rel="canonical" href="https://noricum.dev/blog/">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            forge: { 50:'#fef9ec',100:'#fcefc9',200:'#f9dc8e',300:'#f5c354',400:'#f2ae2e',500:'#ec9116',600:'#d16c10',700:'#ad4b12',800:'#8d3b15',900:'#743115',950:'#431807' },
+            steel: { 50:'#f6f7f9',100:'#eceef2',200:'#d5d9e2',300:'#b0b8c9',400:'#8592ab',500:'#667591',600:'#515e78',700:'#434d62',800:'#3a4253',900:'#343a47',950:'#0f1117' },
+            rust:  { 400:'#fb923c',500:'#f97316',600:'#ea580c',700:'#c2410c' }
+          },
+          fontFamily: {
+            display: ['"DM Serif Display"','Georgia','serif'],
+            body:    ['"Outfit"','system-ui','sans-serif'],
+            mono:    ['"IBM Plex Mono"','monospace']
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: #08080c;
+      color: #d1d5db;
+      font-family: 'Outfit', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9999;
+      opacity: 0.025;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+    .nav-glass {
+      background: rgba(8, 8, 12, 0.72);
+      backdrop-filter: blur(18px) saturate(160%);
+      -webkit-backdrop-filter: blur(18px) saturate(160%);
+    }
+
+    .post-card {
+      display: block;
+      padding: 1.75rem 1.8rem;
+      background: rgba(255, 255, 255, 0.018);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      transition: all 0.2s ease;
+    }
+    .post-card:hover {
+      background: rgba(245, 195, 84, 0.03);
+      border-color: rgba(245, 195, 84, 0.25);
+      transform: translateY(-1px);
+    }
+    .post-title {
+      font-family: 'DM Serif Display', Georgia, serif;
+      font-size: 1.5rem;
+      line-height: 1.25;
+      color: #ffffff;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.005em;
+    }
+    .post-card:hover .post-title { color: #f9dc8e; }
+    .post-meta {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.8rem;
+      color: #8592ab;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.85rem;
+    }
+    .post-excerpt {
+      color: #a8b0c0;
+      line-height: 1.6;
+      font-size: 0.97rem;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav-glass fixed top-0 w-full z-50 border-b border-white/5">
+    <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-3 group">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-forge-500 to-rust-600 flex items-center justify-center text-white font-display text-lg font-bold shadow-lg shadow-forge-500/20">N</div>
+        <span class="font-display text-xl text-white tracking-tight">Noricum</span>
+      </a>
+      <div class="hidden md:flex items-center gap-8 text-sm font-body text-steel-300">
+        <a href="/#features" class="hover:text-forge-400 transition-colors">Features</a>
+        <a href="/#results" class="hover:text-forge-400 transition-colors">Results</a>
+        <a href="/#pipeline" class="hover:text-forge-400 transition-colors">How It Works</a>
+        <a href="/blog/" class="text-forge-400 transition-colors">Blog</a>
+      </div>
+      <a href="https://github.com/JuanMarchetto/noricum" target="_blank" rel="noopener" class="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-steel-200 hover:bg-white/10 hover:border-forge-700/50 transition-all">
+        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+        <span>GitHub</span>
+      </a>
+    </div>
+  </nav>
+
+  <!-- Blog list -->
+  <main class="pt-32 pb-24 px-6">
+    <div class="max-w-3xl mx-auto">
+
+      <header class="mb-14">
+        <h1 class="font-display text-5xl text-white tracking-tight mb-4">Blog</h1>
+        <p class="text-steel-400 text-lg max-w-2xl leading-relaxed">
+          Essays and research notes from the Noricum project. Posts track real migration experiments, pipeline evolution, and honest failure analysis from the frontier of LLM-driven C→Rust translation.
+        </p>
+      </header>
+
+      <div class="space-y-5">
+
+        <a href="/blog/six-months-teaching-ai-c-to-rust.html" class="post-card">
+          <div class="post-meta">2026-04-10 · 5,000 words · ~22 min read</div>
+          <h2 class="post-title">Teaching an AI to Migrate Real C Code to Rust: Every Way It Failed</h2>
+          <p class="post-excerpt">
+            Six months building Noricum, an autonomous LLM-driven C→Rust migration pipeline. Five successful byte-exact migrations of real OSS libraries (cjson, http-parser, genann, olive.c, expr_eval) and one stubborn 14-run failure on miniz_zip.c (4895 LOC). The complete failure taxonomy, 38 documented pipeline improvements, and 12 repair rules. An intermediate report, not a conclusion.
+          </p>
+        </a>
+
+        <a href="https://github.com/JuanMarchetto/noricum/blob/main/blog/2026-03-06-c-to-rust-llm-agent.md" target="_blank" rel="noopener" class="post-card">
+          <div class="post-meta">2026-03-06 · ~12 min read · on GitHub</div>
+          <h2 class="post-title">I Built an LLM Agent That Migrates C to Safe Rust — With 0 Unsafe Blocks</h2>
+          <p class="post-excerpt">
+            The original introduction to Noricum. How the 9-stage pipeline works, why differential testing is non-negotiable, and first results on cjson (1441 LOC subset) migrated to 1098 lines of safe Rust with byte-exact output comparison.
+          </p>
+        </a>
+
+      </div>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-white/5 py-12">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="flex flex-col md:flex-row items-center justify-between gap-6">
+        <div class="flex items-center gap-3">
+          <div class="w-6 h-6 rounded-md bg-gradient-to-br from-forge-500 to-rust-600 flex items-center justify-center text-white font-display text-xs font-bold">N</div>
+          <span class="font-display text-lg text-white">Noricum</span>
+          <span class="text-steel-600 text-sm">· MIT License</span>
+        </div>
+        <div class="flex items-center gap-6 text-sm text-steel-400">
+          <a href="https://github.com/JuanMarchetto/noricum" target="_blank" class="hover:text-forge-400 transition-colors">GitHub</a>
+          <a href="/blog/" class="hover:text-forge-400 transition-colors">Blog</a>
+          <a href="https://github.com/JuanMarchetto/noricum/blob/main/CONTRIBUTING.md" target="_blank" class="hover:text-forge-400 transition-colors">Contributing</a>
+          <a href="mailto:juanpatriciomarchetto@gmail.com" class="hover:text-forge-400 transition-colors">Contact</a>
+        </div>
+      </div>
+      <p class="text-center text-xs text-steel-600 mt-8">Built by Juan Patricio Marchetto · Named after the Celtic kingdom famed for its legendary steel</p>
+    </div>
+  </footer>
+
+</body>
+</html>

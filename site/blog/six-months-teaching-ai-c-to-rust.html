@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Teaching an AI to Migrate Real C Code to Rust: Every Way It Failed — Noricum</title>
+  <meta name="description" content="Six months building a solo LLM-driven C→Rust migration pipeline. Five successful byte-exact migrations of real OSS libraries (cjson, http-parser, genann, olive.c, expr_eval). One stubborn 14-run failure on miniz_zip.c (4895 LOC). The complete failure taxonomy, plus 38 documented pipeline improvements and 12 repair rules.">
+  <meta name="author" content="Juan Patricio Marchetto">
+  <meta name="keywords" content="C to Rust, migration, LLM, memory safety, autonomous agent, DARPA TRACTOR, failure taxonomy">
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Teaching an AI to Migrate Real C Code to Rust: Every Way It Failed">
+  <meta property="og:description" content="Six months building a solo LLM-driven C→Rust migration pipeline. Five successful byte-exact migrations of real OSS libraries (cjson, http-parser, genann, olive.c, expr_eval). One stubborn 14-run failure on miniz_zip.c (4895 LOC). The complete failure taxonomy, plus 38 documented pipeline improvements and 12 repair rules.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://noricum.dev/blog/six-months-teaching-ai-c-to-rust.html">
+  <meta property="og:site_name" content="Noricum">
+  <meta property="article:published_time" content="2026-04-10T00:00:00Z">
+  <meta property="article:author" content="Juan Patricio Marchetto">
+
+  <!-- Twitter Card (for people sharing the link, even though the author is off Twitter) -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Teaching an AI to Migrate Real C Code to Rust: Every Way It Failed">
+  <meta name="twitter:description" content="Six months building a solo LLM-driven C→Rust migration pipeline. Five successful byte-exact migrations of real OSS libraries (cjson, http-parser, genann, olive.c, expr_eval). One stubborn 14-run failure on miniz_zip.c (4895 LOC). The complete failure taxonomy, plus 38 documented pipeline improvements and 12 repair rules.">
+
+  <link rel="canonical" href="https://noricum.dev/blog/six-months-teaching-ai-c-to-rust.html">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F525;</text></svg>">
+
+  <!-- Fonts: match landing page -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Tailwind + shared config -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            forge: { 50:'#fef9ec',100:'#fcefc9',200:'#f9dc8e',300:'#f5c354',400:'#f2ae2e',500:'#ec9116',600:'#d16c10',700:'#ad4b12',800:'#8d3b15',900:'#743115',950:'#431807' },
+            steel: { 50:'#f6f7f9',100:'#eceef2',200:'#d5d9e2',300:'#b0b8c9',400:'#8592ab',500:'#667591',600:'#515e78',700:'#434d62',800:'#3a4253',900:'#343a47',950:'#0f1117' },
+            rust:  { 400:'#fb923c',500:'#f97316',600:'#ea580c',700:'#c2410c' }
+          },
+          fontFamily: {
+            display: ['"DM Serif Display"','Georgia','serif'],
+            body:    ['"Outfit"','system-ui','sans-serif'],
+            mono:    ['"IBM Plex Mono"','monospace']
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: #08080c;
+      color: #d1d5db;
+      font-family: 'Outfit', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9999;
+      opacity: 0.025;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+
+    .nav-glass {
+      background: rgba(8, 8, 12, 0.72);
+      backdrop-filter: blur(18px) saturate(160%);
+      -webkit-backdrop-filter: blur(18px) saturate(160%);
+    }
+
+    /* Article typography optimized for reading */
+    .article {
+      font-family: 'Outfit', system-ui, sans-serif;
+      font-size: 1.0625rem;
+      line-height: 1.72;
+      color: #d7dbe3;
+      max-width: 70ch;
+      margin: 0 auto;
+    }
+    .article > * + * { margin-top: 1.25em; }
+    .article h1 {
+      font-family: 'DM Serif Display', Georgia, serif;
+      font-size: clamp(2.1rem, 4.5vw, 3.1rem);
+      line-height: 1.15;
+      color: #ffffff;
+      letter-spacing: -0.01em;
+      margin-bottom: 0.4em;
+    }
+    .article h2 {
+      font-family: 'DM Serif Display', Georgia, serif;
+      font-size: 1.75rem;
+      line-height: 1.25;
+      color: #ffffff;
+      margin-top: 2.4em;
+      margin-bottom: 0.4em;
+      letter-spacing: -0.005em;
+      padding-bottom: 0.25em;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .article h3 {
+      font-family: 'Outfit', system-ui, sans-serif;
+      font-weight: 600;
+      font-size: 1.25rem;
+      color: #f5f5f7;
+      margin-top: 1.8em;
+      margin-bottom: 0.35em;
+    }
+    .article p { margin-bottom: 0; }
+    .article strong { color: #f5f5f7; font-weight: 600; }
+    .article em { color: #e5e7eb; }
+    .article a {
+      color: #f5c354;
+      text-decoration: underline;
+      text-decoration-color: rgba(245, 195, 84, 0.35);
+      text-underline-offset: 2px;
+      transition: all 0.15s ease;
+    }
+    .article a:hover {
+      color: #f9dc8e;
+      text-decoration-color: rgba(249, 220, 142, 0.75);
+    }
+    .article ul, .article ol {
+      padding-left: 1.4em;
+      margin-top: 0.5em;
+    }
+    .article li {
+      margin-bottom: 0.45em;
+    }
+    .article li::marker { color: #8592ab; }
+    .article code {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.88em;
+      background: rgba(245, 195, 84, 0.08);
+      color: #f5c354;
+      padding: 0.12em 0.4em;
+      border-radius: 3px;
+      border: 1px solid rgba(245, 195, 84, 0.15);
+    }
+    .article pre {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.85em;
+      line-height: 1.55;
+      background: rgba(15, 17, 23, 0.85);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-left: 3px solid #ec9116;
+      border-radius: 6px;
+      padding: 1.1em 1.3em;
+      overflow-x: auto;
+      margin: 1.5em 0;
+    }
+    .article pre code {
+      background: transparent;
+      color: #d7dbe3;
+      padding: 0;
+      border: none;
+      font-size: inherit;
+    }
+    .article blockquote {
+      border-left: 3px solid rgba(245, 195, 84, 0.5);
+      padding-left: 1.2em;
+      color: #a8b0c0;
+      font-style: italic;
+      margin: 1.4em 0;
+    }
+    .article table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92em;
+      margin: 1.5em 0;
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .article th {
+      background: rgba(245, 195, 84, 0.08);
+      color: #f5f5f7;
+      text-align: left;
+      padding: 0.7em 0.95em;
+      font-weight: 600;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .article td {
+      padding: 0.65em 0.95em;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      vertical-align: top;
+    }
+    .article tr:last-child td { border-bottom: none; }
+    .article hr {
+      border: none;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      margin: 2.4em 0;
+    }
+    .article .meta {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.85rem;
+      color: #8592ab;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.8em;
+    }
+    @media (max-width: 640px) {
+      .article { font-size: 1rem; padding: 0 0.25rem; }
+      .article h1 { font-size: 2rem; }
+      .article h2 { font-size: 1.5rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navigation (matches index.html) -->
+  <nav class="nav-glass fixed top-0 w-full z-50 border-b border-white/5">
+    <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-3 group">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-forge-500 to-rust-600 flex items-center justify-center text-white font-display text-lg font-bold shadow-lg shadow-forge-500/20">N</div>
+        <span class="font-display text-xl text-white tracking-tight">Noricum</span>
+      </a>
+      <div class="hidden md:flex items-center gap-8 text-sm font-body text-steel-300">
+        <a href="/#features" class="hover:text-forge-400 transition-colors">Features</a>
+        <a href="/#results" class="hover:text-forge-400 transition-colors">Results</a>
+        <a href="/#pipeline" class="hover:text-forge-400 transition-colors">How It Works</a>
+        <a href="/blog/" class="text-forge-400 transition-colors">Blog</a>
+      </div>
+      <a href="https://github.com/JuanMarchetto/noricum" target="_blank" rel="noopener" class="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-steel-200 hover:bg-white/10 hover:border-forge-700/50 transition-all">
+        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+        <span>GitHub</span>
+      </a>
+    </div>
+  </nav>
+
+  <!-- Article -->
+  <main class="pt-32 pb-24 px-6">
+    <article class="article">
+      <div class="meta">2026-04-10 · by Juan Patricio Marchetto · Argentina</div>
+<h1 id="i-spent-six-months-teaching-an-ai-to-migrate-real-c-code-to-safe-rust-here-is-every-way-it-failed">I Spent Six Months Teaching an AI to Migrate Real C Code to Safe Rust. Here Is Every Way It Failed.</h1>
+<p><strong>TL;DR:</strong> Noricum is an autonomous C→Rust migration pipeline I have been building solo. It has successfully migrated five real open-source C libraries to idiomatic, memory-safe Rust with 0 unsafe blocks and byte-exact differential testing. It has also failed, fourteen times in a row, on miniz_zip.c — a 4,895-LOC file that sits exactly at the capability frontier for current LLMs. This post is the complete catalog: five successes with numbers, one failure with fourteen-run taxonomy, thirty-eight documented pipeline improvements, twelve repair rules, and an honest list of what still does not work. If you are working on this problem, please run the pipeline yourself or email me. I want to compare notes.</p>
+<p>Noricum repo: <a href="https://github.com/JuanMarchetto/noricum">github.com/JuanMarchetto/noricum</a></p>
+<hr>
+<h2 id="why-i-am-publishing-this-now">Why I am publishing this now</h2>
+<p>Every &ldquo;we migrated C to Rust&rdquo; blog post I have read is a success story. The author picks a small, self-contained file. The pipeline works on the first or second try. They publish the numbers and call it a day.</p>
+<p>That is not what the frontier looks like.</p>
+<p>The frontier looks like fourteen consecutive runs on the same 4,895-LOC C file, each producing a different bouquet of failures. Truncated module boundaries. Warm-start poisoning. Assembly retranslation destroying working code. Cross-module type contract mismatches. Duplicate struct definitions because the LLM reinvents the same type with subtly different field names in seven different modules.</p>
+<p>I have been living inside that frontier for six months, and I have built up the most detailed failure taxonomy I know of. None of the DARPA TRACTOR teams have published anything like it. None of the consulting firms have. The LLM benchmarks in the literature stop at 1,000 LOC.</p>
+<p>So I am publishing the full record. The wins and the losses. The numbers and the scars. If you are one of the people actually working on this problem, this post is for you.</p>
+<hr>
+<h2 id="what-noricum-is">What Noricum is</h2>
+<p>Noricum is a deterministic pipeline wrapped around an LLM, not an LLM wrapped around some scripts. The distinction matters because almost every other tool in this space is the opposite.</p>
+<p>The pipeline has nine stages:</p>
+<pre><code>C source
+  │
+  ├── Extract: parse into semantic code map (noricum-ir)
+  ├── Classify: difficulty tier (Easy / Medium / Hard / Massive)
+  ├── C2Rust baseline (optional, used only as context or last-resort fallback)
+  ├── LLM analysis: generate plan + type contract
+  ├── LLM translation: produce idiomatic safe Rust
+  ├── Validation: compile + clippy + differential test + idiomatic score
+  ├── Repair loop: on failure, feed errors back to LLM (up to 5 iterations)
+  ├── Quality floor: reject repairs that increase unsafe count or break substance checks
+  └── Final output: Rust crate with diff-test harness
+</code></pre>
+<p>Two design choices carry most of the weight:</p>
+<ol>
+<li>
+<p><strong>Differential testing is non-negotiable.</strong> Every migration compiles both the C and Rust versions, runs them with the same inputs, and byte-compares the outputs. A migration that &ldquo;looks right&rdquo; but produces different output is a failed migration, period.</p>
+</li>
+<li>
+<p><strong>The repair loop has a quality floor.</strong> If iteration N introduces more unsafe blocks than iteration N-1 had, the repair is rejected and we back off. This sounds obvious. It is not. I watched repair loops trade compilation correctness for unsafe blocks on a daily basis until I added the floor.</p>
+</li>
+</ol>
+<p>Primary provider is Anthropic Claude. Fallback providers are DeepSeek (used as the primary for most of the miniz experiments because of cost) and Ollama for local development. The pipeline is provider-agnostic via an enum wrapper around <code>rig-rs</code>. The whole thing is ~14,100 lines of Rust across seven crates, with 293+ tests.</p>
+<hr>
+<h2 id="five-things-that-worked">Five things that worked</h2>
+<p>These are ordered by size, smallest to largest. All five have 0 unsafe blocks, 0 <code>unwrap()</code> calls, and pass differential testing byte-for-byte.</p>
+<h3 id="1-genann-642-loc-721-loc-rust">1. genann (642 LOC → 721 LOC Rust)</h3>
+<p><a href="https://github.com/codeplea/genann">codeplea/genann</a> is a minimal neural network library in portable C, 2,246 stars on GitHub. The single-file C implementation does backpropagation, stochastic gradient descent, and a handful of activation functions. A textbook case for a clean C library.</p>
+<p>Noricum migrated it in one pass with one repair iteration. The differential test runs the C and Rust versions on the same training data and compares the resulting weight matrices after every epoch. 521,556 floating-point assertions, all byte-exact.</p>
+<p>The interesting translations:</p>
+<ul>
+<li><strong>Function pointers → enum dispatch.</strong> genann uses function pointers for activation functions (<code>genann_act_sigmoid</code>, <code>genann_act_tanh</code>). In Rust, I wanted this idiomatic, not <code>unsafe { fn() }</code>. Noricum produced an <code>ActivationFn</code> enum with <code>match</code> dispatch inside the forward-pass loop. Same performance profile, fully safe.</li>
+<li><strong>One giant <code>malloc</code> → separate <code>Vec&lt;f64&gt;</code>.</strong> The C code packs all network state (weights, biases, outputs, deltas) into one contiguous <code>malloc</code>. Rust split this into four owned <code>Vec&lt;f64&gt;</code> fields on a <code>struct Genann</code>. Cleaner, no pointer arithmetic.</li>
+<li><strong>Global lookup table → struct field.</strong> C used a file-scoped array for activation function names. Rust moved it onto the struct where it belongs.</li>
+<li><strong>glibc RNG reimplemented.</strong> genann calls <code>random()</code> from glibc, which has a specific state-table algorithm (TYPE_3, degree 31) that is NOT portable. To make the differential test pass byte-exact, I reimplemented TYPE_3 in safe Rust with the same state table. This is a real thing you have to do when you care about byte-exact determinism across languages.</li>
+<li><strong><code>FILE *</code> → <code>std::io::{Read, Write}</code>.</strong> genann has serialization functions that take <code>FILE *</code>. These became trait-based on <code>Read</code> / <code>Write</code>, which is more flexible and lets you serialize to a <code>Vec&lt;u8&gt;</code> or a file equally well.</li>
+</ul>
+<p>Idiomatic score: 47/100 (low because the forward-pass hot loop uses <code>as f64</code> casts, which the scorer penalizes as a negative signal — accepted tradeoff for numerical equivalence).</p>
+<h3 id="2-olivec-1022-loc-1176-loc-rust">2. olive.c (1,022 LOC → 1,176 LOC Rust)</h3>
+<p><a href="https://github.com/tsoding/olive.c">tsoding/olive.c</a> is Alexey Kutepov&rsquo;s single-file 2D graphics library. Triangles, circles, text rendering, subcanvas operations, blending. It is the kind of library that exercises everything nasty about C: raw pointers, type punning, inline arithmetic, manual memory layout.</p>
+<p>Noricum shipped a clean migration with byte-exact differential testing via checksum comparison (pixel buffers are binary data, so the driver compares a deterministic checksum of the canvas rather than the raw bytes). 23 test functions covering 24 library functions.</p>
+<p>The harder translations:</p>
+<ul>
+<li><strong>Raw pointer canvas → owned <code>Canvas</code> struct.</strong> The C API threads a <code>uint32_t *pixels</code>, <code>size_t width</code>, <code>size_t height</code>, <code>size_t stride</code> quadruple through every function. This is the moral equivalent of a fat pointer manually unpacked into four arguments. Rust collapsed it into a <code>Canvas { pixels: Vec&lt;u32&gt;, width: usize, height: usize, stride: usize }</code> with methods.</li>
+<li><strong><code>OLIVEC_PIXEL</code> macro → <code>pixel()</code> / <code>set_pixel()</code> methods.</strong> The C macro does bounds-checked pointer arithmetic inline. Rust uses typed methods on <code>Canvas</code>.</li>
+<li><strong>Subcanvas aliasing → region-based operations.</strong> olive.c has a <code>subcanvas</code> feature where a sub-rectangle of a canvas is treated as its own canvas. In C this is just pointer arithmetic into the parent buffer. In Rust that is shared mutable aliasing, which the borrow checker rejects. I reworked this as region-based direct operations (<code>fill_rect</code>, <code>draw_line_clipped</code>) that take the rectangle as an argument instead of creating an aliased sub-buffer. No aliasing, no <code>unsafe</code>.</li>
+<li><strong>Type punning <code>*(uint32_t*)&amp;z</code> → <code>f32::to_bits()</code>.</strong> olive.c uses the standard C trick of bit-casting a float to a <code>uint32_t</code> to do interpolation math. Rust has <code>f32::to_bits()</code> and <code>f32::from_bits()</code> which do exactly this, safely.</li>
+<li><strong>C macros (<code>SWAP</code>, <code>SIGN</code>, <code>ABS</code>) → <code>std::mem::swap</code>, <code>f32::signum</code>, <code>f32::abs</code>.</strong> Standard library replacements for the standard C preprocessor idioms.</li>
+</ul>
+<p>Idiomatic score: 76. 350 lines of the output are a const glyph-data array which is just transcription and does not pattern-match idiomatic Rust.</p>
+<h3 id="3-expr_eval-1686-loc-1446-loc-rust">3. expr_eval (1,686 LOC → 1,446 LOC Rust)</h3>
+<p>A medium-sized expression evaluator written in C. Recursive-descent parser, lexer, 25+ built-in functions, a variable store, a DataSet type for statistics. 74 functions total.</p>
+<p>Noricum migrated it in a single pass with zero repair iterations. Idiomatic score 100. Byte-exact diff test.</p>
+<p>The interesting work here was the data structure mapping: the C implementation uses linked lists for the variable store and a custom hash table for the function registry. Noricum produced <code>HashMap&lt;String, f64&gt;</code> for variables and a <code>Vec&lt;(String, fn(&amp;[f64]) -&gt; f64)&gt;</code> for the function registry. The parser translated cleanly from mutually-recursive C functions into mutually-recursive Rust functions using <code>&amp;mut Parser&lt;'_&gt;</code> as the state carrier. No lifetimes needed.</p>
+<h3 id="4-cjson_full-1696-loc-1439-loc-rust">4. cjson_full (1,696 LOC → 1,439 LOC Rust)</h3>
+<p>This is the flagship. <a href="https://github.com/DaveGamble/cJSON">DaveGamble/cJSON</a> is 12,500 stars on GitHub. One of the most widely-used C JSON libraries in the world. Used in hundreds of embedded systems, IoT devices, and memory-constrained applications.</p>
+<p>Noricum migrated the full <code>cJSON.c</code> file. 97 out of 97 C tests pass. 96 out of 96 Rust tests pass (one test uses a C-specific integer overflow behavior that does not exist in safe Rust, intentionally omitted from the Rust suite). Differential testing is byte-exact across all basic operations plus 12 extended scenarios. 0 unsafe blocks. 0 raw pointers. 0 <code>unwrap()</code>. LOC ratio 0.85x — the Rust version is actually shorter than the C version.</p>
+<p>This migration went through six phases (A through F) because it is not a single file in spirit, it is a library with multiple logical feature groups. Each phase migrated one group and validated against the full C test suite. The phases were: convenience add functions, references (required a <code>Clone</code> implementation because cJSON supports reference counting), case-sensitive operations, float/string array helpers, parse/print variant functions (including error reporting via <code>ParseError</code>), and setters/version.</p>
+<p>Key translations:</p>
+<ul>
+<li><strong>Linked list of children → <code>Vec&lt;JsonValue&gt;</code>.</strong> cJSON uses a doubly-linked list where each node has <code>prev</code> and <code>next</code> pointers. This is a classic case where C&rsquo;s &ldquo;flexible&rdquo; data structure maps much better to a Rust <code>Vec</code> both in ergonomics and performance.</li>
+<li><strong><code>malloc</code> / <code>free</code> → RAII via <code>Drop</code>.</strong> The cJSON C code has a dedicated <code>cJSON_Delete()</code> that walks the tree and frees every node. Rust gets this for free via <code>Drop</code> on the enum variants.</li>
+<li><strong>Type tags (<code>cJSON_Number</code>, <code>cJSON_String</code>, etc.) → <code>enum JsonValue</code>.</strong> The idiomatic Rust pattern. C used a <code>union</code> plus a discriminator <code>int type</code>. Rust uses a tagged enum and gets exhaustiveness checking from the compiler.</li>
+<li><strong>UTF-16 surrogate pair handling.</strong> cJSON&rsquo;s string parser deals with <code>\uXXXX</code> escapes including surrogate pairs. Porting this correctly required understanding the encoding rules precisely and writing a clean Rust implementation that produces the exact same bytes.</li>
+<li><strong>C-compatible <code>format_g()</code>.</strong> cJSON uses <code>sprintf("%g", ...)</code> for floats, which has specific C89 formatting rules (trailing zero trimming, scientific notation thresholds). Rust&rsquo;s <code>{}</code> Display uses different rules. I implemented a <code>format_g()</code> helper that matches the C output exactly. This is the kind of thing you have to do when your differential test is byte-exact on JSON serialization.</li>
+</ul>
+<p>Idiomatic score: 100.</p>
+<p>Phase G (cJSON_Utils, which adds JSON Pointer and JSON Patch support) is deferred — it is another 1,500 LOC and was not in scope for the first ship.</p>
+<h3 id="5-http-parser-3680-loc-1492-loc-rust">5. http-parser (3,680 LOC → 1,492 LOC Rust)</h3>
+<p><a href="https://github.com/nodejs/http-parser">nodejs/http-parser</a> is Joyent&rsquo;s original HTTP parser, 6,400 stars. This is the parser that Node.js used for years before moving to llhttp. It is a famous chunk of C and a famous benchmark for anyone building HTTP infrastructure.</p>
+<p>The translation ratio is 0.41x. 3,680 LOC of C became 1,492 lines of Rust. That is not compression magic — it is what happens when you replace a 58-state goto-based switch statement with clean line-based parsing using iterator methods.</p>
+<p>0 unsafe blocks. 0 <code>unwrap()</code>. 37 test cases, all byte-exact.</p>
+<p>One honest note: the pipeline reached &ldquo;compiles and tests pass&rdquo; at repair iteration 7 on its first run, but lost that state to a transient 502 error from the Anthropic API during the next repair iteration. The pipeline did not have resilient error handling for transient API failures at that point, so it crashed out and fell back to an earlier state. I completed the last ~200 lines manually, using the pipeline&rsquo;s partial output as the starting point. The translation was the pipeline&rsquo;s work; the finishing touches were mine. I fixed the transient-error handling in the repair loop immediately after (the change is in commit history — <code>.await?</code> became a match-based retry for 502s).</p>
+<p>The interesting translations:</p>
+<ul>
+<li><strong>58-state goto-based switch → line-based parsing.</strong> The C parser uses a giant <code>switch</code> with <code>goto</code> labels for state transitions. This is fine in C but maps horribly to Rust. I let the LLM try a direct translation (it produced ~2,400 lines of nested match statements — technically correct, unreadable). Then I prompted it to reconsider: &ldquo;What if you parsed this line by line instead of byte by byte?&rdquo; The result is 1,492 lines of clean state-machine-less parsing using iterator methods. Shorter and more maintainable.</li>
+<li><strong>C global mutable state → <code>thread_local!</code> <code>RefCell</code>.</strong> The test harness used global state for callback verification. Rust moved this into <code>thread_local! { static STATE: RefCell&lt;TestState&gt; }</code>. Safe, no <code>Mutex</code> overhead for the tests.</li>
+<li><strong>C function pointers for callbacks → direct function calls.</strong> The C API uses a <code>http_parser_settings</code> struct full of function pointers. In the Rust version the callback API is preserved via a trait, but the internal calls are direct.</li>
+<li><strong>Bit-packed struct → clean Rust struct.</strong> The C version uses bit fields to save memory. Rust just uses a struct with named fields. The binary size difference is irrelevant on any machine built after 2005.</li>
+</ul>
+<h3 id="crust-bench-3-project-pilot-bonus">CRUST-Bench 3-project pilot (bonus)</h3>
+<p>I also ran Noricum against the <a href="https://github.com/anirudhkhatry/CRUST-bench">CRUST-Bench</a> academic benchmark dataset. On the 3-project pilot: 100% compile rate, 66.7% test pass rate (2 of 3), 0 unsafe blocks. One of the three test failures turned out to be a bug in the CRUST-Bench dataset itself (a <code>tanh</code> test with incorrect expected output — I reported it upstream).</p>
+<p>Full CRUST-Bench results are in <code>docs/crust-bench-results.md</code> in the repo.</p>
+<hr>
+<h2 id="the-file-i-could-not-migrate">The file I could not migrate</h2>
+<p>This is the centerpiece. The part of the post that, as far as I know, nobody else has published.</p>
+<p><strong>miniz_zip.c</strong>. 4,895 lines of C. Part of <a href="https://github.com/richgel999/miniz">richgel999/miniz</a>, which is a widely-used standalone zlib replacement. miniz_zip is the zip archive handling portion, which I picked deliberately because it combines several of the hardest patterns in C: dense pointer arithmetic, global mutable state, file I/O, a callback-based API for custom IO, manual memory pools, and a state machine for archive parsing that spans several functions.</p>
+<p>I have run Noricum against this file <strong>fourteen times</strong>. As of Run 14, the latest assembly has <strong>598 compilation errors</strong>. The best result I have ever achieved was Run 6, which assembled at <strong>1 error</strong> — a truncated function body at a module boundary that cascaded a brace imbalance through the rest of the file.</p>
+<p>Here is the timeline. All of it is in Noricum&rsquo;s <code>MEMORY.md</code> which is committed to the repo, and all the specific pipeline improvements are in the git log.</p>
+<h3 id="run-1-deepseek-r1-no-modular-split-pre-p12">Run 1 — DeepSeek R1, no modular split (pre-P12)</h3>
+<p>The file was treated as two modules based on a naive split. One module compiled (363 LOC, score 78). The other was 4,766 lines of stub functions (score 15) because the LLM could not fit enough context into one prompt to produce real implementations. 85 minutes wall time, 19 LLM calls, cost ~$4. Status: <strong>FallbackUnsafe</strong>.</p>
+<p><strong>Lesson:</strong> Large files need real sub-division, not naive splitting.</p>
+<h3 id="run-2-deepseek-r1-p12-sub-chunking">Run 2 — DeepSeek R1, P12 sub-chunking</h3>
+<p>P12 added <code>split_into_modules()</code> that sub-divides prefix groups larger than 1,000 LOC into ~600 LOC sub-modules. miniz_zip became 10 modules (363 to 938 LOC each). Three validated (<code>if: 100</code>, <code>mz_p1: 97</code>, <code>mz_p9: 100</code>). Six FallbackUnsafe. One API error skip. 5.5 hours wall time, 51 LLM calls, hit budget limit. Module <code>mz_p8</code> was irrecoverable with 251 errors.</p>
+<p><strong>Lesson:</strong> DeepSeek R1 is too slow for repair loops. Each R1 call averages ~8 minutes vs ~2 minutes for Claude. Modules under 700 LOC succeed, modules over 800 LOC fail with R1.</p>
+<h3 id="run-3-anthropic-claude-full-pipeline">Run 3 — Anthropic Claude, full pipeline</h3>
+<p>17 modules. Average score 85. Three validated. Assembly repair stalled between iterations 7 and 8 at 5-8 errors. I went in manually and discovered the root cause: <strong><code>ZipArchive</code> was defined in 11 out of 17 modules, with different field definitions in each</strong>. Not simple duplicates — actual structural disagreements. I hand-fixed iter-05 to produce a compiling assembly (2,829 LOC, 96 functions, 33 structs, 9 enums) with exactly five mechanical patches. All five were codifiable as repair rules, which became rules R1 through R5 in the next pipeline release.</p>
+<p><strong>Lesson:</strong> Cross-module type disagreement is the dominant failure mode for modular migration of &gt;2,500 LOC files. Assembly dedup alone is insufficient. Prevention via type propagation from a canonical contract is required.</p>
+<h3 id="runs-45-warm-start-p30-hybrid-repair">Runs 4–5 — Warm-start + P30 Hybrid Repair</h3>
+<p>P30 added a three-phase repair engine: a deterministic rule engine (rules R0 through R4), a surgical repair phase that rewrites individual functions via small LLM calls, and a legacy whole-file repair as a final fallback. Warm-start seeded new runs from prior best-version artifacts.</p>
+<p>Run 4 hit 541 errors in assembly due to warm-start manifest mismatch (17-module warm-start used on a 10-module split). Run 5 had 10 modules with 4 validated and a much better assembly starting state (3,543 LOC, 103 functions — best ever for assembled output). Phase 1 rule engine parsed 0 errors (syntax errors not parseable by the regex). Phase 2 surgical repair was skipped. Phase 3 legacy whole-file repair destroyed the code (3,543 LOC → 491 LOC). P1 best-version tracking saved the 3,543 LOC version as the final output.</p>
+<p><strong>Lesson:</strong> Assembly retranslation is destructive for outputs &gt;1,000 LOC. Must be disabled for assembly repair.</p>
+<h3 id="run-6-p31-assembly-cleanup">Run 6 — P31 Assembly Cleanup</h3>
+<p>P31 added three fixes: markdown fence stripping for LLM outputs, syntax-error regex parsing (so rule engine could see syntax errors, not just type errors), and use-import merging. Run 6 reached <strong>1 error</strong> — the best ever. The 1 error was an unclosed delimiter at line 982: a truncated <code>mz_zip_reader_read_central_dir</code> function body. Module <code>mz_p2</code> output truncated. Function opens brace at depth 0→1 but never closes. Brace imbalance compounds through the rest of the modules.</p>
+<p><strong>Lesson:</strong> P32 — brace-balance validation — became the next priority. You have to detect truncated functions before assembly.</p>
+<h3 id="runs-79-p32p32b-brace-balance-validation">Runs 7–9 — P32/P32b brace-balance validation</h3>
+<p>P32 adds a string-and-comment-aware brace-balance checker. If a module has unclosed braces, the pipeline truncates at the last balanced brace point and optionally re-translates. P32b added smart re-translation: if a module has unclosed braces, re-translate once with a truncation hint before smart-truncating.</p>
+<p>Run 7 (cold, no warm-start): 8 of 10 modules truncated. P32 correctly detected all of them. Auto-close alone was insufficient — truncated function bodies generate many type/logic errors post-assembly. Assembly ended at 114 errors.</p>
+<p>Runs 8–9 (warm-start): re-translate succeeded 3/3 and 3/3. But assembly had 541 errors (Run 8) and 526 errors (Run 9) due to cross-module type incompatibility from seeds that were individually high-scoring but structurally inconsistent across modules.</p>
+<p><strong>Lesson:</strong> Warm-start must match module split exactly. Even with matching split, NearlyCompiles seeds propagate cross-module inconsistencies. Run 6 was anomalously good because its warm-start seeds happened to produce compatible types.</p>
+<h3 id="runs-1011-p33p33b-type-contract">Runs 10–11 — P33/P33b Type Contract</h3>
+<p>P33 introduced types-first modular migration: generate a shared type contract before translating any module, compile-validate it, and inject it as a canonical contract into every module&rsquo;s prompt. Assembly then strips duplicates of those canonical types.</p>
+<p>Run 10 produced a contract with 4 structs, most of them empty because the source C file had only forward declarations — the actual type definitions lived in .h headers. Assembly had 697 errors. Worse than Run 9.</p>
+<p><strong>Lesson:</strong> For multi-file C projects, type definitions live in .h headers. The contract generator must resolve <code>#include</code> directives and read header files. Without this, the contract has empty forward declarations that are useless.</p>
+<p>Run 11 (P33b, header resolution + idiomatic prompt): contract had 250 LOC, 10 types, a 15-field <code>MzZipArchive</code>. Assembly had only 2 parser-blocking errors! But fixing those syntax errors revealed <strong>878 underlying errors</strong> — 164 &ldquo;no field,&rdquo; 57 duplicate definitions, 277 type mismatches.</p>
+<p><strong>Lesson:</strong> &ldquo;2 errors&rdquo; was misleading. Syntax errors prevent rustc from parsing past the error point. Always fix syntax errors first and re-count.</p>
+<h3 id="runs-1214-various-combinations">Runs 12–14 — Various combinations</h3>
+<p>Runs 12, 13, 14 explored contract naming consistency, ensemble translation (P38), per-task model routing (P35), and various prompt engineering fixes. Run 14 landed at 598 errors with 1 syntax error masking the rest.</p>
+<p>The truncated function at module boundary <code>mz_p7</code> → <code>mz_p8</code> (<code>mz_zip_writer_add_cfile</code>) has truncated in <strong>every single run</strong>. R12 now stubs these automatically, which helps but does not solve the root problem: the LLM runs out of context right where the hardest function lives.</p>
+<hr>
+<h2 id="the-pipeline-improvements-timeline">The pipeline improvements timeline</h2>
+<p>Here is the compressed list of every documented pipeline improvement from P0 to P38. This is useful if you are trying to build something similar — each one came from a specific failure mode.</p>
+<ul>
+<li><strong>P0 — Repair quality floor.</strong> Reject repairs that increase unsafe count beyond the translation baseline.</li>
+<li><strong>P1 — Best-version tracking.</strong> Keep the highest-score version across repair iterations. Use it for fallback instead of raw C2Rust output.</li>
+<li><strong>P2 — Per-function C2Rust context.</strong> Extract only the matching c2rust functions per chunk to save tokens.</li>
+<li><strong>P3 — Modular migration.</strong> Files &gt;2000 LOC auto-split into semantic modules. Dependency graph with topological ordering. Each module gets independent translate → validate → repair.</li>
+<li><strong>P4 — Skip-C2Rust flag.</strong> For files where C2Rust adds no value and costs tokens.</li>
+<li><strong>P6 — Substance gate.</strong> Reject empty stubs, re-translate with higher temperature.</li>
+<li><strong>P7 — Score penalty for stubs.</strong> Cap score at 15/20 for code that is mostly empty.</li>
+<li><strong>P8 — Data/code separation.</strong> Detect static data blocks (const arrays, lookup tables). Transcription-only instructions for data chunks.</li>
+<li><strong>P9 — Foundation context.</strong> Chunk 0&rsquo;s translated Rust types are passed to all subsequent chunks.</li>
+<li><strong>P10 — Incremental compilation.</strong> Check that accumulated chunks compile together during translation.</li>
+<li><strong>P11 — Signature agreement pass.</strong> Generate agreed Rust signatures before translating bodies, for files with &gt;2 chunks.</li>
+<li><strong>P12 — Sub-chunk large modules.</strong> Prefix groups &gt;1000 LOC split into ~600 LOC sub-modules.</li>
+<li><strong>P13 — Re-translate on &gt;100 errors.</strong> If repair can&rsquo;t make progress, re-translate the module.</li>
+<li><strong>P14 — API retry with backoff.</strong> Handle transient 502s gracefully instead of crashing.</li>
+<li><strong>P15 — Adaptive LLM budget.</strong> <code>max_calls = modules * 7 + 10</code>.</li>
+<li><strong>P16 — Faster repair model.</strong> Use DeepSeek-chat (or Claude Sonnet) for repair, even if primary is DeepSeek-R1 or Claude Opus. Repair needs speed more than depth.</li>
+<li><strong>P17 — Configurable sub-module target LOC.</strong></li>
+<li><strong>P18 — Wave-based module iteration.</strong> Kahn&rsquo;s algorithm levels for parallel module translation.</li>
+<li><strong>P19 — Warm-start from previous artifacts.</strong></li>
+<li><strong>P20 — Artifact load/save manifest API.</strong></li>
+<li><strong>P26 — Assembly error propagation.</strong> Track which modules compile individually vs only in assembly.</li>
+<li><strong>P27 — Type deduplication in assembly.</strong> Strip duplicate struct/enum/const definitions (first module wins).</li>
+<li><strong>P28 — Disable retranslation for assembly repair.</strong> Assembly retranslation is destructive for outputs &gt;1,000 LOC.</li>
+<li><strong>P29 — Faster repair model for assembly.</strong></li>
+<li><strong>P30 — Hybrid Repair Engine.</strong> Three phases: rule engine, surgical repair, legacy whole-file fallback.</li>
+<li><strong>P31 — Assembly cleanup.</strong> Fence stripping, syntax-error regex, use-import merging.</li>
+<li><strong>P32 — Brace-balance validation.</strong> Detect truncated functions before assembly.</li>
+<li><strong>P32b — Smart truncate + re-translate.</strong> Truncate at the last balanced brace point; re-translate once with a hint.</li>
+<li><strong>P33 — Type Contract.</strong> Types-first modular migration with a canonical contract injected into every module.</li>
+<li><strong>P33b — Header resolution + idiomatic prompt.</strong> Read <code>#include</code>&lsquo;d .h files to get full type definitions.</li>
+<li><strong>P34 — Incremental completion.</strong> Re-run only failed modules on retry.</li>
+<li><strong>P35 — Per-task model routing.</strong> Different models for analysis, translation, and repair.</li>
+<li><strong>P37 — Behavioral spec mining.</strong> Extract function I/O traces from C programs.</li>
+<li><strong>P38 — Ensemble translation.</strong> Multi-provider best-of-N candidate selection.</li>
+</ul>
+<p>Every one of these came from a real failure on a real file. Nothing in this list was speculative.</p>
+<hr>
+<h2 id="the-repair-rules-r0-r12">The repair rules (R0 – R12)</h2>
+<p>The repair rule engine is the first phase of the P30 Hybrid Repair Engine. These are deterministic transformations applied before any LLM call, so they cost nothing. Each rule came from a pattern I saw repeatedly in miniz runs and then codified.</p>
+<ul>
+<li><strong>R0 — Fence strip.</strong> Remove markdown <code>```</code> fences from LLM outputs.</li>
+<li><strong>R1 — Clone bounds.</strong> Add <code>where T: Clone</code> to generics that use <code>.clone()</code> in the body.</li>
+<li><strong>R2 — Dedup functions.</strong> Remove duplicate function definitions (LLMs sometimes emit the same function twice with slightly different bodies).</li>
+<li><strong>R3 — <code>mut Option&lt;&amp;mut T&gt;</code>.</strong> Fix <code>ref mut</code> in pattern matches for <code>Option&lt;&amp;mut T&gt;</code> parameters.</li>
+<li><strong>R4 — Brace balance safety net.</strong> Auto-close unclosed braces at EOF.</li>
+<li><strong>R5 — Inner attributes.</strong> Strip misplaced <code>#![...]</code> attributes.</li>
+<li><strong>R6 — Inner docs.</strong> Strip misplaced <code>//!</code> doc comments.</li>
+<li><strong>R7 — Duplicate imports.</strong> Collapse repeated <code>use</code> statements.</li>
+<li><strong>R8 — Orphaned derives.</strong> Strip <code>#[derive(...)]</code> attributes with no following item.</li>
+<li><strong>R9 — Conflicting impls.</strong> Remove duplicate <code>impl</code> blocks for the same type.</li>
+<li><strong>R10 — External crates.</strong> Strip <code>extern crate</code> statements (edition 2024 does not need them).</li>
+<li><strong>R11 — Windows imports.</strong> Replace <code>use std::os::windows::*</code> with cfg-gated equivalents.</li>
+<li><strong>R12 — Truncated module boundaries.</strong> Stub truncated functions at module boundaries with <code>todo!()</code> so the module at least parses.</li>
+</ul>
+<hr>
+<h2 id="what-still-does-not-work">What still does not work</h2>
+<p>This is the section I care most about. Nobody else publishes this.</p>
+<p>As of Run 14 against miniz_zip.c, the following failure modes are <strong>unsolved</strong>:</p>
+<ol>
+<li>
+<p><strong>Cross-module type contract mismatches when contract fields don&rsquo;t match module usage patterns.</strong> The contract is declarative. The modules are generated separately. If the contract says <code>MzZipArchive { m_palloc: Option&lt;PAlloc&gt; }</code> and one module uses <code>archive.alloc_fn()</code> because that is what the C code called it, the names disagree. Contract enforcement requires either stronger prompt adherence (which is inconsistent) or post-hoc renaming (which is a real refactor, not a pattern match).</p>
+</li>
+<li>
+<p><strong>Truncated function bodies at the hardest module boundary, even with P32 re-translate.</strong> The function <code>mz_zip_writer_add_cfile</code> truncates in every single run at the <code>mz_p7</code> → <code>mz_p8</code> boundary. This is a 400+ LOC function in the original C. The LLM&rsquo;s context window runs out right where the hardest function lives. R12 now stubs these automatically, but a stub is not a migration.</p>
+</li>
+<li>
+<p><strong>Type punning in dense arithmetic kernels.</strong> Specifically, miniz&rsquo;s entropy coding routines use <code>*(uint32_t*)&amp;z</code> patterns for bit manipulation on floats. <code>f32::to_bits()</code> covers the simple cases. The complex cases involve manipulating multiple registers in a tight loop with specific overflow semantics, and the LLM&rsquo;s output for these is correct-looking but numerically different.</p>
+</li>
+<li>
+<p><strong>Deep goto state machines where state transitions depend on runtime-computed labels.</strong> miniz&rsquo;s decompressor has several state machines with &gt;30 states. Translating these into Rust match arms works structurally, but the ordering of state transitions does not always preserve in the translated version — the LLM reorders arms for &ldquo;readability&rdquo; and breaks the state machine.</p>
+</li>
+<li>
+<p><strong>Cost at frontier scale.</strong> Each full Noricum run on miniz_zip.c costs ~$3–$5 in LLM API fees. Each DeepSeek R1 call averages ~8 minutes, making repair loops impractical with R1. 14 runs at ~$5 average is ~$70 just for this one file. The hybrid approach (R1 for analysis, faster model for translation + repair) cuts time but not cost by that much.</p>
+</li>
+<li>
+<p><strong>The assembly repair phase is the structural hard wall.</strong> Ten modules that each compile cleanly in isolation can produce 500+ errors when assembled, because cross-module type disagreements are invisible at the single-module level. I have four separate pipeline phases dedicated to mitigating this (P26, P27, P28, P33) and none of them have fully solved it.</p>
+</li>
+</ol>
+<p>If you have a theory about any of these, I want to hear it.</p>
+<hr>
+<h2 id="what-i-am-asking-for">What I am asking for</h2>
+<p>Three things. All low-effort on your end.</p>
+<p><strong>1. If you are working on LLM-driven C→Rust at scale, email me.</strong> I am especially interested in hearing from the six DARPA TRACTOR funded teams, Ladybird contributors working on the C++→Rust migration, and anyone at a security-critical C library (libpng, zlib, libsodium, libcurl subsystems) who has tried this on production code. Email me at juanpatriciomarchetto@gmail.com or open an issue at <a href="https://github.com/JuanMarchetto/noricum">github.com/JuanMarchetto/noricum</a>.</p>
+<p><strong>2. Try running Noricum on your own C file.</strong> The repo has a working CLI. <code>cargo run -p noricum-cli -- migrate path/to/your/file.c --provider deepseek --artifacts-dir .noricum-run</code>. If it works, I want to know. If it fails, I want to know what failure mode you hit — I may have already seen it and have a pipeline phase for it, or it may be something new that goes into P39.</p>
+<p><strong>3. If you have a theory about any of the six unsolved failure modes above, please share it.</strong> Even if the theory is wrong, hearing it sharpens my thinking. Six months of iteration has given me a deep internal model of these failure modes, and at this stage an external perspective is the single highest-leverage next input I can get.</p>
+<hr>
+<h2 id="honest-closing">Honest closing</h2>
+<p><strong>This post is an intermediate checkpoint, not a conclusion.</strong> Noricum is a research project in active development. It has five real wins and one stubborn unsolved case. It is not ready for production use on files of miniz_zip&rsquo;s complexity, and I do not want to oversell it. The benchmark numbers in this post are real, reproducible, and verifiable in the repo.</p>
+<p>I am publishing this now instead of waiting for a clean miniz_zip success because the failure taxonomy is more valuable than another success story. Every consulting firm in this space will tell you they can migrate your code. Every academic paper reports a high success rate on files under 1,000 LOC. Nobody publishes &ldquo;here is a file we failed on fourteen times and these are every way it failed.&rdquo;</p>
+<p>I think that post is the one the Rust community needs right now, and I am the one who can write it without it costing anyone their contract or their academic credibility.</p>
+<p><strong>What comes next.</strong> Run 15 is scheduled. Pipeline phase P39 is already in draft and targets the specific cross-module type contract mismatch mode that has dominated Runs 11 through 14. I am also planning to run Noricum against MIT Lincoln Laboratory&rsquo;s public DARPA TRACTOR Battery 01 benchmark as an independent baseline. The follow-up post will either be &ldquo;miniz_zip compiles&rdquo; or &ldquo;Run 20 and here is what changed.&rdquo; Whichever comes first.</p>
+<p>If you made it this far, thank you. The repo is <a href="https://github.com/JuanMarchetto/noricum">here</a>. The MEMORY.md file in the repo root has the raw log of every run, every pipeline change, and every lesson I extracted. It is not polished, it is the actual working notes.</p>
+<p>Juan Marchetto
+juanpatriciomarchetto@gmail.com
+Argentina, April 2026</p>
+    </article>
+
+    <!-- Back-link -->
+    <div class="max-w-[70ch] mx-auto mt-16 pt-8 border-t border-white/5 text-sm text-steel-400">
+      <a href="/blog/" class="hover:text-forge-400 transition-colors">← All posts</a>
+      <span class="mx-3 text-steel-700">·</span>
+      <a href="/" class="hover:text-forge-400 transition-colors">Noricum home</a>
+      <span class="mx-3 text-steel-700">·</span>
+      <a href="https://github.com/JuanMarchetto/noricum" class="hover:text-forge-400 transition-colors" target="_blank" rel="noopener">Repo</a>
+    </div>
+  </main>
+
+  <!-- Footer (matches index.html, Twitter removed) -->
+  <footer class="border-t border-white/5 py-12">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="flex flex-col md:flex-row items-center justify-between gap-6">
+        <div class="flex items-center gap-3">
+          <div class="w-6 h-6 rounded-md bg-gradient-to-br from-forge-500 to-rust-600 flex items-center justify-center text-white font-display text-xs font-bold">N</div>
+          <span class="font-display text-lg text-white">Noricum</span>
+          <span class="text-steel-600 text-sm">· MIT License</span>
+        </div>
+        <div class="flex items-center gap-6 text-sm text-steel-400">
+          <a href="https://github.com/JuanMarchetto/noricum" target="_blank" class="hover:text-forge-400 transition-colors">GitHub</a>
+          <a href="/blog/" class="hover:text-forge-400 transition-colors">Blog</a>
+          <a href="https://github.com/JuanMarchetto/noricum/blob/main/CONTRIBUTING.md" target="_blank" class="hover:text-forge-400 transition-colors">Contributing</a>
+          <a href="mailto:juanpatriciomarchetto@gmail.com" class="hover:text-forge-400 transition-colors">Contact</a>
+        </div>
+      </div>
+      <p class="text-center text-xs text-steel-600 mt-8">Built by Juan Patricio Marchetto · Named after the Celtic kingdom famed for its legendary steel</p>
+    </div>
+  </footer>
+
+</body>
+</html>

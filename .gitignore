@@ -18,7 +18,6 @@ run*-output.log
 run*-report.html
 miniz_*-output.log
 miniz_*-report.html
-site/
 
 # Internal docs (plans, specs, marketing)
 docs/plans/
