@@ -41,7 +41,7 @@
 
 #![allow(dead_code)]
 
-use crate::contract::{CallFrame, LuaState};
+use crate::contract::{CallFrame, LuaError, LuaResult, LuaState, TValue};
 
 impl LuaState {
     /// Push a new call frame onto the current thread's frame
@@ -105,9 +105,155 @@ impl LuaState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stage 5.2 — C function call dispatch. Wraps the precall / postcall
+// pair that C Lua's `luaD_precall` + `luaD_poscall` implement for
+// LUA_VLCF (light C function) and LUA_VCCL (C closure with captured
+// upvalues). Lua-closure calls are deferred to Stage 5.4 / 5.5 when
+// the bytecode interpreter lands.
+// ---------------------------------------------------------------------------
+
+impl LuaState {
+    /// Call the value at `func_slot` with the arguments that sit
+    /// immediately above it on the stack. `n_args` is the
+    /// argument count; `n_results` is the expected return count
+    /// (`-1` for Lua's `LUA_MULTRET`).
+    ///
+    /// Only light C functions and C closures are currently
+    /// supported. Lua closures (`TValue::LuaClosure`) return
+    /// `Err` until Stage 5.4 wires up the VM dispatcher;
+    /// metamethod-based `__call` targets error similarly.
+    ///
+    /// On success the stack layout afterwards is:
+    /// `[..., r1, r2, ..., rN]` where the first return sits at
+    /// `func_slot`, the function slot is consumed, and N is
+    /// either `n_results` (padded with nil or truncated as
+    /// needed) or `n_returned_by_fn` when `n_results == -1`.
+    pub fn call_value(
+        &mut self,
+        func_slot: u32,
+        n_args: u32,
+        n_results: i16,
+    ) -> LuaResult<()> {
+        let top = self.current_thread().top;
+        assert_eq!(
+            top,
+            func_slot + 1 + n_args,
+            "ldo: call_value: stack top must equal func_slot + 1 + n_args"
+        );
+        let func_value = self.current_thread().stack[func_slot as usize];
+        match func_value {
+            TValue::LightCFunction(raw_fn) => {
+                self.invoke_c_function(func_slot, raw_fn, n_results)
+            }
+            TValue::CClosure(handle) => {
+                // Resolve the captured function pointer. C
+                // closure upvalues live in `self.global.heap
+                // .cclosures[handle].upvalues` and will be
+                // exposed via pseudo-indices in a later sub
+                // commit — for now we just dispatch on the
+                // raw function pointer so simple C closures
+                // (no upvalue access) work.
+                let raw_fn = self.global.heap.cclosure(handle).f;
+                self.invoke_c_function(func_slot, raw_fn, n_results)
+            }
+            TValue::Nil => Err(LuaError::Runtime(TValue::Nil)),
+            _ => Err(LuaError::Runtime(TValue::Nil)),
+        }
+    }
+
+    /// Push a call frame, hand control to `raw_fn` via a raw
+    /// state pointer, then transfer its return values back into
+    /// the caller's frame. Shared path for light C functions
+    /// and C closures (which differ only in where the function
+    /// pointer lives).
+    fn invoke_c_function(
+        &mut self,
+        func_slot: u32,
+        raw_fn: crate::contract::RawCFunction,
+        n_results: i16,
+    ) -> LuaResult<()> {
+        let saved_top = self.current_thread().top;
+        self.push_call_frame(func_slot, saved_top, n_results);
+
+        // Raw-pointer bridge into the extern "C" function. The
+        // function operates on the same LuaState instance we
+        // borrow mutably here; when it returns, no concurrent
+        // borrow outlives this call because `self` was passed
+        // by &mut self. Unsafe is local to the bridge.
+        let state_ptr = self as *mut LuaState;
+        let n_returned = unsafe { raw_fn(state_ptr) };
+        assert!(
+            n_returned >= 0,
+            "ldo: C function returned negative result count ({})",
+            n_returned
+        );
+        let n_returned = n_returned as u32;
+
+        self.finish_c_call(func_slot, n_returned, n_results);
+        Ok(())
+    }
+
+    /// Shift the `n_returned` values now sitting at the top of
+    /// the stack down into the slots starting at `func_slot`,
+    /// pop the call frame, and adjust the stack top based on
+    /// `n_expected`. Nil-pads the gap when the caller expected
+    /// more returns than the function produced. Matches the
+    /// tail of `luaD_poscall` minus the hook machinery.
+    fn finish_c_call(&mut self, func_slot: u32, n_returned: u32, n_expected: i16) {
+        {
+            let thread = self.current_thread_mut();
+            let top = thread.top;
+            debug_assert!(top >= n_returned);
+            let first_ret = top - n_returned;
+            // Copy returned values down to the function slot.
+            // The old function-slot contents get overwritten
+            // by the first return value (if any).
+            for i in 0..n_returned {
+                let src = (first_ret + i) as usize;
+                let dst = (func_slot + i) as usize;
+                thread.stack[dst] = thread.stack[src];
+            }
+        }
+
+        let _ = self.pop_call_frame();
+
+        // Decide how many results to leave on the stack. `-1`
+        // keeps everything the function returned; anything
+        // else pads with nil or truncates.
+        let leave = if n_expected < 0 {
+            n_returned
+        } else {
+            n_expected as u32
+        };
+        let new_top = func_slot + leave;
+
+        {
+            let thread = self.current_thread_mut();
+            // Grow storage for the new top if we're expanding.
+            if (new_top as usize) > thread.stack.len() {
+                thread.grow_stack(new_top.saturating_sub(thread.top));
+            }
+            // Nil-pad any gap between the actual returns and
+            // the requested count. This covers two cases:
+            // (a) caller expected N returns, function produced
+            // fewer — slots after the returns are set to nil;
+            // (b) the function produced zero returns and the
+            // old function slot is now inside the visible
+            // region and must be cleared.
+            if leave > n_returned {
+                for i in n_returned..leave {
+                    thread.stack[(func_slot + i) as usize] = TValue::Nil;
+                }
+            }
+            thread.top = new_top;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::contract::LuaState;
+    use crate::contract::{LuaError, LuaState, RawCFunction, TValue};
 
     #[test]
     fn fresh_state_has_no_active_call_frame() {
@@ -172,5 +318,110 @@ mod tests {
     fn pop_call_frame_panics_on_empty_stack() {
         let mut state = LuaState::new(0);
         let _ = state.pop_call_frame();
+    }
+
+    // ---- Stage 5.2 C function call dispatch -----------------------
+
+    /// Test helper — a C function that returns zero results and
+    /// leaves the stack empty below `func_slot`.
+    unsafe extern "C" fn c_return_zero(
+        _state: *mut LuaState,
+    ) -> std::os::raw::c_int {
+        0
+    }
+
+    /// Test helper — reads the first two arguments as integers,
+    /// pushes their sum, returns 1.
+    unsafe extern "C" fn c_sum_two(
+        state: *mut LuaState,
+    ) -> std::os::raw::c_int {
+        let state = unsafe { &mut *state };
+        let a = state.to_integer_x(1).unwrap_or(0);
+        let b = state.to_integer_x(2).unwrap_or(0);
+        state.set_top(0);
+        state.push_integer(a + b);
+        1
+    }
+
+    /// Test helper — pushes three integers and returns 3.
+    unsafe extern "C" fn c_return_three(
+        state: *mut LuaState,
+    ) -> std::os::raw::c_int {
+        let state = unsafe { &mut *state };
+        state.set_top(0);
+        state.push_integer(1);
+        state.push_integer(2);
+        state.push_integer(3);
+        3
+    }
+
+    #[test]
+    fn call_value_invokes_light_c_function_with_zero_returns() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_return_zero as RawCFunction);
+        // func_slot = 0, n_args = 0, n_results = 0
+        state.call_value(0, 0, 0).expect("call succeeds");
+        assert_eq!(state.get_top(), 0, "stack should be empty");
+    }
+
+    #[test]
+    fn call_value_with_two_args_and_one_result_reads_args_and_returns_sum() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_sum_two as RawCFunction);
+        state.push_integer(10);
+        state.push_integer(32);
+        // Before: [func, 10, 32]. func_slot=0, n_args=2, n_results=1.
+        state.call_value(0, 2, 1).expect("call succeeds");
+        assert_eq!(state.get_top(), 1, "one result left");
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn call_value_with_multret_keeps_all_returns() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_return_three as RawCFunction);
+        state.call_value(0, 0, -1).expect("call succeeds");
+        assert_eq!(state.get_top(), 3);
+        assert_eq!(state.to_integer_x(1), Some(1));
+        assert_eq!(state.to_integer_x(2), Some(2));
+        assert_eq!(state.to_integer_x(3), Some(3));
+    }
+
+    #[test]
+    fn call_value_with_fewer_expected_returns_truncates() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_return_three as RawCFunction);
+        state.call_value(0, 0, 1).expect("call succeeds");
+        // Only one result should survive.
+        assert_eq!(state.get_top(), 1);
+        assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    #[test]
+    fn call_value_with_more_expected_returns_pads_with_nil() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_return_zero as RawCFunction);
+        state.call_value(0, 0, 3).expect("call succeeds");
+        assert_eq!(state.get_top(), 3);
+        assert!(state.is_nil(1));
+        assert!(state.is_nil(2));
+        assert!(state.is_nil(3));
+    }
+
+    #[test]
+    fn call_value_on_nil_target_returns_runtime_error() {
+        let mut state = LuaState::new(0);
+        state.push_nil();
+        let result = state.call_value(0, 0, 0);
+        assert!(matches!(result, Err(LuaError::Runtime(TValue::Nil))));
+    }
+
+    #[test]
+    fn call_value_pops_frame_after_c_function_returns() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_return_zero as RawCFunction);
+        let depth_before = state.call_depth();
+        state.call_value(0, 0, 0).unwrap();
+        assert_eq!(state.call_depth(), depth_before);
     }
 }

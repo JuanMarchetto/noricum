@@ -86,18 +86,38 @@ impl LuaState {
         self.global.heap.thread_mut(self.current_thread)
     }
 
+    /// Base (absolute stack slot of register R(0)) of the
+    /// current frame. Zero when no frame is active — matches
+    /// C Lua's treatment of the outermost level where "base =
+    /// L->stack_base = 0".
+    #[inline]
+    fn frame_base(&self) -> u32 {
+        self.frame_base_index().unwrap_or(0)
+    }
+
     /// Like [`LuaState::index_to_slot`] but returns `None` on
     /// out-of-range indices instead of panicking. Used by the
     /// non-fatal queries in 4.2.2 (`type_at`, `is_*`, `to_*`) so
     /// callers can safely probe indices without pre-bound-checking.
+    ///
+    /// Indices are frame-base-relative: `1` means `base[0]`, the
+    /// first argument or local of the current call frame. When
+    /// no frame is active, base == 0 and the behavior collapses
+    /// to the absolute-index version.
     fn try_index_to_slot(&self, idx: i32) -> Option<u32> {
+        let base = self.frame_base();
         let top = self.current_thread().top;
         if idx > 0 {
-            let slot = (idx - 1) as u32;
+            let slot = base.checked_add((idx - 1) as u32)?;
             if slot < top { Some(slot) } else { None }
         } else if idx < 0 {
             let magnitude = idx.unsigned_abs();
-            if magnitude <= top && magnitude > 0 {
+            if magnitude == 0 {
+                return None;
+            }
+            // Negative indices count back from top, bounded by base.
+            let frame_size = top - base;
+            if magnitude <= frame_size {
                 Some(top - magnitude)
             } else {
                 None
@@ -120,28 +140,37 @@ impl LuaState {
     /// stack. Panics on `0` (invalid) or out-of-range indices —
     /// matches C's `api_check` contract.
     ///
+    /// Frame-base-relative semantics: index `1` always means
+    /// register `R(0)` of the current call frame, which lives at
+    /// absolute stack slot `frame.func + 1`. With no active
+    /// frame, base is zero and the translation collapses to the
+    /// flat form the outermost caller sees.
+    ///
     /// Pseudo-indices (`LUA_REGISTRYINDEX`, upvalue indices)
     /// aren't recognized by this helper yet; callers that need
-    /// them will dispatch before falling into here. Stage 4.2.4
-    /// wires that up.
+    /// them will dispatch before falling into here.
     fn index_to_slot(&self, idx: i32) -> u32 {
+        let base = self.frame_base();
         let top = self.current_thread().top;
         if idx > 0 {
-            let slot = (idx - 1) as u32;
+            let slot = base + (idx - 1) as u32;
             assert!(
                 slot < top,
-                "lapi: positive stack index {} out of range (top={})",
+                "lapi: positive stack index {} out of range (top={}, base={})",
                 idx,
-                top
+                top,
+                base
             );
             slot
         } else if idx < 0 {
             let magnitude = idx.unsigned_abs();
+            let frame_size = top - base;
             assert!(
-                magnitude <= top,
-                "lapi: negative stack index {} out of range (top={})",
+                magnitude <= frame_size,
+                "lapi: negative stack index {} out of range (top={}, base={})",
                 idx,
-                top
+                top,
+                base
             );
             top - magnitude
         } else {
@@ -155,41 +184,44 @@ impl LuaState {
 // ---------------------------------------------------------------------------
 
 impl LuaState {
-    /// Convert `idx` to an absolute (positive) index. `0` is
-    /// invalid and panics; positive indices are returned as-is;
-    /// negative indices are translated as `top + idx + 1`.
-    /// Matches `lua_absindex` in `lapi.c`.
+    /// Convert `idx` to an absolute (positive, frame-relative)
+    /// index. `0` is invalid and panics; positive indices pass
+    /// through; negative indices are translated as
+    /// `get_top() + idx + 1`. Matches `lua_absindex`.
     pub fn absindex(&self, idx: i32) -> i32 {
         if idx > 0 {
             return idx;
         }
         assert!(idx != 0, "lapi: stack index 0 is invalid");
-        let top = self.current_thread().top as i32;
-        top + idx + 1
+        self.get_top() + idx + 1
     }
 
-    /// Return the current stack top — i.e., the number of values
-    /// on the stack. Matches `lua_gettop`.
+    /// Return the current frame's top — the number of values
+    /// visible above the current frame base. Matches `lua_gettop`,
+    /// which is frame-relative.
     pub fn get_top(&self) -> i32 {
-        self.current_thread().top as i32
+        let base = self.frame_base();
+        (self.current_thread().top - base) as i32
     }
 
-    /// Set the stack top to `idx`. Positive `idx` sets the top to
-    /// exactly that many values, nil-padding any newly exposed
-    /// slots; negative `idx` removes `|idx| - 1` values (so `-1`
-    /// is a no-op, `-2` pops one, and so on); `0` clears the
-    /// stack entirely. Matches `lua_settop`.
+    /// Set the frame top to `idx`. Positive `idx` sets the top to
+    /// exactly `base + idx` (nil-padding newly exposed slots);
+    /// negative `idx` pops `|idx| - 1` values (so `-1` is a
+    /// no-op, `-2` pops one, …); `0` clears the frame entirely
+    /// down to the base. Matches `lua_settop`.
     pub fn set_top(&mut self, idx: i32) {
+        let base = self.frame_base();
         let new_top = if idx >= 0 {
-            idx as u32
+            base + idx as u32
         } else {
             let top = self.current_thread().top as i32;
             let candidate = top + idx + 1;
             assert!(
-                candidate >= 0,
-                "lapi: settop({}) with top={} underflows",
+                (candidate as u32) >= base,
+                "lapi: settop({}) with top={}, base={} underflows the frame",
                 idx,
-                top
+                top,
+                base
             );
             candidate as u32
         };
