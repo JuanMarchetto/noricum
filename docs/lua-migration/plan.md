@@ -1,6 +1,6 @@
 # Lua 5.4 → Safe Rust: Full Port Plan
 
-**Status:** Stage 5 IN PROGRESS — ldo + lvm skeleton landed (5.1–5.10). 390 tests green. End-to-end Lua function execution works: bytecode for `for i = 1, 10 do sum = sum + i end` runs and produces 55. Opcodes implemented: MOVE, LOAD{I,K,FALSE,TRUE,NIL}, all ARITH + K/I variants, JMP, EQ/LT/LE, TEST/TESTSET, NEW/GET/SET TABLE (+I/FIELD), CALL, FORPREP/FORLOOP, RETURN/RETURN0/RETURN1. Deferred: closures (OP_CLOSURE), upvalues, metamethod dispatch, varargs, tailcalls, generic-for, concat/len, string comparisons.
+**Status:** Stage 5 IN PROGRESS — ldo + lvm substantially complete (5.1–5.12). 396 tests green. End-to-end Lua function execution works, including nested closures and numeric for loops. Opcodes implemented: MOVE, LOAD{I,K,FALSE,TRUE,NIL}, all ARITH + K/I variants, JMP, EQ/LT/LE, TEST/TESTSET, NEW/GET/SET TABLE (+I/FIELD), CALL, FORPREP/FORLOOP, RETURN/RETURN0/RETURN1, CLOSURE, GETUPVAL/SETUPVAL, CONCAT, LEN. Deferred: metamethod dispatch (__index/__newindex/__eq/__lt/__add/...), varargs (VARARG/VARARGPREP), tailcalls (TAILCALL), generic-for (TFORPREP/TFORCALL/TFORLOOP), open-upvalue capture from enclosing frames, SETLIST, comparison K/I variants, string comparison in LT/LE.
 **Branch:** `feat/interactive-spike-lua`
 **Scope:** Complete migration. No cuts. Drop-in ABI. See `docs/methodology/full-port-mode.md` for methodology and `memory/project_lua_full_port.md` for the seven lock-in decisions.
 **Started:** 2026-04-11
