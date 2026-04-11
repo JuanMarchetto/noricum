@@ -248,6 +248,128 @@ impl Heap {
             t.hash.insert(key, value);
         }
     }
+
+    // --- Length (`#t`) and iteration (`next(t)`) -------------------
+    //
+    // Lua's `#` operator returns a *border*: an index `n` such
+    // that `t[n] != nil` and `t[n+1] == nil` (or `n == 0` and
+    // `t[1] == nil`). For tables without holes this is the
+    // sequence length; for tables with holes it's any border (the
+    // choice is implementation-defined). We pick the one the C
+    // `luaH_getn` would pick, which keeps Stage 4 compatible with
+    // user code that relies on the exact hole semantics.
+
+    /// Return a border for `#handle`. Matches `luaH_getn` in
+    /// `ltable.c`. O(log n) in the common no-holes case; O(n)
+    /// worst case when the border lives in the hash part.
+    pub fn table_len(&self, handle: TableHandle) -> u64 {
+        let t = self.table(handle);
+        let limit = t.array.len() as u64;
+        // Case (1): the array ends in a hole — binary search
+        // the array for a border.
+        if limit > 0 && matches!(t.array[(limit - 1) as usize], TValue::Nil) {
+            let mut lo: u64 = 0;
+            let mut hi: u64 = limit;
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                if matches!(t.array[(mid - 1) as usize], TValue::Nil) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            return lo;
+        }
+        // Case (2): the array is either empty or its last slot
+        // is non-nil. If the hash doesn't extend the sequence,
+        // the array length itself is a border.
+        let next_key = TableKey::Integer((limit + 1) as LuaInteger);
+        if !t.hash.contains_key(&next_key) {
+            return limit;
+        }
+        // Case (3): the hash extends the sequence. Linear scan.
+        // The C version uses a smarter binary search based on
+        // `hash_search`; Stage 4.1.3 keeps it simple and Stage 4
+        // v2 can optimize if profiling warrants.
+        let mut n = limit + 1;
+        loop {
+            let candidate = TableKey::Integer((n + 1) as LuaInteger);
+            if !t.hash.contains_key(&candidate) {
+                return n;
+            }
+            n += 1;
+        }
+    }
+
+    /// Return the next `(key, value)` pair after `key`, or `None`
+    /// at the end of the traversal. `None` as the input key means
+    /// "give me the first entry". Matches `luaH_next` in
+    /// `ltable.c` — specifically the public part, not the hidden
+    /// `findindex` step, since our manual arena doesn't need the
+    /// C version's slot-index reuse trick.
+    ///
+    /// Walking order: array part first (indices 1..=array.len()),
+    /// skipping holes, then the hash part in HashMap iteration
+    /// order (which is unspecified but stable within a single
+    /// traversal as long as the table isn't modified).
+    pub fn table_next(
+        &self,
+        handle: TableHandle,
+        key: Option<TableKey>,
+    ) -> Option<(TableKey, TValue)> {
+        let t = self.table(handle);
+
+        // Decide the array starting index. A None key or a
+        // non-integer key (meaning we're already in the hash
+        // part) means "scan the whole array from slot 0".
+        let array_start = match key {
+            None => 0usize,
+            Some(TableKey::Integer(i)) if i >= 1 && (i as u64) <= t.array.len() as u64 => {
+                // i is an array-part index. Continue from i (slot i in 1-based = array[i]).
+                i as usize
+            }
+            _ => t.array.len(), // Skip array — we're already in the hash part.
+        };
+
+        // Scan forward in the array for the next non-nil slot.
+        for idx in array_start..t.array.len() {
+            let v = t.array[idx];
+            if !matches!(v, TValue::Nil) {
+                return Some((TableKey::Integer((idx + 1) as LuaInteger), v));
+            }
+        }
+
+        // Array exhausted. Now walk the hash part.
+        match key {
+            None => {
+                // Return the first hash entry, if any.
+                t.hash.iter().next().map(|(k, v)| (*k, *v))
+            }
+            Some(TableKey::Integer(i)) if i >= 1 && (i as u64) <= t.array.len() as u64 => {
+                // We were walking the array and just ran off the
+                // end. Start the hash iteration from its beginning.
+                t.hash.iter().next().map(|(k, v)| (*k, *v))
+            }
+            Some(hash_key) => {
+                // We were already in the hash part. Find `hash_key`,
+                // then return the entry that comes after it in
+                // HashMap iteration order. If `hash_key` isn't
+                // in the hash at all (caller passed a stale key),
+                // return None — Lua's reference manual calls this
+                // undefined, and None is the safer choice.
+                let mut seen_current = false;
+                for (k, v) in t.hash.iter() {
+                    if seen_current {
+                        return Some((*k, *v));
+                    }
+                    if *k == hash_key {
+                        seen_current = true;
+                    }
+                }
+                None
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -608,5 +730,165 @@ mod tests {
 
         assert_eq!(g.heap.marks_strings[child.slot as usize], WHITE);
         assert!(g.gc_gray.is_empty());
+    }
+
+    // --- table_len (#t) --------------------------------------------
+
+    #[test]
+    fn len_empty_table_is_zero() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(Table::default());
+        assert_eq!(heap.table_len(h), 0);
+    }
+
+    #[test]
+    fn len_array_without_holes_returns_array_size() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(fresh_table_with_array(vec![
+            TValue::Integer(10),
+            TValue::Integer(20),
+            TValue::Integer(30),
+        ]));
+        assert_eq!(heap.table_len(h), 3);
+    }
+
+    #[test]
+    fn len_array_with_trailing_hole_returns_border_before_the_hole() {
+        // `[10, 20, nil]` — the binary search must find index 2
+        // as a border.
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(fresh_table_with_array(vec![
+            TValue::Integer(10),
+            TValue::Integer(20),
+            TValue::Nil,
+        ]));
+        assert_eq!(heap.table_len(h), 2);
+    }
+
+    #[test]
+    fn len_array_of_only_holes_returns_zero() {
+        // `[nil, nil, nil]` — only 0 is a valid border per Lua's
+        // border definition ("0 is a border if t[1] is nil"),
+        // and the binary search correctly lands on it.
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(fresh_table_with_array(vec![
+            TValue::Nil,
+            TValue::Nil,
+            TValue::Nil,
+        ]));
+        assert_eq!(heap.table_len(h), 0);
+    }
+
+    #[test]
+    fn len_extends_through_hash_part_contiguously() {
+        // Array fills [1..=2], hash has 3 and 4 but not 5.
+        // Border should be 4.
+        let mut heap = Heap::default();
+        let mut t = fresh_table_with_array(vec![
+            TValue::Integer(1),
+            TValue::Integer(2),
+        ]);
+        t.hash.insert(TableKey::Integer(3), TValue::Integer(3));
+        t.hash.insert(TableKey::Integer(4), TValue::Integer(4));
+        let h = heap.alloc_table(t);
+        assert_eq!(heap.table_len(h), 4);
+    }
+
+    #[test]
+    fn len_full_array_with_gap_to_hash_stops_at_array_length() {
+        // Array fills [1..=3], hash has 5 (not 4). Border is 3
+        // because slot 4 is missing.
+        let mut heap = Heap::default();
+        let mut t = fresh_table_with_array(vec![
+            TValue::Integer(1),
+            TValue::Integer(2),
+            TValue::Integer(3),
+        ]);
+        t.hash.insert(TableKey::Integer(5), TValue::Integer(5));
+        let h = heap.alloc_table(t);
+        assert_eq!(heap.table_len(h), 3);
+    }
+
+    // --- table_next (iteration) ------------------------------------
+
+    #[test]
+    fn next_on_empty_table_returns_none() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(Table::default());
+        assert_eq!(heap.table_next(h, None), None);
+    }
+
+    #[test]
+    fn next_with_none_returns_first_array_entry() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(fresh_table_with_array(vec![
+            TValue::Integer(10),
+            TValue::Integer(20),
+        ]));
+        assert_eq!(
+            heap.table_next(h, None),
+            Some((TableKey::Integer(1), TValue::Integer(10)))
+        );
+    }
+
+    #[test]
+    fn next_walks_array_part_sequentially_skipping_holes() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(fresh_table_with_array(vec![
+            TValue::Integer(10),
+            TValue::Nil,
+            TValue::Integer(30),
+        ]));
+        // After key=1, the next non-nil slot is index 3.
+        assert_eq!(
+            heap.table_next(h, Some(TableKey::Integer(1))),
+            Some((TableKey::Integer(3), TValue::Integer(30)))
+        );
+    }
+
+    #[test]
+    fn next_transitions_from_array_part_to_hash_part() {
+        let mut heap = Heap::default();
+        let str_key = heap.alloc_string(fresh_string(b"k"));
+        let mut t = fresh_table_with_array(vec![TValue::Integer(10)]);
+        t.hash.insert(
+            TableKey::ShortString(str_key),
+            TValue::Integer(99),
+        );
+        let h = heap.alloc_table(t);
+        // Starting at last array key → first hash entry.
+        assert_eq!(
+            heap.table_next(h, Some(TableKey::Integer(1))),
+            Some((TableKey::ShortString(str_key), TValue::Integer(99)))
+        );
+    }
+
+    #[test]
+    fn next_exhausts_all_entries_in_full_traversal() {
+        // A traversal via table_next must visit every live entry
+        // exactly once and then return None.
+        let mut heap = Heap::default();
+        let mut t = fresh_table_with_array(vec![
+            TValue::Integer(10),
+            TValue::Integer(20),
+        ]);
+        t.hash.insert(TableKey::Integer(100), TValue::Integer(9999));
+        let h = heap.alloc_table(t);
+
+        let mut seen = Vec::new();
+        let mut cursor: Option<TableKey> = None;
+        while let Some((k, v)) = heap.table_next(h, cursor) {
+            seen.push((k, v));
+            cursor = Some(k);
+        }
+        assert_eq!(seen.len(), 3);
+        // Array part in order.
+        assert_eq!(seen[0], (TableKey::Integer(1), TValue::Integer(10)));
+        assert_eq!(seen[1], (TableKey::Integer(2), TValue::Integer(20)));
+        // Hash part last.
+        assert_eq!(
+            seen[2],
+            (TableKey::Integer(100), TValue::Integer(9999))
+        );
     }
 }
