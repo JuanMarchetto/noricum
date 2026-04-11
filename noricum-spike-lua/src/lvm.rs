@@ -43,8 +43,8 @@ use crate::contract::{
 use crate::lobject::{raw_arith, to_number_ns, ArithOp};
 use crate::ltm::TagMethod;
 use crate::lopcodes::{
-    get_opcode_raw, getarg_a, getarg_b, getarg_bx, getarg_c, getarg_k, getarg_sbx,
-    getarg_sc, getarg_sj, OpCode,
+    get_opcode_raw, getarg_a, getarg_b, getarg_bx, getarg_c, getarg_k, getarg_sb,
+    getarg_sbx, getarg_sc, getarg_sj, OpCode,
 };
 
 // Raw u8 discriminants for the opcodes we dispatch on. Rust's
@@ -78,6 +78,12 @@ const OP_JMP_U8: u8 = OpCode::OP_JMP as u8;
 const OP_EQ_U8: u8 = OpCode::OP_EQ as u8;
 const OP_LT_U8: u8 = OpCode::OP_LT as u8;
 const OP_LE_U8: u8 = OpCode::OP_LE as u8;
+const OP_EQK_U8: u8 = OpCode::OP_EQK as u8;
+const OP_EQI_U8: u8 = OpCode::OP_EQI as u8;
+const OP_LTI_U8: u8 = OpCode::OP_LTI as u8;
+const OP_LEI_U8: u8 = OpCode::OP_LEI as u8;
+const OP_GTI_U8: u8 = OpCode::OP_GTI as u8;
+const OP_GEI_U8: u8 = OpCode::OP_GEI as u8;
 const OP_TEST_U8: u8 = OpCode::OP_TEST as u8;
 const OP_TESTSET_U8: u8 = OpCode::OP_TESTSET as u8;
 
@@ -220,7 +226,7 @@ impl LuaState {
                     let k = getarg_k(instruction);
                     let ra = self.current_thread().stack[(base + a) as usize];
                     let rb = self.current_thread().stack[(base + b) as usize];
-                    let equal = lua_equals(&ra, &rb);
+                    let equal = self.lua_equals_mm(ra, rb)?;
                     if equal != k {
                         self.skip_next_instruction();
                     }
@@ -231,7 +237,7 @@ impl LuaState {
                     let k = getarg_k(instruction);
                     let ra = self.current_thread().stack[(base + a) as usize];
                     let rb = self.current_thread().stack[(base + b) as usize];
-                    let less = lua_less_than(&ra, &rb)?;
+                    let less = self.lua_less_than_mm(ra, rb)?;
                     if less != k {
                         self.skip_next_instruction();
                     }
@@ -242,8 +248,75 @@ impl LuaState {
                     let k = getarg_k(instruction);
                     let ra = self.current_thread().stack[(base + a) as usize];
                     let rb = self.current_thread().stack[(base + b) as usize];
-                    let le = lua_less_equal(&ra, &rb)?;
+                    let le = self.lua_less_equal_mm(ra, rb)?;
                     if le != k {
+                        self.skip_next_instruction();
+                    }
+                }
+                OP_EQK_U8 => {
+                    // if (R(A) == K[B]) != k then pc++
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as usize;
+                    let k = getarg_k(instruction);
+                    let ra = self.current_thread().stack[(base + a) as usize];
+                    let rb = self.constant_at(func_slot, b);
+                    let equal = self.lua_equals_mm(ra, rb)?;
+                    if equal != k {
+                        self.skip_next_instruction();
+                    }
+                }
+                OP_EQI_U8 => {
+                    // if (R(A) == sB) != k then pc++
+                    let a = getarg_a(instruction) as u32;
+                    let sb = getarg_sb(instruction) as i64;
+                    let k = getarg_k(instruction);
+                    let ra = self.current_thread().stack[(base + a) as usize];
+                    let equal = self.lua_equals_mm(ra, TValue::Integer(sb))?;
+                    if equal != k {
+                        self.skip_next_instruction();
+                    }
+                }
+                OP_LTI_U8 => {
+                    // if (R(A) < sB) != k then pc++
+                    let a = getarg_a(instruction) as u32;
+                    let sb = getarg_sb(instruction) as i64;
+                    let k = getarg_k(instruction);
+                    let ra = self.current_thread().stack[(base + a) as usize];
+                    let less = self.lua_less_than_mm(ra, TValue::Integer(sb))?;
+                    if less != k {
+                        self.skip_next_instruction();
+                    }
+                }
+                OP_LEI_U8 => {
+                    // if (R(A) <= sB) != k then pc++
+                    let a = getarg_a(instruction) as u32;
+                    let sb = getarg_sb(instruction) as i64;
+                    let k = getarg_k(instruction);
+                    let ra = self.current_thread().stack[(base + a) as usize];
+                    let le = self.lua_less_equal_mm(ra, TValue::Integer(sb))?;
+                    if le != k {
+                        self.skip_next_instruction();
+                    }
+                }
+                OP_GTI_U8 => {
+                    // if (R(A) > sB) != k then pc++ — i.e. sB < R(A)
+                    let a = getarg_a(instruction) as u32;
+                    let sb = getarg_sb(instruction) as i64;
+                    let k = getarg_k(instruction);
+                    let ra = self.current_thread().stack[(base + a) as usize];
+                    let gt = self.lua_less_than_mm(TValue::Integer(sb), ra)?;
+                    if gt != k {
+                        self.skip_next_instruction();
+                    }
+                }
+                OP_GEI_U8 => {
+                    // if (R(A) >= sB) != k then pc++ — i.e. sB <= R(A)
+                    let a = getarg_a(instruction) as u32;
+                    let sb = getarg_sb(instruction) as i64;
+                    let k = getarg_k(instruction);
+                    let ra = self.current_thread().stack[(base + a) as usize];
+                    let ge = self.lua_less_equal_mm(TValue::Integer(sb), ra)?;
+                    if ge != k {
                         self.skip_next_instruction();
                     }
                 }
@@ -350,67 +423,27 @@ impl LuaState {
                     self.lua_set_index(ra, key, rc)?;
                 }
                 OP_LEN_U8 => {
-                    // R(A) := #R(B) — length operator.
-                    // Strings, tables, userdata; metamethod
-                    // __len fallback deferred.
+                    // R(A) := #R(B) — length operator with
+                    // __len metamethod dispatch.
                     let a = getarg_a(instruction) as u32;
                     let b = getarg_b(instruction) as u32;
                     let rb = self.current_thread().stack[(base + b) as usize];
-                    let len_value = match rb {
-                        TValue::ShortString(h) | TValue::LongString(h) => {
-                            TValue::Integer(
-                                self.global.heap.string(h).bytes.len() as i64,
-                            )
-                        }
-                        TValue::Table(h) => {
-                            TValue::Integer(self.global.heap.table_len(h) as i64)
-                        }
-                        TValue::UserData(h) => TValue::Integer(
-                            self.global.heap.userdata_get(h).data.len() as i64,
-                        ),
-                        _ => return Err(LuaError::Runtime(TValue::Nil)),
-                    };
+                    let len_value = self.lua_len_mm(rb)?;
                     self.current_thread_mut().stack[(base + a) as usize] = len_value;
                 }
                 OP_CONCAT_U8 => {
                     // R(A) := R(A) .. R(A+1) .. ... .. R(A+B-1).
                     // B is the total number of operands to
-                    // concatenate. Integers and floats coerce
-                    // to their Display representation. Non
-                    // string/number operands trigger a runtime
-                    // error placeholder until __concat is wired.
+                    // concatenate. Dispatches to `lua_concat_mm`
+                    // which fuses raw string/number runs and
+                    // consults `__concat` on non-coercible
+                    // operands.
                     let a = getarg_a(instruction) as u32;
                     let b = getarg_b(instruction) as u32;
                     if b < 2 {
-                        // N < 2 is degenerate; nothing to do.
                         continue;
                     }
-                    let mut buffer: Vec<u8> = Vec::new();
-                    for i in 0..b {
-                        let v = self.current_thread().stack[(base + a + i) as usize];
-                        match v {
-                            TValue::ShortString(h) | TValue::LongString(h) => {
-                                buffer.extend_from_slice(
-                                    &self.global.heap.string(h).bytes,
-                                );
-                            }
-                            TValue::Integer(n) => {
-                                buffer.extend_from_slice(n.to_string().as_bytes());
-                            }
-                            TValue::Number(f) => {
-                                buffer.extend_from_slice(format!("{f}").as_bytes());
-                            }
-                            _ => return Err(LuaError::Runtime(TValue::Nil)),
-                        }
-                    }
-                    let seed = self.global.hash_seed;
-                    let handle = self.global.new_string(&buffer, seed);
-                    let result = if buffer.len() <= crate::lstring::LUAI_MAXSHORTLEN {
-                        TValue::ShortString(handle)
-                    } else {
-                        TValue::LongString(handle)
-                    };
-                    self.current_thread_mut().stack[(base + a) as usize] = result;
+                    self.lua_concat_mm(base + a, b)?;
                 }
                 OP_CLOSURE_U8 => {
                     // R(A) := closure(K[Bx]) — create a new
@@ -927,6 +960,303 @@ impl LuaState {
     }
 
     // ------------------------------------------------------------------
+    // Comparison / concat / length metamethod dispatch.
+    //
+    // lua_equals_mm / lua_less_than_mm / lua_less_equal_mm invoke
+    // __eq / __lt / __le when the raw numeric/string path can't
+    // decide. lua_concat_mm handles multi-arg concat with __concat
+    // fallback. lua_len_mm handles #t with __len.
+    // ------------------------------------------------------------------
+
+    /// Lua equality with metamethod fallback. Mirrors
+    /// `luaV_equalobj` — raw equality first, then same-type
+    /// `__eq` metamethod lookup (only when both operands are of
+    /// a type that can have __eq, i.e. tables and userdata).
+    pub(crate) fn lua_equals_mm(
+        &mut self,
+        a: TValue,
+        b: TValue,
+    ) -> LuaResult<bool> {
+        if let Some(decided) = lua_raw_equals(&a, &b) {
+            return Ok(decided);
+        }
+        // Undecided: must be same-type tables or userdata whose
+        // identity differs. Try __eq on either operand.
+        let mut tm = self.global.get_metamethod(a, TagMethod::Eq);
+        if matches!(tm, TValue::Nil) {
+            tm = self.global.get_metamethod(b, TagMethod::Eq);
+        }
+        if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
+            return Ok(false);
+        }
+        let result = self.call_binary_metamethod_to_register(tm, a, b)?;
+        Ok(result.is_truthy())
+    }
+
+    /// Lua `<` with metamethod fallback. Adds
+    /// byte-lexicographic string comparison on top of the
+    /// numeric fast path, then `__lt` on either operand.
+    pub(crate) fn lua_less_than_mm(
+        &mut self,
+        a: TValue,
+        b: TValue,
+    ) -> LuaResult<bool> {
+        if let Some(decided) = lua_raw_less_than(&a, &b) {
+            return Ok(decided);
+        }
+        if let Some(decided) = self.try_string_compare(a, b, /*strict*/ true) {
+            return Ok(decided);
+        }
+        let mut tm = self.global.get_metamethod(a, TagMethod::Lt);
+        if matches!(tm, TValue::Nil) {
+            tm = self.global.get_metamethod(b, TagMethod::Lt);
+        }
+        if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
+            return Err(LuaError::Runtime(TValue::Nil));
+        }
+        let result = self.call_binary_metamethod_to_register(tm, a, b)?;
+        Ok(result.is_truthy())
+    }
+
+    /// Lua `<=` with metamethod fallback.
+    pub(crate) fn lua_less_equal_mm(
+        &mut self,
+        a: TValue,
+        b: TValue,
+    ) -> LuaResult<bool> {
+        if let Some(decided) = lua_raw_less_equal(&a, &b) {
+            return Ok(decided);
+        }
+        if let Some(decided) = self.try_string_compare(a, b, /*strict*/ false) {
+            return Ok(decided);
+        }
+        let mut tm = self.global.get_metamethod(a, TagMethod::Le);
+        if matches!(tm, TValue::Nil) {
+            tm = self.global.get_metamethod(b, TagMethod::Le);
+        }
+        if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
+            // Lua 5.4 used to fall back to `not (b < a)` but as of
+            // 5.4.4 that is disabled by default because it breaks
+            // partial orders. We preserve the strict semantics.
+            return Err(LuaError::Runtime(TValue::Nil));
+        }
+        let result = self.call_binary_metamethod_to_register(tm, a, b)?;
+        Ok(result.is_truthy())
+    }
+
+    /// Byte-lexicographic comparison for string operands.
+    /// Returns `Some(bool)` when both sides are strings,
+    /// `None` otherwise so the caller can try __lt / __le.
+    fn try_string_compare(
+        &self,
+        a: TValue,
+        b: TValue,
+        strict: bool,
+    ) -> Option<bool> {
+        let (ha, hb) = match (a, b) {
+            (
+                TValue::ShortString(ha) | TValue::LongString(ha),
+                TValue::ShortString(hb) | TValue::LongString(hb),
+            ) => (ha, hb),
+            _ => return None,
+        };
+        let sa = self.global.heap.string(ha).bytes.as_slice();
+        let sb = self.global.heap.string(hb).bytes.as_slice();
+        Some(if strict { sa < sb } else { sa <= sb })
+    }
+
+    /// Invoke a metamethod with two args and return its single
+    /// return value, leaving the stack top where it was. Shared
+    /// by the __eq / __lt / __le / __concat / __len paths where
+    /// the result is consumed in a register slot known only to
+    /// the caller.
+    fn call_binary_metamethod_to_register(
+        &mut self,
+        tm: TValue,
+        a: TValue,
+        b: TValue,
+    ) -> LuaResult<TValue> {
+        let saved_top = self.current_thread().top;
+        let func_slot = saved_top;
+        {
+            let thread = self.current_thread_mut();
+            thread.grow_stack(3);
+            thread.stack[func_slot as usize] = tm;
+            thread.stack[(func_slot + 1) as usize] = a;
+            thread.stack[(func_slot + 2) as usize] = b;
+            thread.top = func_slot + 3;
+        }
+        self.call_value(func_slot, 2, 1)?;
+        let result = self.current_thread().stack[func_slot as usize];
+        self.current_thread_mut().top = saved_top;
+        Ok(result)
+    }
+
+    /// Length operation with `__len` metamethod fallback.
+    /// Handles strings (raw byte length), tables (luaH_getn or
+    /// __len if present), and userdata (data length or __len).
+    pub(crate) fn lua_len_mm(&mut self, v: TValue) -> LuaResult<TValue> {
+        match v {
+            TValue::ShortString(h) | TValue::LongString(h) => Ok(TValue::Integer(
+                self.global.heap.string(h).bytes.len() as i64,
+            )),
+            TValue::Table(h) => {
+                // Check __len first: Lua 5.4 honors __len on
+                // tables too — it overrides the default luaH_getn
+                // result when present.
+                let tm = self.global.get_metamethod(v, TagMethod::Len);
+                if !matches!(tm, TValue::Nil) && Self::is_callable(tm) {
+                    return self.call_unary_metamethod_to_register(tm, v);
+                }
+                Ok(TValue::Integer(self.global.heap.table_len(h) as i64))
+            }
+            TValue::UserData(h) => {
+                let tm = self.global.get_metamethod(v, TagMethod::Len);
+                if !matches!(tm, TValue::Nil) && Self::is_callable(tm) {
+                    return self.call_unary_metamethod_to_register(tm, v);
+                }
+                Ok(TValue::Integer(
+                    self.global.heap.userdata_get(h).data.len() as i64,
+                ))
+            }
+            _ => {
+                let tm = self.global.get_metamethod(v, TagMethod::Len);
+                if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
+                    return Err(LuaError::Runtime(TValue::Nil));
+                }
+                self.call_unary_metamethod_to_register(tm, v)
+            }
+        }
+    }
+
+    /// Invoke a unary metamethod `tm(v)` and return its result.
+    fn call_unary_metamethod_to_register(
+        &mut self,
+        tm: TValue,
+        v: TValue,
+    ) -> LuaResult<TValue> {
+        let saved_top = self.current_thread().top;
+        let func_slot = saved_top;
+        {
+            let thread = self.current_thread_mut();
+            thread.grow_stack(2);
+            thread.stack[func_slot as usize] = tm;
+            thread.stack[(func_slot + 1) as usize] = v;
+            thread.top = func_slot + 2;
+        }
+        self.call_value(func_slot, 1, 1)?;
+        let result = self.current_thread().stack[func_slot as usize];
+        self.current_thread_mut().top = saved_top;
+        Ok(result)
+    }
+
+    /// Concatenate `n` values starting at `first_slot` (absolute
+    /// stack index) and write the result back to `first_slot`.
+    /// Mirrors `luaV_concat`'s right-to-left walk: contiguous
+    /// string/number operands fuse into a single Rust buffer;
+    /// when a non-coercible operand is encountered, `__concat`
+    /// is consulted on it or its neighbour.
+    pub(crate) fn lua_concat_mm(
+        &mut self,
+        first_slot: u32,
+        n: u32,
+    ) -> LuaResult<()> {
+        if n < 2 {
+            return Ok(());
+        }
+        // Right-to-left. We repeatedly try to absorb as many
+        // adjacent string/number operands as possible into a
+        // single flat buffer; when that fails we invoke
+        // __concat on the boundary and retry.
+        let mut remaining = n;
+        while remaining >= 2 {
+            // Look at the two values at the tail: the one at
+            // first_slot + remaining - 2 and first_slot + remaining - 1.
+            let left_idx = first_slot + remaining - 2;
+            let right_idx = first_slot + remaining - 1;
+            let left = self.current_thread().stack[left_idx as usize];
+            let right = self.current_thread().stack[right_idx as usize];
+            if !Self::is_concat_coercible(left) || !Self::is_concat_coercible(right)
+            {
+                // At least one end isn't string/number: consult
+                // __concat. `__concat` is not one of the fast
+                // events, so slow-path lookup.
+                let mut tm = self.global.get_metamethod(left, TagMethod::Concat);
+                if matches!(tm, TValue::Nil) {
+                    tm = self.global.get_metamethod(right, TagMethod::Concat);
+                }
+                if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
+                    return Err(LuaError::Runtime(TValue::Nil));
+                }
+                let result = self.call_binary_metamethod_to_register(tm, left, right)?;
+                self.current_thread_mut().stack[left_idx as usize] = result;
+                remaining -= 1;
+                continue;
+            }
+            // Both sides are coercible — gather the maximal
+            // run ending at `right_idx` and fuse. This match
+            // C Lua's optimisation: chained concats like a..b..c..d
+            // allocate a single intermediate.
+            let mut run_start = left_idx;
+            while run_start > first_slot {
+                let candidate =
+                    self.current_thread().stack[(run_start - 1) as usize];
+                if Self::is_concat_coercible(candidate) {
+                    run_start -= 1;
+                } else {
+                    break;
+                }
+            }
+            let run_len = right_idx - run_start + 1;
+            let mut buffer: Vec<u8> = Vec::new();
+            for i in 0..run_len {
+                let v = self.current_thread().stack[(run_start + i) as usize];
+                self.append_concat_operand(&mut buffer, v);
+            }
+            let seed = self.global.hash_seed;
+            let handle = self.global.new_string(&buffer, seed);
+            let fused = if buffer.len() <= crate::lstring::LUAI_MAXSHORTLEN {
+                TValue::ShortString(handle)
+            } else {
+                TValue::LongString(handle)
+            };
+            self.current_thread_mut().stack[run_start as usize] = fused;
+            remaining -= run_len - 1;
+        }
+        // After the loop the result lives at `first_slot`.
+        Ok(())
+    }
+
+    /// True if `v` can be consumed by the raw concat path
+    /// (string or number). Other types require `__concat`.
+    fn is_concat_coercible(v: TValue) -> bool {
+        matches!(
+            v,
+            TValue::ShortString(_)
+                | TValue::LongString(_)
+                | TValue::Integer(_)
+                | TValue::Number(_)
+        )
+    }
+
+    /// Append one concat operand to the output buffer. Assumes
+    /// [`Self::is_concat_coercible`] returned true.
+    fn append_concat_operand(&self, buffer: &mut Vec<u8>, v: TValue) {
+        match v {
+            TValue::ShortString(h) | TValue::LongString(h) => {
+                buffer.extend_from_slice(&self.global.heap.string(h).bytes);
+            }
+            TValue::Integer(n) => {
+                buffer.extend_from_slice(n.to_string().as_bytes());
+            }
+            TValue::Number(f) => {
+                buffer.extend_from_slice(format!("{f}").as_bytes());
+            }
+            _ => unreachable!("append_concat_operand requires coercible operand"),
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Table read/write with __index / __newindex metamethod dispatch.
     //
     // Matches `luaV_finishget` / `luaV_finishset` in lvm.c. Walks
@@ -1214,50 +1544,50 @@ impl LuaState {
 // report a runtime error.
 // ---------------------------------------------------------------------------
 
-/// Lua equality — matches `luaV_equalobj` for the primitive fast
-/// path. Handles Integer/Number cross-type equality (where
-/// `2 == 2.0`). Returns false for cross-type combinations that
-/// need a metamethod (the metamethod path lands later).
-fn lua_equals(a: &TValue, b: &TValue) -> bool {
-    // Same-variant bit equality catches most cases through
-    // TValue::PartialEq.
+/// Lua equality fast path without metamethod fallback — matches
+/// `luaV_equalobj`'s primitive checks. Handles Integer/Number
+/// cross-type equality (`2 == 2.0`). Returns `None` for
+/// same-type-different-identity cases that need a metamethod
+/// walk, `Some(true/false)` for decidable cases.
+fn lua_raw_equals(a: &TValue, b: &TValue) -> Option<bool> {
     if a == b {
-        return true;
+        return Some(true);
     }
-    // Integer/float cross-type: `2 == 2.0` must be true.
     match (a, b) {
         (TValue::Integer(i), TValue::Number(n))
-        | (TValue::Number(n), TValue::Integer(i)) => {
-            // A float equals an integer iff the float is
-            // exactly integral and matches.
-            n.is_finite() && *n == (*i as f64) && n.floor() == *n
-        }
-        _ => false,
+        | (TValue::Number(n), TValue::Integer(i)) => Some(
+            n.is_finite() && *n == (*i as f64) && n.floor() == *n,
+        ),
+        // Strings intern so identity ≡ value; not equal bit-for-bit
+        // means not equal at the Lua level. `nil`/`bool` only compare
+        // equal to themselves (handled by the top check). Numbers of
+        // different precisions compared above.
+        (TValue::ShortString(_), TValue::ShortString(_))
+        | (TValue::LongString(_), TValue::LongString(_)) => Some(false),
+        // Tables and userdata: decidable only when identity matches.
+        // When not identical, consult __eq.
+        (TValue::Table(_), TValue::Table(_)) => None,
+        (TValue::UserData(_), TValue::UserData(_)) => None,
+        _ => Some(false),
     }
 }
 
-/// Lua `<` — matches `luaV_lessthan` for the numeric path.
-/// Strings fall through to a raw byte-slice comparison; anything
-/// else errors out with a runtime error placeholder.
-fn lua_less_than(a: &TValue, b: &TValue) -> LuaResult<bool> {
+/// Raw `<` check without metamethod fallback. Returns
+/// `Ok(Some(bool))` for decidable cases, `Ok(None)` to signal
+/// "needs __lt metamethod", `Err` never in this path.
+fn lua_raw_less_than(a: &TValue, b: &TValue) -> Option<bool> {
     if let (Some(na), Some(nb)) = (to_number_ns(a), to_number_ns(b)) {
-        // Cross-domain integer/float comparison: Lua's reference
-        // uses a more precise int-vs-float comparison to avoid
-        // f64 precision loss near i64::MAX, but for Stage 5.6
-        // the f64 path matches within the normal ranges tests
-        // exercise. Stage 5 v2 can tighten this.
-        return Ok(na < nb);
+        return Some(na < nb);
     }
-    Err(LuaError::Runtime(TValue::Nil))
+    None
 }
 
-/// Lua `<=` — matches `luaV_lessequal`. Same shape as
-/// [`lua_less_than`].
-fn lua_less_equal(a: &TValue, b: &TValue) -> LuaResult<bool> {
+/// Raw `<=` check — same shape as [`lua_raw_less_than`].
+fn lua_raw_less_equal(a: &TValue, b: &TValue) -> Option<bool> {
     if let (Some(na), Some(nb)) = (to_number_ns(a), to_number_ns(b)) {
-        return Ok(na <= nb);
+        return Some(na <= nb);
     }
-    Err(LuaError::Runtime(TValue::Nil))
+    None
 }
 
 #[cfg(test)]
@@ -2771,5 +3101,266 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(7));
+    }
+
+    // ---- Stage 5.15 comparison / concat / len metamethods ---------
+
+    #[test]
+    fn eq_metamethod_called_on_distinct_tables() {
+        // Two separate tables, __eq on the left returns true
+        // regardless of the right operand.
+        unsafe extern "C" fn eq_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.push_boolean(true);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let t1 = state.global.heap.alloc_table(crate::contract::Table::default());
+        let t2 = state.global.heap.alloc_table(crate::contract::Table::default());
+        install_metamethod(
+            &mut state,
+            t1,
+            TagMethod::Eq,
+            TValue::LightCFunction(eq_fn as crate::contract::RawCFunction),
+        );
+        // OP_EQ with k=1: skip next instruction if (R(A) == R(B)) != true.
+        // We test by branching: EQ R(0), R(1), k=1; JMP +1 (skipped when equal); loadi(2, 1); return1(2)
+        // If not equal: fall through to loadi(2, 0); return1(2)
+        let sbx_forward = |n: i32| jmp(n);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadk(1, 1),
+                // EQ R(0), R(1), k=1 -- if eq != true (false), skip next JMP
+                create_abck(OpCode::OP_EQ, 0, 1, 0, true),
+                // JMP forward past the "not equal" path
+                sbx_forward(2),
+                // Equal path (fall through when condition skipped? actually:
+                // The logic is: if comparison result != k, pc++. So k=1 means
+                // "if equal, don't skip; else skip the JMP". When equal: JMP runs → +2.
+                // When not equal: JMP skipped → fall to loadi(2, 0).
+                loadi(2, 0),
+                return1(2),
+                loadi(2, 1),
+                return1(2),
+            ],
+            vec![TValue::Table(t1), TValue::Table(t2)],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    #[test]
+    fn lt_metamethod_dispatched_when_operand_is_table() {
+        // __lt returns true
+        unsafe extern "C" fn lt_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.push_boolean(true);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let t1 = state.global.heap.alloc_table(crate::contract::Table::default());
+        let t2 = state.global.heap.alloc_table(crate::contract::Table::default());
+        install_metamethod(
+            &mut state,
+            t1,
+            TagMethod::Lt,
+            TValue::LightCFunction(lt_fn as crate::contract::RawCFunction),
+        );
+        let sbx_forward = |n: i32| jmp(n);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadk(1, 1),
+                // LT R(0), R(1), k=1
+                create_abck(OpCode::OP_LT, 0, 1, 0, true),
+                sbx_forward(2),
+                loadi(2, 0),
+                return1(2),
+                loadi(2, 1),
+                return1(2),
+            ],
+            vec![TValue::Table(t1), TValue::Table(t2)],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    #[test]
+    fn string_lt_uses_byte_lexicographic_order() {
+        // "abc" < "abd" at the Lua level.
+        let mut state = LuaState::new(0);
+        let s_abc = state.global.new_string(b"abc", 0);
+        let s_abd = state.global.new_string(b"abd", 0);
+        let sbx_forward = |n: i32| jmp(n);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadk(1, 1),
+                create_abck(OpCode::OP_LT, 0, 1, 0, true),
+                sbx_forward(2),
+                loadi(2, 0),
+                return1(2),
+                loadi(2, 1),
+                return1(2),
+            ],
+            vec![TValue::ShortString(s_abc), TValue::ShortString(s_abd)],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    #[test]
+    fn concat_metamethod_dispatched_on_table_operand() {
+        // __concat returns a sentinel string.
+        unsafe extern "C" fn concat_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.push_string("meta");
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let t = state.global.heap.alloc_table(crate::contract::Table::default());
+        install_metamethod(
+            &mut state,
+            t,
+            TagMethod::Concat,
+            TValue::LightCFunction(concat_fn as crate::contract::RawCFunction),
+        );
+        let hello = state.global.new_string(b"hello", 0);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadk(1, 1),
+                create_abck(OpCode::OP_CONCAT, 0, 2, 0, false),
+                return1(0),
+            ],
+            vec![TValue::ShortString(hello), TValue::Table(t)],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_lstring(1), Some(b"meta".as_slice()));
+    }
+
+    #[test]
+    fn len_metamethod_overrides_table_length() {
+        // __len returns 999.
+        unsafe extern "C" fn len_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.push_integer(999);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let t = state.global.heap.alloc_table(crate::contract::Table::default());
+        // Install 3 entries so table_len would otherwise return 3.
+        state.global.table_set_int(t, 1, TValue::Integer(10));
+        state.global.table_set_int(t, 2, TValue::Integer(20));
+        state.global.table_set_int(t, 3, TValue::Integer(30));
+        install_metamethod(
+            &mut state,
+            t,
+            TagMethod::Len,
+            TValue::LightCFunction(len_fn as crate::contract::RawCFunction),
+        );
+
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_LEN, 1, 0, 0, false),
+                return1(1),
+            ],
+            vec![TValue::Table(t)],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(999));
+    }
+
+    #[test]
+    fn op_lti_branches_true_for_less_than() {
+        use crate::lopcodes::OFFSET_sC;
+        // R(0) = 5; if R(0) < 10 then jmp forward.
+        let mut state = LuaState::new(0);
+        let sbx_forward = |n: i32| jmp(n);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 5),
+                create_abck(OpCode::OP_LTI, 0, (10 + OFFSET_sC) as u32, 0, true),
+                sbx_forward(2),
+                loadi(1, 0),
+                return1(1),
+                loadi(1, 1),
+                return1(1),
+            ],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    #[test]
+    fn op_gti_branches_true_for_greater_than() {
+        use crate::lopcodes::OFFSET_sC;
+        // R(0) = 10; if R(0) > 5 then jmp forward.
+        let mut state = LuaState::new(0);
+        let sbx_forward = |n: i32| jmp(n);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 10),
+                create_abck(OpCode::OP_GTI, 0, (5 + OFFSET_sC) as u32, 0, true),
+                sbx_forward(2),
+                loadi(1, 0),
+                return1(1),
+                loadi(1, 1),
+                return1(1),
+            ],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    #[test]
+    fn op_eqi_branches_true_on_integer_equality() {
+        use crate::lopcodes::OFFSET_sC;
+        // R(0) = 42; if R(0) == 42 then jmp forward.
+        let mut state = LuaState::new(0);
+        let sbx_forward = |n: i32| jmp(n);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 42),
+                create_abck(OpCode::OP_EQI, 0, (42 + OFFSET_sC) as u32, 0, true),
+                sbx_forward(2),
+                loadi(1, 0),
+                return1(1),
+                loadi(1, 1),
+                return1(1),
+            ],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(1));
     }
 }
