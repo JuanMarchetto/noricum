@@ -86,6 +86,15 @@ int wr_lopcodes_op_call(void);
 int wr_lopcodes_op_return(void);
 int wr_lopcodes_op_extraarg(void);
 
+/* lmem — memory manager growth strategy (lmem.{c,h}).
+ *
+ * Invokes the real luaM_growaux_ with size_elems == 0 (no actual
+ * allocation) under a protected call. Writes the new size into
+ * *out_size on success. Returns 1 on success, 0 if luaM_growaux_
+ * raised "too many X", or -1 if the oracle state itself failed to
+ * initialize. */
+int wr_lmem_grow_array_size(int size_in, int nelems, int limit, int* out_size);
+
 #ifdef __cplusplus
 }
 #endif

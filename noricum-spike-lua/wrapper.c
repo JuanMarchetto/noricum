@@ -5,6 +5,7 @@
 #include "lualib.h"
 #include "lctype.h"
 #include "lopcodes.h"
+#include "lmem.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -156,3 +157,47 @@ int wr_lopcodes_op_setlist(void)  { return (int) OP_SETLIST; }
 int wr_lopcodes_op_call(void)     { return (int) OP_CALL; }
 int wr_lopcodes_op_return(void)   { return (int) OP_RETURN; }
 int wr_lopcodes_op_extraarg(void) { return (int) OP_EXTRAARG; }
+
+/*
+ * ---------------------------------------------------------------------------
+ * lmem oracle shim. Invokes luaM_growaux_ with size_elems == 0 so the
+ * size-selection logic runs but no memory is actually allocated (by
+ * the realloc contract, frealloc(ud, NULL, 0, 0) is a no-op). The call
+ * is wrapped in lua_pcall so the "too many X" luaG_runerror path is
+ * caught instead of aborting the process.
+ * ---------------------------------------------------------------------------
+ */
+
+typedef struct {
+    int size_in;
+    int nelems;
+    int limit;
+    int size_out;
+} wr_grow_probe_t;
+
+static int wr_grow_probe_body(lua_State* L) {
+    wr_grow_probe_t* p = (wr_grow_probe_t*) lua_touserdata(L, 1);
+    int psize = p->size_in;
+    /* size_elems = 0 => osize = 0, nsize = 0 in saferealloc; no alloc. */
+    (void) luaM_growaux_(L, NULL, p->nelems, &psize, 0, p->limit, "x");
+    p->size_out = psize;
+    return 0;
+}
+
+int wr_lmem_grow_array_size(int size_in, int nelems, int limit, int* out_size) {
+    if (!out_size) return -1;
+    lua_State* L = luaL_newstate();
+    if (!L) return -1;
+    wr_grow_probe_t probe;
+    probe.size_in = size_in;
+    probe.nelems = nelems;
+    probe.limit = limit;
+    probe.size_out = size_in;
+    lua_pushcfunction(L, wr_grow_probe_body);
+    lua_pushlightuserdata(L, &probe);
+    int rc = lua_pcall(L, 1, 0, 0);
+    int ok = (rc == LUA_OK);
+    if (ok) *out_size = probe.size_out;
+    lua_close(L);
+    return ok ? 1 : 0;
+}

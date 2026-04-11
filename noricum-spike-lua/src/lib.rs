@@ -20,6 +20,7 @@
 
 pub mod contract;
 pub mod lctype;
+pub mod lmem;
 pub mod lopcodes;
 
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
@@ -69,6 +70,15 @@ unsafe extern "C" {
     pub fn wr_lopcodes_op_call() -> c_int;
     pub fn wr_lopcodes_op_return() -> c_int;
     pub fn wr_lopcodes_op_extraarg() -> c_int;
+
+    // lmem oracle shim. Writes new size via out-param; returns 1 on
+    // success, 0 on "too many X" overflow, -1 on state init failure.
+    pub fn wr_lmem_grow_array_size(
+        size_in: c_int,
+        nelems: c_int,
+        limit: c_int,
+        out_size: *mut c_int,
+    ) -> c_int;
 }
 
 // TODO: add `pub mod contract;` once the Rust-side type architecture is
