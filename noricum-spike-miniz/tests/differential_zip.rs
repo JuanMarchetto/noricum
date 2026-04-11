@@ -14,6 +14,7 @@
 
 use std::ffi::CString;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use spike::contract::{ZipReader as RustZipReader, ZipWriter as RustZipWriter};
@@ -651,4 +652,256 @@ fn locate_by_name_matches_iterated_index() {
         .map(|&c| c as u8)
         .collect();
     assert_eq!(String::from_utf8_lossy(&name_bytes), "file2.txt");
+}
+
+// ---------------------------------------------------------------------------
+// Extension tests: zip64 + data descriptors + AES.
+//
+// These use `zip = "2"` as a dev-dependency to generate fixtures with format
+// features that Python's zipfile module either cannot produce deterministically
+// (true zip64 central directory) or does not produce at all (WinZip AES). The
+// fixtures are generated into temp files at test time, not committed.
+// ---------------------------------------------------------------------------
+
+fn tmp_archive(label: &str) -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!(
+        "noricum-spike-ext-{}-{}.zip",
+        label,
+        std::process::id()
+    ));
+    p
+}
+
+/// Generate a ZIP archive whose central directory genuinely uses zip64
+/// extended information fields (not just a zip64 local header extra). Uses
+/// `zip-rs`'s `FileOptions::large_file(true)` which forces the zip64 extra on
+/// every entry, and writes a minimum archive that miniz/any reader must
+/// parse via the zip64 EOCD path.
+fn write_zip64_archive_via_zip_rs(path: &Path) {
+    use zip::CompressionMethod;
+    use zip::write::{SimpleFileOptions, ZipWriter};
+
+    let file = std::fs::File::create(path).expect("create zip64 fixture file");
+    let mut zw = ZipWriter::new(file);
+    let opts = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .large_file(true);
+    for i in 0..3 {
+        zw.start_file(format!("entry{i}.txt"), opts).unwrap();
+        zw.write_all(format!("content of entry {i}\n").as_bytes())
+            .unwrap();
+    }
+    zw.finish().unwrap();
+}
+
+#[test]
+fn extension_test_zip64_via_zip_rs() {
+    let path = tmp_archive("zip64");
+    write_zip64_archive_via_zip_rs(&path);
+
+    // C oracle must accept this archive (miniz supports zip64).
+    let oracle = snapshot_via_oracle(&path).expect("oracle zip64 open");
+    assert_eq!(oracle.entries.len(), 3, "oracle sees 3 entries");
+    for (i, entry) in oracle.entries.iter().enumerate() {
+        assert_eq!(entry.name, format!("entry{i}.txt"));
+        let expected = format!("content of entry {i}\n");
+        assert_eq!(entry.size, expected.len());
+    }
+
+    // Rust reader MUST match.
+    let mut rust = RustZipReader::open(&path).expect("rust zip64 open");
+    assert_eq!(rust.num_entries(), 3, "rust sees 3 entries in zip64 archive");
+    for i in 0..3usize {
+        let body = rust.extract_to_mem(i).expect("rust zip64 extract");
+        let expected = format!("content of entry {i}\n");
+        assert_eq!(body, expected.as_bytes(), "rust zip64 body at {i}");
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Generate an archive using a DATA DESCRIPTOR. zip-rs emits a data
+/// descriptor (flag bit 3 = 0x0008) when it writes via a non-seekable
+/// sink — we emulate that by wrapping a Vec<u8> in a blocking writer or by
+/// using the explicit streaming-write API.
+///
+/// Actually, zip-rs writes data descriptors only when the seek is
+/// unavailable; we work around by writing to an in-memory buffer via the
+/// `ZipWriter::new` path which stores, then manually re-emitting with the
+/// bit 3 flag set. Simpler path: use `start_file` followed by `set_flush_on_finish_file`
+/// or use `new_from_streamed_nonseekable`. The simplest is to write to a
+/// Cursor<Vec<u8>> then write the bytes to disk — zip-rs uses data
+/// descriptors whenever it can't seek, which cursors CAN, so we force the
+/// flag via the SimpleFileOptions manually. Alternative:
+///
+/// Since zip-rs doesn't expose a "force data descriptor" flag, we fall back
+/// to asserting that our reader handles the zip-rs default (which already
+/// emits consistent local + central entries in the seekable writer path).
+/// The reader already uses the central directory as authoritative, so data
+/// descriptors are transparent to it. This test locks in that behavior by
+/// constructing a handcrafted archive that sets flag bit 3 in the local
+/// header on purpose.
+#[test]
+fn extension_test_data_descriptor_reader_handles_bit3() {
+    // Build an archive by hand with bit 3 set on the local header and
+    // zeros for the local size fields, exercising the reader path that
+    // pulls sizes from the central directory.
+    let path = tmp_archive("data_descriptor");
+    let body = b"content with data descriptor flag\n";
+    let crc = crc32fast_hash(body);
+    let compressed = body.to_vec(); // Stored compression: body == compressed
+    let size = body.len() as u32;
+    let name = b"ddesc.txt";
+
+    let mut archive: Vec<u8> = Vec::new();
+
+    // Local file header with flag bit 3 set and zeros for sizes/crc.
+    archive.extend_from_slice(&0x04034b50u32.to_le_bytes()); // signature
+    archive.extend_from_slice(&20u16.to_le_bytes()); // version
+    archive.extend_from_slice(&0x0008u16.to_le_bytes()); // flag bit 3
+    archive.extend_from_slice(&0u16.to_le_bytes()); // compression method (stored)
+    archive.extend_from_slice(&0u16.to_le_bytes()); // time
+    archive.extend_from_slice(&0u16.to_le_bytes()); // date
+    archive.extend_from_slice(&0u32.to_le_bytes()); // crc32 (placeholder)
+    archive.extend_from_slice(&0u32.to_le_bytes()); // compressed size (placeholder)
+    archive.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size (placeholder)
+    archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes()); // extra length
+    archive.extend_from_slice(name);
+
+    let data_offset = archive.len() as u64;
+    archive.extend_from_slice(&compressed);
+
+    // Data descriptor: optional magic + real crc/sizes.
+    archive.extend_from_slice(&0x08074b50u32.to_le_bytes()); // optional magic
+    archive.extend_from_slice(&crc.to_le_bytes());
+    archive.extend_from_slice(&size.to_le_bytes());
+    archive.extend_from_slice(&size.to_le_bytes());
+
+    // Central directory entry with the REAL sizes/crc.
+    let cd_offset = archive.len() as u32;
+    archive.extend_from_slice(&0x02014b50u32.to_le_bytes()); // signature
+    archive.extend_from_slice(&20u16.to_le_bytes()); // version_made_by
+    archive.extend_from_slice(&20u16.to_le_bytes()); // version_needed
+    archive.extend_from_slice(&0x0008u16.to_le_bytes()); // flags bit 3
+    archive.extend_from_slice(&0u16.to_le_bytes()); // compression
+    archive.extend_from_slice(&0u16.to_le_bytes()); // time
+    archive.extend_from_slice(&0u16.to_le_bytes()); // date
+    archive.extend_from_slice(&crc.to_le_bytes());
+    archive.extend_from_slice(&size.to_le_bytes()); // comp size
+    archive.extend_from_slice(&size.to_le_bytes()); // uncomp size
+    archive.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name len
+    archive.extend_from_slice(&0u16.to_le_bytes()); // extra len
+    archive.extend_from_slice(&0u16.to_le_bytes()); // comment len
+    archive.extend_from_slice(&0u16.to_le_bytes()); // disk start
+    archive.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+    archive.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+    archive.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+    archive.extend_from_slice(name);
+
+    let cd_end = archive.len() as u32;
+    let cd_size = cd_end - cd_offset;
+
+    // EOCD.
+    archive.extend_from_slice(&0x06054b50u32.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes()); // disk number
+    archive.extend_from_slice(&0u16.to_le_bytes()); // disk with central
+    archive.extend_from_slice(&1u16.to_le_bytes()); // entries this disk
+    archive.extend_from_slice(&1u16.to_le_bytes()); // total entries
+    archive.extend_from_slice(&cd_size.to_le_bytes());
+    archive.extend_from_slice(&cd_offset.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+    std::fs::write(&path, &archive).unwrap();
+    let _ = data_offset;
+
+    // Both C oracle and Rust reader must extract the correct body.
+    let oracle = snapshot_via_oracle(&path).expect("oracle data_descriptor open");
+    assert_eq!(oracle.entries.len(), 1);
+    assert_eq!(oracle.entries[0].size, body.len());
+    assert_eq!(oracle.entries[0].crc32, crc);
+
+    let mut rust = RustZipReader::open(&path).expect("rust data_descriptor open");
+    let extracted = rust.extract_to_mem(0).expect("rust extract");
+    assert_eq!(extracted, body, "rust must yield body from data-descriptor archive");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Helper that delegates to `crc32fast` without adding it as a dev-dep
+/// (it's already a runtime dep of the crate).
+fn crc32fast_hash(data: &[u8]) -> u32 {
+    // re-export through a tiny shim since we can't `use crc32fast` in tests
+    // without adding it to dev-dependencies separately; the runtime dep is
+    // visible through `spike`, but there's no re-export — so we inline a
+    // reflected-table impl that matches the zlib CRC32 polynomial.
+    const POLY: u32 = 0xEDB8_8320;
+    let mut table = [0u32; 256];
+    for (n, entry) in table.iter_mut().enumerate() {
+        let mut c = n as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { POLY ^ (c >> 1) } else { c >> 1 };
+        }
+        *entry = c;
+    }
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+/// Generate an AES-256 encrypted archive via zip-rs and assert that the
+/// Rust reader either handles it or fails cleanly with UnsupportedEncryption.
+/// (Decryption implementation is a separate commit.)
+#[test]
+fn extension_test_aes_via_zip_rs() {
+    use zip::CompressionMethod;
+    use zip::write::{SimpleFileOptions, ZipWriter};
+    use zip::AesMode;
+
+    let path = tmp_archive("aes");
+    {
+        let file = std::fs::File::create(&path).expect("create aes fixture");
+        let mut zw = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .with_aes_encryption(AesMode::Aes256, "noricumspike");
+        zw.start_file("secret.txt", opts).unwrap();
+        zw.write_all(b"this payload is AES encrypted\n").unwrap();
+        zw.finish().unwrap();
+    }
+
+    // C oracle: miniz does NOT support AES, so it will either fail to open
+    // or succeed to open but fail to extract. Don't assert on oracle behavior.
+    let _oracle_attempt = snapshot_via_oracle(&path);
+
+    // Rust reader: current commit does not support AES. We assert either
+    // a clean UnsupportedEncryption / UnsupportedMethod error OR successful
+    // extraction — the test will be updated once AES lands in the reader.
+    match RustZipReader::open(&path) {
+        Ok(mut reader) => {
+            match reader.extract_to_mem(0) {
+                Ok(body) => {
+                    // If AES support landed, the body matches.
+                    assert_eq!(body, b"this payload is AES encrypted\n");
+                }
+                Err(spike::contract::ZipError::UnsupportedMethod)
+                | Err(spike::contract::ZipError::UnsupportedEncryption)
+                | Err(spike::contract::ZipError::DecompressionFailed) => {
+                    // Expected failure mode before AES is implemented.
+                }
+                Err(other) => panic!("AES extract returned unexpected error: {other:?}"),
+            }
+        }
+        Err(spike::contract::ZipError::UnsupportedMethod)
+        | Err(spike::contract::ZipError::UnsupportedEncryption)
+        | Err(spike::contract::ZipError::UnsupportedFeature) => {
+            // Also acceptable: reader refuses to open AES archives.
+        }
+        Err(other) => panic!("AES open returned unexpected error: {other:?}"),
+    }
+
+    let _ = std::fs::remove_file(&path);
 }
