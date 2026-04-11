@@ -86,40 +86,130 @@ pub const LUA_VLCF: u8 = LUA_TFUNCTION | (1 << 4);
 pub const LUA_VCCL: u8 = LUA_TFUNCTION | (2 << 4);
 
 // ---------------------------------------------------------------------------
-// Arena handles. One `u32` per heap-allocated object.
+// Arena handles.
+//
+// Each handle is a (slot, generation) pair. The `slot` is an index into the
+// backing `Vec<Option<T>>` on [`Heap`]; the `generation` is a counter bumped
+// every time that slot is freed, so a stale handle whose generation no
+// longer matches the current slot generation can be detected at deref time
+// and cause a deterministic panic instead of a silent use-after-free.
+//
+// This resolves R1 from the Stage 3 GC design doc: manual arena without
+// generation counters dereferences a reused slot as the new occupant.
+// Commit 1 of Stage 3 ("handle widening") adds the field layout and
+// validation plumbing; commit 2 wires the generation bump into `free_*`
+// so the validation actually has teeth. Between commit 1 and commit 2
+// every handle has generation 0 and validation is a no-op — this
+// deliberate mid-state lets every Stage 2 test keep passing through the
+// handle-widening refactor without conflating two changes.
+//
+// We use Rust 2021's `generation` rather than `gen` because `gen` becomes
+// a reserved keyword in Rust 2024.
 // ---------------------------------------------------------------------------
 
 /// Handle pointing to a [`LuaString`] slot in [`Heap::strings`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StringHandle(pub u32);
+pub struct StringHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl StringHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
 
 /// Handle pointing to a [`Table`] slot in [`Heap::tables`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TableHandle(pub u32);
+pub struct TableHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl TableHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
 
 /// Handle pointing to a [`Proto`] slot in [`Heap::protos`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ProtoHandle(pub u32);
+pub struct ProtoHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl ProtoHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
 
 /// Handle pointing to an [`LClosure`] slot in [`Heap::lclosures`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LClosureHandle(pub u32);
+pub struct LClosureHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl LClosureHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
 
 /// Handle pointing to a [`CClosure`] slot in [`Heap::cclosures`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CClosureHandle(pub u32);
+pub struct CClosureHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl CClosureHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
 
 /// Handle pointing to an [`UpVal`] slot in [`Heap::upvals`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct UpValHandle(pub u32);
+pub struct UpValHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl UpValHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
 
 /// Handle pointing to a [`Thread`] slot in [`Heap::threads`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ThreadHandle(pub u32);
+pub struct ThreadHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl ThreadHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
 
 /// Handle pointing to a [`UserData`] slot in [`Heap::userdata`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct UserDataHandle(pub u32);
+pub struct UserDataHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl UserDataHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // TValue — the single data type for all Lua values at runtime.
@@ -456,6 +546,12 @@ impl LuaError {
 /// Backing storage for every GC-managed Lua object. Every heap slot is
 /// `Option<T>`: `None` while the slot is free, `Some(obj)` while live.
 /// Freed slots are pushed onto the matching free list for O(1) reuse.
+///
+/// Each object-kind slot Vec has a parallel generation Vec of the same
+/// length. `generations_*[slot]` is the generation counter that must
+/// match a handle's `generation` field for the handle to deref safely.
+/// Stage 3 commit 2 will bump the counter on every `free_*` so
+/// stale handles become detectable.
 #[derive(Debug, Default)]
 pub struct Heap {
     pub strings: Vec<Option<LuaString>>,
@@ -475,6 +571,20 @@ pub struct Heap {
     pub free_upvals: Vec<u32>,
     pub free_threads: Vec<u32>,
     pub free_userdata: Vec<u32>,
+
+    /// Per-slot generation counters. Indexed in parallel with the
+    /// matching slot Vec (`generations_strings[i]` corresponds to
+    /// `strings[i]`). Bumped on free so a subsequent `alloc_*` at the
+    /// same slot yields a handle whose generation distinguishes it
+    /// from any stale reference to the previous occupant.
+    pub generations_strings: Vec<u32>,
+    pub generations_tables: Vec<u32>,
+    pub generations_protos: Vec<u32>,
+    pub generations_lclosures: Vec<u32>,
+    pub generations_cclosures: Vec<u32>,
+    pub generations_upvals: Vec<u32>,
+    pub generations_threads: Vec<u32>,
+    pub generations_userdata: Vec<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -522,7 +632,7 @@ impl Default for LuaState {
         LuaState {
             global: GlobalState::default(),
             // Placeholder — real thread allocation lands with `lstate`.
-            current_thread: ThreadHandle(0),
+            current_thread: ThreadHandle::new(0, 0),
         }
     }
 }
@@ -543,12 +653,12 @@ mod tests {
         assert_eq!(TValue::True.type_name(), "boolean");
         assert_eq!(TValue::Integer(42).type_name(), "number");
         assert_eq!(TValue::Number(1.5).type_name(), "number");
-        assert_eq!(TValue::ShortString(StringHandle(0)).type_name(), "string");
-        assert_eq!(TValue::LongString(StringHandle(0)).type_name(), "string");
-        assert_eq!(TValue::Table(TableHandle(0)).type_name(), "table");
-        assert_eq!(TValue::LuaClosure(LClosureHandle(0)).type_name(), "function");
-        assert_eq!(TValue::Thread(ThreadHandle(0)).type_name(), "thread");
-        assert_eq!(TValue::UserData(UserDataHandle(0)).type_name(), "userdata");
+        assert_eq!(TValue::ShortString(StringHandle::new(0, 0)).type_name(), "string");
+        assert_eq!(TValue::LongString(StringHandle::new(0, 0)).type_name(), "string");
+        assert_eq!(TValue::Table(TableHandle::new(0, 0)).type_name(), "table");
+        assert_eq!(TValue::LuaClosure(LClosureHandle::new(0, 0)).type_name(), "function");
+        assert_eq!(TValue::Thread(ThreadHandle::new(0, 0)).type_name(), "thread");
+        assert_eq!(TValue::UserData(UserDataHandle::new(0, 0)).type_name(), "userdata");
     }
 
     #[test]
@@ -558,7 +668,7 @@ mod tests {
         assert!(TValue::True.is_truthy());
         assert!(TValue::Integer(0).is_truthy()); // zero is truthy in Lua
         assert!(TValue::Number(0.0).is_truthy());
-        assert!(TValue::Table(TableHandle(0)).is_truthy());
+        assert!(TValue::Table(TableHandle::new(0, 0)).is_truthy());
     }
 
     #[test]
@@ -568,10 +678,10 @@ mod tests {
         assert_eq!(TValue::True.variant_tag(), LUA_VTRUE);
         assert_eq!(TValue::Integer(0).variant_tag(), LUA_VNUMINT);
         assert_eq!(TValue::Number(0.0).variant_tag(), LUA_VNUMFLT);
-        assert_eq!(TValue::ShortString(StringHandle(0)).variant_tag(), LUA_VSHRSTR);
-        assert_eq!(TValue::LongString(StringHandle(0)).variant_tag(), LUA_VLNGSTR);
-        assert_eq!(TValue::LuaClosure(LClosureHandle(0)).variant_tag(), LUA_VLCL);
-        assert_eq!(TValue::CClosure(CClosureHandle(0)).variant_tag(), LUA_VCCL);
+        assert_eq!(TValue::ShortString(StringHandle::new(0, 0)).variant_tag(), LUA_VSHRSTR);
+        assert_eq!(TValue::LongString(StringHandle::new(0, 0)).variant_tag(), LUA_VLNGSTR);
+        assert_eq!(TValue::LuaClosure(LClosureHandle::new(0, 0)).variant_tag(), LUA_VLCL);
+        assert_eq!(TValue::CClosure(CClosureHandle::new(0, 0)).variant_tag(), LUA_VCCL);
     }
 
     #[test]

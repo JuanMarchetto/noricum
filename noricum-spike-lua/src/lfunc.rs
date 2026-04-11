@@ -205,20 +205,25 @@ mod tests {
 
     #[test]
     fn get_local_name_respects_active_range() {
+        // These handles are fakes constructed for the test — real
+        // callers get their StringHandles from Heap::alloc_string.
+        let name10 = StringHandle::new(10, 0);
+        let name20 = StringHandle::new(20, 0);
+        let name30 = StringHandle::new(30, 0);
         let proto = Proto {
             local_vars: vec![
                 LocVar {
-                    name: Some(StringHandle(10)),
+                    name: Some(name10),
                     start_pc: 0,
                     end_pc: 5,
                 },
                 LocVar {
-                    name: Some(StringHandle(20)),
+                    name: Some(name20),
                     start_pc: 2,
                     end_pc: 10,
                 },
                 LocVar {
-                    name: Some(StringHandle(30)),
+                    name: Some(name30),
                     start_pc: 6,
                     end_pc: 15,
                 },
@@ -227,20 +232,20 @@ mod tests {
         };
 
         // At pc = 3 the first two are active. The 1st is var 10, 2nd is var 20.
-        assert_eq!(proto.get_local_name(1, 3), Some(StringHandle(10)));
-        assert_eq!(proto.get_local_name(2, 3), Some(StringHandle(20)));
+        assert_eq!(proto.get_local_name(1, 3), Some(name10));
+        assert_eq!(proto.get_local_name(2, 3), Some(name20));
         assert_eq!(proto.get_local_name(3, 3), None);
 
         // At pc = 7 the second and third are active.
-        assert_eq!(proto.get_local_name(1, 7), Some(StringHandle(20)));
-        assert_eq!(proto.get_local_name(2, 7), Some(StringHandle(30)));
+        assert_eq!(proto.get_local_name(1, 7), Some(name20));
+        assert_eq!(proto.get_local_name(2, 7), Some(name30));
     }
 
     #[test]
     fn get_local_name_zero_is_none() {
         let proto = Proto {
             local_vars: vec![LocVar {
-                name: Some(StringHandle(1)),
+                name: Some(StringHandle::new(1, 0)),
                 start_pc: 0,
                 end_pc: 10,
             }],
