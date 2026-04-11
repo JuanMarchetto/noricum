@@ -21,6 +21,7 @@
 pub mod contract;
 pub mod lctype;
 pub mod lmem;
+pub mod lobject;
 pub mod lopcodes;
 pub mod lzio;
 
@@ -102,6 +103,13 @@ unsafe extern "C" {
         src_len: usize,
         chunk_size: usize,
     ) -> c_int;
+
+    // lobject oracle shims — pure helpers, no lua_State required.
+    pub fn wr_lobject_ceillog2(x: c_uint) -> c_uint;
+    pub fn wr_lobject_hexavalue(c: c_int) -> c_int;
+    pub fn wr_lobject_codeparam(p: c_uint) -> c_uint;
+    pub fn wr_lobject_applyparam(p: c_uint, x: i64) -> i64;
+    pub fn wr_lobject_utf8esc(buff: *mut u8, x: c_uint) -> c_int;
 }
 
 // TODO: add `pub mod contract;` once the Rust-side type architecture is

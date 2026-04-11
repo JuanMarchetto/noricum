@@ -7,6 +7,7 @@
 #include "lopcodes.h"
 #include "lmem.h"
 #include "lzio.h"
+#include "lobject.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -275,4 +276,31 @@ int wr_lzio_fill_first(const char* src, size_t src_len, size_t chunk_size) {
     int b = luaZ_fill(&z);
     lua_close(L);
     return b;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * lobject oracle shims — pure helpers, no lua_State required.
+ * ---------------------------------------------------------------------------
+ */
+
+unsigned int wr_lobject_ceillog2(unsigned int x) {
+    return (unsigned int) luaO_ceillog2(x);
+}
+
+int wr_lobject_hexavalue(int c) {
+    return (int) luaO_hexavalue(c);
+}
+
+unsigned int wr_lobject_codeparam(unsigned int p) {
+    return (unsigned int) luaO_codeparam(p);
+}
+
+long long wr_lobject_applyparam(unsigned int p, long long x) {
+    return (long long) luaO_applyparam((lu_byte) p, (l_mem) x);
+}
+
+int wr_lobject_utf8esc(unsigned char* buff, unsigned int x) {
+    /* Caller must pass a buffer of at least UTF8BUFFSZ (8) bytes. */
+    return luaO_utf8esc((char*) buff, (l_uint32) x);
 }

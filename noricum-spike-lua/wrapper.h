@@ -116,6 +116,18 @@ int wr_lzio_getaddr(const char* src, size_t src_len, size_t chunk_size,
  * or -1 on EOZ. Mirrors luaZ_fill's return semantics. */
 int wr_lzio_fill_first(const char* src, size_t src_len, size_t chunk_size);
 
+/* lobject — pure utility helpers (lobject.c). Each shim calls the real
+ * function; no lua_State needed. */
+unsigned int wr_lobject_ceillog2(unsigned int x);
+int          wr_lobject_hexavalue(int c);
+unsigned int wr_lobject_codeparam(unsigned int p);
+long long    wr_lobject_applyparam(unsigned int p, long long x);
+
+/* Writes UTF-8 bytes backwards into `buff` (must be >= 8 bytes).
+ * Returns the number of bytes written. `buff` layout matches
+ * luaO_utf8esc: the encoded bytes occupy buff[8 - n .. 8]. */
+int wr_lobject_utf8esc(unsigned char* buff, unsigned int x);
+
 #ifdef __cplusplus
 }
 #endif
