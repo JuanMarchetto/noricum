@@ -39,7 +39,10 @@
 
 #![allow(dead_code)]
 
-use crate::contract::{Heap, LuaInteger, StringHandle, TValue, TableHandle, TableKey};
+use crate::contract::{
+    GlobalState, Heap, LuaInteger, StringHandle, TValue, TableHandle, TableKey,
+};
+use crate::lgc::{any_handle_from_tvalue, AnyHandle};
 use crate::lobject::to_integer_ns;
 
 // ---------------------------------------------------------------------------
@@ -163,6 +166,151 @@ impl Heap {
             Some(v) => Some(v),
         }
     }
+
+    // --- Raw write-side helpers (no barrier) -----------------------
+    //
+    // These are pure Heap mutations. Public table setters live on
+    // `GlobalState` so they can also fire the forward write barrier
+    // when the table is black and the new value is a collectable
+    // white object. Callers that don't have a live GC cycle (tests,
+    // bootstrap) can use these directly.
+
+    /// Raw integer-keyed write. No barrier. Panics on invalid
+    /// handle. Nil-value semantics match Lua: in the array range,
+    /// a nil stores a hole; outside the array range, a nil removes
+    /// the hash entry. The "grow array by one" path extends the
+    /// array when `key == array.len() + 1` and the value isn't nil.
+    pub fn raw_table_set_int(
+        &mut self,
+        handle: TableHandle,
+        key: LuaInteger,
+        value: TValue,
+    ) {
+        let t = self.table_mut(handle);
+        if key >= 1 && (key as u64) <= t.array.len() as u64 {
+            t.array[(key - 1) as usize] = value;
+            return;
+        }
+        if key == (t.array.len() as LuaInteger) + 1 && !matches!(value, TValue::Nil) {
+            t.array.push(value);
+            return;
+        }
+        // Hash part.
+        let k = TableKey::Integer(key);
+        if matches!(value, TValue::Nil) {
+            t.hash.remove(&k);
+        } else {
+            t.hash.insert(k, value);
+        }
+    }
+
+    /// Raw short-string-keyed write. No barrier. String keys never
+    /// live in the array part.
+    pub fn raw_table_set_shortstr(
+        &mut self,
+        handle: TableHandle,
+        key: StringHandle,
+        value: TValue,
+    ) {
+        self.raw_table_hash_set(handle, TableKey::ShortString(key), value);
+    }
+
+    /// Raw long-string-keyed write. No barrier.
+    pub fn raw_table_set_longstr(
+        &mut self,
+        handle: TableHandle,
+        key: StringHandle,
+        value: TValue,
+    ) {
+        self.raw_table_hash_set(handle, TableKey::LongString(key), value);
+    }
+
+    /// Raw generic write. No barrier. Rejects invalid keys (nil,
+    /// NaN) by silently dropping the write — callers at the
+    /// higher layer should raise the "table index is nil/NaN"
+    /// error before reaching this point.
+    pub fn raw_table_set(&mut self, handle: TableHandle, key: TValue, value: TValue) {
+        let Some(k) = table_key_from_tvalue(key) else {
+            return;
+        };
+        if let TableKey::Integer(i) = k {
+            self.raw_table_set_int(handle, i, value);
+            return;
+        }
+        self.raw_table_hash_set(handle, k, value);
+    }
+
+    fn raw_table_hash_set(&mut self, handle: TableHandle, key: TableKey, value: TValue) {
+        let t = self.table_mut(handle);
+        if matches!(value, TValue::Nil) {
+            t.hash.remove(&key);
+        } else {
+            t.hash.insert(key, value);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Write-side accessors on GlobalState — these wrap the raw Heap
+// setters above and fire the forward write barrier when the table is
+// black and the new value is a white collectable. Callers should
+// prefer these over the raw versions whenever the GC might be mid
+// cycle (i.e., always, in production code).
+// ---------------------------------------------------------------------------
+
+impl GlobalState {
+    /// Set `handle[key] = value`. Fires [`GlobalState::barrier_forward`]
+    /// on `(table, value)` afterwards if the value is a collectable
+    /// handle, preserving the tri-color invariant under mutation.
+    pub fn table_set(&mut self, handle: TableHandle, key: TValue, value: TValue) {
+        self.heap.raw_table_set(handle, key, value);
+        self.maybe_forward_barrier(handle, value);
+    }
+
+    /// Set `handle[key] = value` with a known integer key. Same
+    /// semantics as [`GlobalState::table_set`] but skips the
+    /// generic-key normalization.
+    pub fn table_set_int(
+        &mut self,
+        handle: TableHandle,
+        key: LuaInteger,
+        value: TValue,
+    ) {
+        self.heap.raw_table_set_int(handle, key, value);
+        self.maybe_forward_barrier(handle, value);
+    }
+
+    /// Set `handle[key] = value` with a known short-string key.
+    pub fn table_set_shortstr(
+        &mut self,
+        handle: TableHandle,
+        key: StringHandle,
+        value: TValue,
+    ) {
+        self.heap.raw_table_set_shortstr(handle, key, value);
+        self.maybe_forward_barrier(handle, value);
+    }
+
+    /// Set `handle[key] = value` with a known long-string key.
+    pub fn table_set_longstr(
+        &mut self,
+        handle: TableHandle,
+        key: StringHandle,
+        value: TValue,
+    ) {
+        self.heap.raw_table_set_longstr(handle, key, value);
+        self.maybe_forward_barrier(handle, value);
+    }
+
+    /// If `value` holds a collectable handle, fire the forward
+    /// barrier against the parent table. The barrier itself
+    /// short-circuits when the parent isn't black or the child
+    /// isn't white, so this is cheap to call unconditionally.
+    fn maybe_forward_barrier(&mut self, parent: TableHandle, value: TValue) {
+        if let Some(child) = any_handle_from_tvalue(value) {
+            self.barrier_forward(AnyHandle::Table(parent), child);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +321,7 @@ impl Heap {
 mod tests {
     use super::*;
     use crate::contract::{LuaString, Table};
+    use crate::lgc::{AnyHandle, BLACK, GcState, GRAY, WHITE};
 
     fn fresh_string(bytes: &[u8]) -> LuaString {
         LuaString {
@@ -324,5 +473,140 @@ mod tests {
         let mut heap = Heap::default();
         let h = heap.alloc_table(Table::default());
         assert_eq!(heap.table_get(h, TValue::Number(f64::NAN)), None);
+    }
+
+    // --- raw_table_set_int (Heap) ---------------------------------
+
+    #[test]
+    fn set_int_writes_array_slot_in_range() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(fresh_table_with_array(vec![
+            TValue::Integer(0),
+            TValue::Integer(0),
+        ]));
+        heap.raw_table_set_int(h, 1, TValue::Integer(10));
+        heap.raw_table_set_int(h, 2, TValue::Integer(20));
+        assert_eq!(heap.table_get_int(h, 1), Some(TValue::Integer(10)));
+        assert_eq!(heap.table_get_int(h, 2), Some(TValue::Integer(20)));
+    }
+
+    #[test]
+    fn set_int_extends_array_when_key_is_one_past_length() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(Table::default());
+        heap.raw_table_set_int(h, 1, TValue::Integer(100));
+        heap.raw_table_set_int(h, 2, TValue::Integer(200));
+        heap.raw_table_set_int(h, 3, TValue::Integer(300));
+        assert_eq!(heap.table(h).array.len(), 3);
+        assert_eq!(heap.table_get_int(h, 3), Some(TValue::Integer(300)));
+    }
+
+    #[test]
+    fn set_int_writes_hash_for_out_of_range_key() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(Table::default());
+        heap.raw_table_set_int(h, 1000, TValue::Integer(42));
+        assert!(heap.table(h).array.is_empty());
+        assert_eq!(heap.table_get_int(h, 1000), Some(TValue::Integer(42)));
+    }
+
+    #[test]
+    fn set_int_with_nil_stores_hole_in_array_but_removes_from_hash() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(fresh_table_with_array(vec![
+            TValue::Integer(10),
+            TValue::Integer(20),
+        ]));
+        heap.raw_table_set_int(h, 2, TValue::Nil);
+        // Array slot is now a hole — len unchanged, get returns None.
+        assert_eq!(heap.table(h).array.len(), 2);
+        assert_eq!(heap.table_get_int(h, 2), None);
+
+        // Hash: set, then nil-set removes.
+        heap.raw_table_set_int(h, 1000, TValue::Integer(99));
+        assert!(heap.table(h).hash.contains_key(&TableKey::Integer(1000)));
+        heap.raw_table_set_int(h, 1000, TValue::Nil);
+        assert!(!heap.table(h).hash.contains_key(&TableKey::Integer(1000)));
+    }
+
+    #[test]
+    fn set_shortstr_writes_hash() {
+        let mut heap = Heap::default();
+        let key = heap.alloc_string(fresh_string(b"k"));
+        let h = heap.alloc_table(Table::default());
+        heap.raw_table_set_shortstr(h, key, TValue::Integer(7));
+        assert_eq!(
+            heap.table_get_shortstr(h, key),
+            Some(TValue::Integer(7))
+        );
+    }
+
+    #[test]
+    fn generic_set_rejects_nil_key_silently() {
+        let mut heap = Heap::default();
+        let h = heap.alloc_table(Table::default());
+        heap.raw_table_set(h, TValue::Nil, TValue::Integer(99));
+        // Nothing stored.
+        assert!(heap.table(h).hash.is_empty());
+        assert!(heap.table(h).array.is_empty());
+    }
+
+    // --- GlobalState::table_set (barrier-aware) -------------------
+
+    #[test]
+    fn barrier_fires_when_black_table_mutates_to_hold_white_child_in_propagate() {
+        // Put the GC in Propagate with the parent table painted
+        // black and the to-be-stored string painted white. Then
+        // set the field. The barrier must mark the string gray
+        // and enqueue it on gc_gray.
+        let mut g = GlobalState::default();
+        let parent = g.heap.alloc_table(Table::default());
+        let child = g.heap.alloc_string(fresh_string(b"x"));
+        g.heap.marks_tables[parent.slot as usize] = BLACK;
+        g.heap.marks_strings[child.slot as usize] = WHITE;
+        g.gc_state = GcState::Propagate;
+
+        g.table_set_int(parent, 1, TValue::ShortString(child));
+
+        // Mutation landed.
+        assert_eq!(
+            g.heap.table_get_int(parent, 1),
+            Some(TValue::ShortString(child))
+        );
+        // Barrier fired.
+        assert_eq!(g.heap.marks_strings[child.slot as usize], GRAY);
+        assert!(g.gc_gray.contains(&AnyHandle::String(child)));
+    }
+
+    #[test]
+    fn barrier_is_noop_when_value_is_a_leaf_integer() {
+        // Leaf values (integer, bool, nil) don't need the
+        // barrier because they're not collectable.
+        let mut g = GlobalState::default();
+        let parent = g.heap.alloc_table(Table::default());
+        g.heap.marks_tables[parent.slot as usize] = BLACK;
+        g.gc_state = GcState::Propagate;
+
+        g.table_set_int(parent, 1, TValue::Integer(42));
+
+        // Parent mark byte untouched, no gray queue growth.
+        assert_eq!(g.heap.marks_tables[parent.slot as usize], BLACK);
+        assert!(g.gc_gray.is_empty());
+    }
+
+    #[test]
+    fn barrier_is_noop_when_parent_is_not_black() {
+        // Gray/white parents don't trip the barrier's fast path.
+        let mut g = GlobalState::default();
+        let parent = g.heap.alloc_table(Table::default());
+        let child = g.heap.alloc_string(fresh_string(b"x"));
+        g.heap.marks_tables[parent.slot as usize] = WHITE;
+        g.heap.marks_strings[child.slot as usize] = WHITE;
+        g.gc_state = GcState::Propagate;
+
+        g.table_set_int(parent, 1, TValue::ShortString(child));
+
+        assert_eq!(g.heap.marks_strings[child.slot as usize], WHITE);
+        assert!(g.gc_gray.is_empty());
     }
 }

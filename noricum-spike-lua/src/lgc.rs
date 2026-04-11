@@ -257,8 +257,9 @@ pub enum GcStepResult {
 /// Extract the collectable handle from a tagged Lua value, or
 /// `None` for leaf values (nil, bools, numbers, light userdata,
 /// light C function pointer). Used by the child walkers to avoid
-/// re-matching `TValue` at every call site.
-const fn any_handle_from_tvalue(v: TValue) -> Option<AnyHandle> {
+/// re-matching `TValue` at every call site, and by `ltable` to
+/// decide whether a newly-set value needs the forward barrier.
+pub(crate) const fn any_handle_from_tvalue(v: TValue) -> Option<AnyHandle> {
     match v {
         TValue::ShortString(h) | TValue::LongString(h) => Some(AnyHandle::String(h)),
         TValue::Table(h) => Some(AnyHandle::Table(h)),
