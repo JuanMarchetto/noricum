@@ -228,7 +228,11 @@ pub async fn repair_with_prompt(
     model: &str,
     prompt: &str,
 ) -> Result<String, AgentError> {
-    info!(model, prompt_len = prompt.len(), "P30: surgical repair call");
+    info!(
+        model,
+        prompt_len = prompt.len(),
+        "P30: surgical repair call"
+    );
 
     let preamble = "You are a Rust compiler error repair specialist. \
         You receive a single function with a compilation error and its type context. \
@@ -240,7 +244,10 @@ pub async fn repair_with_prompt(
         .run_prompt(model, preamble, 0.2, max_tokens, prompt)
         .await?;
 
-    debug!(response_len = response.len(), "P30: surgical repair response");
+    debug!(
+        response_len = response.len(),
+        "P30: surgical repair response"
+    );
 
     Ok(crate::extract_rust_code(&response))
 }

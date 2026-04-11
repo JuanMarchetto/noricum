@@ -13,9 +13,9 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use crate::ToolError;
 use crate::ast::extract_c_functions;
 use crate::diff_test::{compile_c_exe, run_exe};
-use crate::ToolError;
 
 // ---------------------------------------------------------------------------
 // Core types (Task 1)
@@ -153,7 +153,11 @@ fn parse_params_from_signature(sig_line: &str, _fn_name: &str) -> Vec<(String, S
         }
         let tokens: Vec<&str> = param.split_whitespace().collect();
         if tokens.len() >= 2 {
-            let name = tokens.last().unwrap_or(&"").trim_start_matches('*').to_string();
+            let name = tokens
+                .last()
+                .unwrap_or(&"")
+                .trim_start_matches('*')
+                .to_string();
             let type_part = if param.contains('*') {
                 let star_count = param.chars().filter(|c| *c == '*').count();
                 let base_type: Vec<&str> = tokens[..tokens.len() - 1]
@@ -783,7 +787,10 @@ mod tests {
     fn test_find_instrumentable_add() {
         let source = "int add(int a, int b) { return a + b; }\nint main() { return 0; }";
         let fns = find_instrumentable_functions(source);
-        let add = fns.iter().find(|f| f.name == "add").expect("should find add");
+        let add = fns
+            .iter()
+            .find(|f| f.name == "add")
+            .expect("should find add");
         assert!(add.instrumentable, "add should be instrumentable");
         assert_eq!(add.params.len(), 2);
         assert_eq!(add.return_type, "int");
@@ -809,7 +816,10 @@ mod tests {
             .iter()
             .find(|f| f.name == "process")
             .expect("should find process");
-        assert!(!p.instrumentable, "void* param should not be instrumentable");
+        assert!(
+            !p.instrumentable,
+            "void* param should not be instrumentable"
+        );
     }
 
     #[test]
@@ -858,9 +868,7 @@ mod tests {
         let source = "int add(int a, int b) { return a + b; }\nint main(void) { return 0; }";
         let result = generate_instrumented_source(source);
         assert!(result.instrumented_functions.contains(&"add".to_string()));
-        assert!(!result
-            .instrumented_functions
-            .contains(&"main".to_string()));
+        assert!(!result.instrumented_functions.contains(&"main".to_string()));
         assert!(result.source.contains("__noricum_orig_add"));
         assert!(result.source.contains("NORICUM_TRACE"));
     }
@@ -869,9 +877,11 @@ mod tests {
     fn test_generate_instrumented_source_skips_variadic() {
         let source = "void my_log(const char *fmt, ...) {}\nint main(void) { return 0; }";
         let result = generate_instrumented_source(source);
-        assert!(!result
-            .instrumented_functions
-            .contains(&"my_log".to_string()));
+        assert!(
+            !result
+                .instrumented_functions
+                .contains(&"my_log".to_string())
+        );
     }
 
     #[test]
@@ -1017,10 +1027,16 @@ int main(void) {
         assert_eq!(tests.len(), 1, "one function -> one test");
         assert_eq!(tests[0].function_name, "add");
         assert_eq!(tests[0].case_count, 2);
-        assert!(tests[0].test_source.contains("assert_eq!(add(2_i32, 3_i32), 5_i32"));
-        assert!(tests[0]
-            .test_source
-            .contains("assert_eq!(add(-1_i32, 1_i32), 0_i32"));
+        assert!(
+            tests[0]
+                .test_source
+                .contains("assert_eq!(add(2_i32, 3_i32), 5_i32")
+        );
+        assert!(
+            tests[0]
+                .test_source
+                .contains("assert_eq!(add(-1_i32, 1_i32), 0_i32")
+        );
     }
 
     #[test]
@@ -1243,10 +1259,8 @@ mod integration_tests {
         let c_source = include_str!("../../../tests/fixtures/simple/gcd.c");
         let traces = mine_specs(c_source).unwrap();
 
-        let gcd_traces: Vec<&FunctionTrace> = traces
-            .iter()
-            .filter(|t| t.function_name == "gcd")
-            .collect();
+        let gcd_traces: Vec<&FunctionTrace> =
+            traces.iter().filter(|t| t.function_name == "gcd").collect();
 
         assert!(
             !gcd_traces.is_empty(),

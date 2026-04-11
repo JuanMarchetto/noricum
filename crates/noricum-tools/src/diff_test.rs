@@ -351,10 +351,7 @@ fn approximate_match(a: &str, b: &str, eps: f64) -> bool {
 ///
 /// Compiles the C source to an executable, then builds the Rust crate
 /// as a binary (via `cargo build`), runs both, and compares outputs.
-pub fn run_diff_test_crate(
-    c_source: &str,
-    crate_dir: &Path,
-) -> Result<DiffTestResult, ToolError> {
+pub fn run_diff_test_crate(c_source: &str, crate_dir: &Path) -> Result<DiffTestResult, ToolError> {
     let tmp = tempfile::tempdir()?;
 
     // Compile C
@@ -409,9 +406,7 @@ pub fn run_diff_test_crate(
             })
             .unwrap_or_else(|| "output".to_string())
     };
-    let rs_exe = crate_dir
-        .join("target/release")
-        .join(&crate_name);
+    let rs_exe = crate_dir.join("target/release").join(&crate_name);
 
     // Run both
     let c_result = run_exe(&c_exe, None, &[])?;
@@ -784,22 +779,22 @@ fn main() {
             tmp.path().join("Cargo.toml"),
             "[package]\nname = \"test_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
              [[bin]]\nname = \"test_crate\"\npath = \"src/main.rs\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
-        std::fs::write(
-            src_dir.join("lib.rs"),
-            "pub mod utils;\n",
-        ).unwrap();
+        std::fs::write(src_dir.join("lib.rs"), "pub mod utils;\n").unwrap();
 
         std::fs::write(
             src_dir.join("utils.rs"),
             "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::write(
             src_dir.join("main.rs"),
             "use test_crate::utils::add;\nfn main() { println!(\"{}\", add(3, 4)); }\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let c_source = r#"
 #include <stdio.h>
@@ -809,7 +804,15 @@ int main() { printf("%d\n", add(3, 4)); return 0; }
 
         let result = run_diff_test_crate(c_source, tmp.path()).unwrap();
         assert!(result.c_compiled, "C should compile");
-        assert!(result.rust_compiled, "crate should compile as binary. stderr: {}", result.rust_stderr);
-        assert!(result.passed, "C output: {:?}, Rust output: {:?}", result.c_output, result.rust_output);
+        assert!(
+            result.rust_compiled,
+            "crate should compile as binary. stderr: {}",
+            result.rust_stderr
+        );
+        assert!(
+            result.passed,
+            "C output: {:?}, Rust output: {:?}",
+            result.c_output, result.rust_output
+        );
     }
 }

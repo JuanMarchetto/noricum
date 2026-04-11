@@ -51,9 +51,8 @@ pub fn parse_rustc_errors(stderr: &str) -> Vec<CompilerError> {
     }
 
     // Pattern 2: syntax errors — error: message \n --> file:line:col (no error code)
-    let syntax_re =
-        Regex::new(r"(?m)^error: (?P<message>[^\n]+)\n\s*--> [^:]+:(?P<line>\d+):\d+")
-            .expect("static regex is valid");
+    let syntax_re = Regex::new(r"(?m)^error: (?P<message>[^\n]+)\n\s*--> [^:]+:(?P<line>\d+):\d+")
+        .expect("static regex is valid");
 
     for cap in syntax_re.captures_iter(stderr) {
         let Some(message) = cap.name("message") else {
@@ -333,7 +332,9 @@ pub fn rule_clone_bounds(source: &str, errors: &[CompilerError]) -> String {
 
             // Stop searching if we hit another function body or top-level item
             let trimmed = line.trim();
-            if idx < error_line_idx && (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ")) {
+            if idx < error_line_idx
+                && (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn "))
+            {
                 break;
             }
         }
@@ -360,8 +361,8 @@ pub fn rule_dedup_functions(source: &str, errors: &[CompilerError]) -> String {
     }
 
     // Extract the duplicate names from error messages
-    let name_re = Regex::new(r"name `(\w+)` is defined multiple times")
-        .expect("static regex is valid");
+    let name_re =
+        Regex::new(r"name `(\w+)` is defined multiple times").expect("static regex is valid");
 
     let mut names_to_dedup: Vec<String> = Vec::new();
     for err in &dup_errors {
@@ -379,7 +380,10 @@ pub fn rule_dedup_functions(source: &str, errors: &[CompilerError]) -> String {
 
     for name in &names_to_dedup {
         // Build a regex that matches `fn name(` with optional visibility/qualifiers
-        let fn_pattern = format!(r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?fn\s+{}\s*[\(<]", regex::escape(name));
+        let fn_pattern = format!(
+            r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?fn\s+{}\s*[\(<]",
+            regex::escape(name)
+        );
         let fn_re = Regex::new(&fn_pattern).expect("dynamic regex is valid");
 
         let mut first_seen = false;
@@ -397,7 +401,12 @@ pub fn rule_dedup_functions(source: &str, errors: &[CompilerError]) -> String {
                 let start = i;
                 let end = skip_function_body(&lines, i);
                 removed_ranges.push((start, end));
-                debug!(name, start = start + 1, end, "R2: removing duplicate function");
+                debug!(
+                    name,
+                    start = start + 1,
+                    end,
+                    "R2: removing duplicate function"
+                );
                 i = end;
                 continue;
             }
@@ -518,7 +527,10 @@ pub fn rule_mut_option_ref(source: &str, errors: &[CompilerError]) -> String {
         if !mut_check_re.is_match(&result) {
             result = binding_re
                 .replace_all(&result, |caps: &regex::Captures| {
-                    format!("{}mut {}: {}", &caps["before"], &caps["name"], &caps["type"])
+                    format!(
+                        "{}mut {}: {}",
+                        &caps["before"], &caps["name"], &caps["type"]
+                    )
                 })
                 .to_string();
             debug!(var = var_name, "R3: added mut to parameter binding");
@@ -619,7 +631,10 @@ pub fn rule_inner_doc_to_comment(source: &str, errors: &[CompilerError]) -> Stri
             if trimmed.starts_with("//!") {
                 // Replace //! with // preserving leading whitespace
                 let fixed = line.replacen("//!", "//", 1);
-                debug!(line = line_num, "R6: converted inner doc comment to regular comment");
+                debug!(
+                    line = line_num,
+                    "R6: converted inner doc comment to regular comment"
+                );
                 result_lines.push(fixed);
                 continue;
             }
@@ -681,16 +696,13 @@ pub fn rule_dedup_use_imports(source: &str, errors: &[CompilerError]) -> String 
             for name in &dup_names {
                 // Match patterns like: `use foo::Name;` or `use foo::Name as ...;`
                 // or `use foo::{self, ...}` where foo ends with the module name
-                if trimmed.contains(&format!("::{name}")) || trimmed.ends_with(&format!("{name};")) {
+                if trimmed.contains(&format!("::{name}")) || trimmed.ends_with(&format!("{name};"))
+                {
                     // Use the full line (normalized) as key
                     let key = format!("{name}:{trimmed}");
                     if seen_imports.contains(&format!("{name}:SEEN")) {
                         // This is a duplicate import of the same name — remove it
-                        debug!(
-                            line = i + 1,
-                            name,
-                            "R7: removing duplicate use import"
-                        );
+                        debug!(line = i + 1, name, "R7: removing duplicate use import");
                         is_dup = true;
                         break;
                     }
@@ -1007,9 +1019,7 @@ pub fn rule_strip_windows_imports(source: &str, errors: &[CompilerError]) -> Str
         }
 
         // Strip #[cfg(target_os = "windows")] + the following item (block)
-        if trimmed == "#[cfg(target_os = \"windows\")]"
-            || trimmed == "#[cfg(windows)]"
-        {
+        if trimmed == "#[cfg(target_os = \"windows\")]" || trimmed == "#[cfg(windows)]" {
             debug!(line = i + 1, "R11: stripping Windows-specific cfg block");
             result_lines.push(format!("// R11 (non-Windows): {trimmed}"));
             i += 1;
@@ -1020,8 +1030,13 @@ pub fn rule_strip_windows_imports(source: &str, errors: &[CompilerError]) -> Str
                 while i < lines.len() {
                     let l = lines[i];
                     for ch in l.chars() {
-                        if ch == '{' { depth += 1; found_brace = true; }
-                        if ch == '}' { depth -= 1; }
+                        if ch == '{' {
+                            depth += 1;
+                            found_brace = true;
+                        }
+                        if ch == '}' {
+                            depth -= 1;
+                        }
                     }
                     result_lines.push(format!("// R11: {}", l.trim()));
                     i += 1;
@@ -1070,9 +1085,7 @@ pub fn rule_fix_truncated_module_boundary(source: &str) -> String {
                     continue;
                 }
                 // Check if this is a function parameter or signature line without `{`
-                if (prev.contains("pub fn ") || prev.contains("fn "))
-                    && !prev.contains('{')
-                {
+                if (prev.contains("pub fn ") || prev.contains("fn ")) && !prev.contains('{') {
                     found_incomplete = true;
                     break;
                 }
@@ -1094,19 +1107,19 @@ pub fn rule_fix_truncated_module_boundary(source: &str) -> String {
                 // and replace with a stub
                 let fn_line = lines[j].trim();
                 // Extract function name for the stub
-                let fn_name = fn_line
-                    .split('(')
-                    .next()
-                    .unwrap_or(fn_line)
-                    .trim();
-                debug!(line = j + 1, "R12: fixing truncated function at module boundary");
+                let fn_name = fn_line.split('(').next().unwrap_or(fn_line).trim();
+                debug!(
+                    line = j + 1,
+                    "R12: fixing truncated function at module boundary"
+                );
 
                 // Remove lines from j to i-1 (the incomplete function)
                 while result_lines.len() > j {
                     result_lines.pop();
                 }
                 // Add stub
-                result_lines.push("// R12: truncated function stubbed at module boundary".to_string());
+                result_lines
+                    .push("// R12: truncated function stubbed at module boundary".to_string());
                 result_lines.push(format!("{fn_name}() -> bool {{ false }}"));
                 result_lines.push(String::new());
             }
@@ -1126,10 +1139,7 @@ pub fn rule_fix_truncated_module_boundary(source: &str) -> String {
 /// When E0609 ("no field `m_xyz` on type") appears, try stripping the `m_` prefix
 /// or adding it. Common pattern: contract defines `zip64` but module uses `m_zip64`.
 pub fn rule_field_name_prefix(source: &str, errors: &[CompilerError]) -> String {
-    let field_errors: Vec<&CompilerError> = errors
-        .iter()
-        .filter(|e| e.code == "E0609")
-        .collect();
+    let field_errors: Vec<&CompilerError> = errors.iter().filter(|e| e.code == "E0609").collect();
 
     if field_errors.is_empty() {
         return source.to_string();
@@ -1246,8 +1256,7 @@ pub fn rule_method_to_free_fn(source: &str, errors: &[CompilerError]) -> String 
                 let lines: Vec<&str> = result.lines().collect();
                 if err.line > 0 && err.line <= lines.len() {
                     let line_idx = err.line - 1;
-                    let mut new_lines: Vec<String> =
-                        lines.iter().map(|l| l.to_string()).collect();
+                    let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
 
                     let line = &new_lines[line_idx];
 
@@ -1262,8 +1271,8 @@ pub fn rule_method_to_free_fn(source: &str, errors: &[CompilerError]) -> String 
                     // Pattern: Self::method_name(args) -> method_name(args)
                     let assoc_call = format!("Self::{method_name}(");
                     if new_lines[line_idx].contains(&assoc_call) {
-                        new_lines[line_idx] = new_lines[line_idx]
-                            .replace(&assoc_call, &format!("{method_name}("));
+                        new_lines[line_idx] =
+                            new_lines[line_idx].replace(&assoc_call, &format!("{method_name}("));
                         debug!(line = line_idx + 1, method = %method_name, "R14: Self::method -> free_fn");
                     }
 
@@ -1399,7 +1408,10 @@ fn helper(x: i32) -> i32 {
 
         // Count occurrences of "fn helper"
         let count = result.matches("fn helper").count();
-        assert_eq!(count, 1, "Expected exactly one fn helper, got {count}:\n{result}");
+        assert_eq!(
+            count, 1,
+            "Expected exactly one fn helper, got {count}:\n{result}"
+        );
 
         // First definition (x + 1) should be kept
         assert!(
@@ -1439,7 +1451,10 @@ fn compute(
         let result = rule_dedup_functions(source, &errors);
         let count = result.matches("fn compute").count();
         assert_eq!(count, 1, "Expected exactly one fn compute:\n{result}");
-        assert!(result.contains("result * 2"), "First definition kept:\n{result}");
+        assert!(
+            result.contains("result * 2"),
+            "First definition kept:\n{result}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1501,7 +1516,10 @@ fn compute(
 
         // count is not Option<&mut T>, so no change
         let result = rule_mut_option_ref(source, &errors);
-        assert_eq!(result, source, "Should not modify non-Option<&mut> parameters");
+        assert_eq!(
+            result, source,
+            "Should not modify non-Option<&mut> parameters"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1572,7 +1590,10 @@ pub fn other_fn() -> bool {
             line: 2,
         }];
         let result = rule_field_name_prefix(source, &errors);
-        assert!(result.contains("zip.m_archive_size"), "m_ prefix should be added");
+        assert!(
+            result.contains("zip.m_archive_size"),
+            "m_ prefix should be added"
+        );
     }
 
     #[test]
@@ -1594,8 +1615,14 @@ pub fn other_fn() -> bool {
             line: 5,
         }];
         let result = rule_method_to_free_fn(source, &errors);
-        assert!(result.contains("mz_zip_set_error(self, 42)"), "should rewrite to free fn call");
-        assert!(!result.contains("self.mz_zip_set_error"), "method call should be gone");
+        assert!(
+            result.contains("mz_zip_set_error(self, 42)"),
+            "should rewrite to free fn call"
+        );
+        assert!(
+            !result.contains("self.mz_zip_set_error"),
+            "method call should be gone"
+        );
     }
 
     #[test]
@@ -1721,8 +1748,16 @@ error[E0432]: unresolved import `std::io`
         // Syntax errors
         let syntax: Vec<_> = errors.iter().filter(|e| e.code == "SYNTAX").collect();
         assert_eq!(syntax.len(), 2, "should have 2 syntax errors: {errors:?}");
-        assert!(syntax.iter().any(|e| e.message.contains("unknown start of token")));
-        assert!(syntax.iter().any(|e| e.message.contains("unclosed delimiter")));
+        assert!(
+            syntax
+                .iter()
+                .any(|e| e.message.contains("unknown start of token"))
+        );
+        assert!(
+            syntax
+                .iter()
+                .any(|e| e.message.contains("unclosed delimiter"))
+        );
     }
 
     #[test]
@@ -1737,7 +1772,10 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
 }
 "#;
         let compile_result = crate::compiler::check_rust_compiles(source).unwrap();
-        assert!(!compile_result.success, "fixture should have compile errors");
+        assert!(
+            !compile_result.success,
+            "fixture should have compile errors"
+        );
 
         let errors = parse_rustc_errors(&compile_result.stderr);
         assert!(!errors.is_empty(), "should parse at least one error");
@@ -1765,13 +1803,15 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
 
     #[test]
     fn test_check_brace_balance_balanced() {
-        let source = "fn foo() {\n    let x = 1;\n}\n\nfn bar() {\n    if true {\n        return;\n    }\n}";
+        let source =
+            "fn foo() {\n    let x = 1;\n}\n\nfn bar() {\n    if true {\n        return;\n    }\n}";
         assert_eq!(check_brace_balance(source), 0);
     }
 
     #[test]
     fn test_check_brace_balance_unclosed() {
-        let source = "fn foo() {\n    let x = 1;\n\nfn bar() {\n    if true {\n        return;\n    }\n}";
+        let source =
+            "fn foo() {\n    let x = 1;\n\nfn bar() {\n    if true {\n        return;\n    }\n}";
         assert_eq!(check_brace_balance(source), 1, "foo is never closed");
     }
 
@@ -1787,19 +1827,31 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
     let s = "hello { world }";
     let t = "nested { { } }";
 }"#;
-        assert_eq!(check_brace_balance(source), 0, "braces in strings should be ignored");
+        assert_eq!(
+            check_brace_balance(source),
+            0,
+            "braces in strings should be ignored"
+        );
     }
 
     #[test]
     fn test_check_brace_balance_ignores_comments() {
         let source = "fn foo() {\n    // this { is a comment\n    let x = 1;\n}";
-        assert_eq!(check_brace_balance(source), 0, "braces in line comments should be ignored");
+        assert_eq!(
+            check_brace_balance(source),
+            0,
+            "braces in line comments should be ignored"
+        );
     }
 
     #[test]
     fn test_check_brace_balance_inline_comment() {
         let source = "fn foo() {\n    let x = 1; // { brace in comment\n}";
-        assert_eq!(check_brace_balance(source), 0, "inline comment braces ignored");
+        assert_eq!(
+            check_brace_balance(source),
+            0,
+            "inline comment braces ignored"
+        );
     }
 
     #[test]
@@ -1825,9 +1877,18 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
         let source = "fn foo() {\n    1\n}\n\nfn bar() {\n    if true {\n        let x = 1;";
         let result = auto_close_braces(source);
         // Should keep foo() and truncate the incomplete bar()
-        assert!(result.contains("fn foo()"), "complete fn preserved: {result}");
-        assert!(!result.contains("fn bar()"), "incomplete fn truncated: {result}");
-        assert!(result.contains("P32: truncated"), "truncation marker: {result}");
+        assert!(
+            result.contains("fn foo()"),
+            "complete fn preserved: {result}"
+        );
+        assert!(
+            !result.contains("fn bar()"),
+            "incomplete fn truncated: {result}"
+        );
+        assert!(
+            result.contains("P32: truncated"),
+            "truncation marker: {result}"
+        );
         assert_eq!(check_brace_balance(&result), 0, "result should be balanced");
     }
 
@@ -1837,13 +1898,21 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
         let source = "fn foo() {\n    let x = 1;";
         let result = auto_close_braces(source);
         // Falls back to appending }
-        assert!(result.ends_with("} // auto-closed: truncated output"), "got: {result}");
-        assert_eq!(check_brace_balance(&result), 0, "should be balanced after auto-close");
+        assert!(
+            result.ends_with("} // auto-closed: truncated output"),
+            "got: {result}"
+        );
+        assert_eq!(
+            check_brace_balance(&result),
+            0,
+            "should be balanced after auto-close"
+        );
     }
 
     #[test]
     fn test_auto_close_braces_multiple_complete_then_truncated() {
-        let source = "use std::io;\n\nfn a() {\n    1\n}\n\nfn b() {\n    2\n}\n\nfn c() {\n    if true {";
+        let source =
+            "use std::io;\n\nfn a() {\n    1\n}\n\nfn b() {\n    2\n}\n\nfn c() {\n    if true {";
         let result = auto_close_braces(source);
         assert!(result.contains("fn a()"), "a preserved");
         assert!(result.contains("fn b()"), "b preserved");
@@ -1981,7 +2050,10 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
         }];
 
         let result = rule_dedup_use_imports(source, &errors);
-        let io_count = result.lines().filter(|l| l.trim() == "use std::io;").count();
+        let io_count = result
+            .lines()
+            .filter(|l| l.trim() == "use std::io;")
+            .count();
         assert_eq!(io_count, 1, "should have only one use std::io: {result}");
         assert!(
             result.contains("use std::fmt;"),
@@ -2052,7 +2124,10 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
             result.contains("#[derive(Debug)]"),
             "valid derive should be kept: {result}"
         );
-        assert!(result.contains("fn bar()"), "function itself preserved: {result}");
+        assert!(
+            result.contains("fn bar()"),
+            "function itself preserved: {result}"
+        );
     }
 
     #[test]
@@ -2075,7 +2150,10 @@ fn resize_array<T>(arr: &mut Vec<T>, n: usize) {
             !result.contains("#[derive(Debug)]"),
             "derive on const should be removed: {result}"
         );
-        assert!(result.contains("const X: i32 = 42;"), "const preserved: {result}");
+        assert!(
+            result.contains("const X: i32 = 42;"),
+            "const preserved: {result}"
+        );
     }
 
     #[test]
@@ -2254,10 +2332,19 @@ pub fn mz_fopen(p_filename: &str) -> Result<std::fs::File, std::io::Error> {
         }];
         let result = rule_strip_windows_imports(source, &errors);
         assert!(result.contains("fn good_fn"), "non-windows fn preserved");
-        assert!(result.contains("R11: pub fn mz_fopen"), "windows fn commented out");
-        assert!(result.contains("#[cfg(not(target_os"), "non-windows cfg preserved");
+        assert!(
+            result.contains("R11: pub fn mz_fopen"),
+            "windows fn commented out"
+        );
+        assert!(
+            result.contains("#[cfg(not(target_os"),
+            "non-windows cfg preserved"
+        );
         // Windows code should be commented out (prefixed with // R11:)
-        assert!(result.contains("// R11: let share_mode"), "windows code commented via R11 prefix");
+        assert!(
+            result.contains("// R11: let share_mode"),
+            "windows code commented via R11 prefix"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2305,6 +2392,9 @@ pub fn mz_fopen(p_filename: &str) -> Result<std::fs::File, std::io::Error> {
             "R8 should remove orphaned derive: {result}"
         );
         // Function preserved
-        assert!(result.contains("fn broken()"), "function preserved: {result}");
+        assert!(
+            result.contains("fn broken()"),
+            "function preserved: {result}"
+        );
     }
 }

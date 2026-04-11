@@ -16,10 +16,7 @@ pub enum BudgetPhase {
 }
 
 /// P34: Determine current budget phase based on LLM call usage.
-pub fn budget_phase(
-    max_llm_calls: Option<u32>,
-    current_llm_calls: u32,
-) -> BudgetPhase {
+pub fn budget_phase(max_llm_calls: Option<u32>, current_llm_calls: u32) -> BudgetPhase {
     let max_calls = match max_llm_calls {
         Some(m) => m,
         None => return BudgetPhase::Normal,

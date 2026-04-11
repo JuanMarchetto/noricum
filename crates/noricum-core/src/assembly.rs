@@ -31,7 +31,9 @@ pub(crate) fn validate_module_with_assembly(
 ) -> Result<noricum_validation::ValidationResult, crate::CoreError> {
     let assembly_context = build_assembly_context(module_outputs);
     if assembly_context.is_empty() {
-        return Ok(noricum_validation::validate_with_threshold(mod_unit, threshold)?);
+        return Ok(noricum_validation::validate_with_threshold(
+            mod_unit, threshold,
+        )?);
     }
     // Combine prior outputs with current module for compilation check
     let combined = format!(
@@ -42,7 +44,9 @@ pub(crate) fn validate_module_with_assembly(
     );
     let mut temp_unit = mod_unit.clone();
     temp_unit.rust_output = Some(combined);
-    Ok(noricum_validation::validate_with_threshold(&temp_unit, threshold)?)
+    Ok(noricum_validation::validate_with_threshold(
+        &temp_unit, threshold,
+    )?)
 }
 
 /// Assemble the final Rust output from individually migrated module outputs.
@@ -51,7 +55,10 @@ pub(crate) fn validate_module_with_assembly(
 /// across modules. The first module to define a name wins; subsequent modules
 /// have their duplicate definitions stripped. This prevents compilation errors
 /// from modules that independently translate the same C types.
-pub(crate) fn assemble_module_outputs(modules: &[(String, String, bool)], type_contract: Option<&str>) -> String {
+pub(crate) fn assemble_module_outputs(
+    modules: &[(String, String, bool)],
+    type_contract: Option<&str>,
+) -> String {
     let mut all_uses: Vec<String> = Vec::new();
     let mut code_parts: Vec<String> = Vec::new();
     // P27: Track which type names have already been defined
@@ -81,7 +88,8 @@ pub(crate) fn assemble_module_outputs(modules: &[(String, String, bool)], type_c
             .collect::<Vec<&str>>()
             .join("\n");
 
-        let mod_code_lines = dedup_module_definitions(&clean_code, &mut all_uses, &mut defined_types);
+        let mod_code_lines =
+            dedup_module_definitions(&clean_code, &mut all_uses, &mut defined_types);
         // Remove leading/trailing empty lines
         let trimmed_lines = trim_empty_lines(&mod_code_lines);
         if !trimmed_lines.is_empty() {
@@ -167,10 +175,14 @@ fn dedup_module_definitions<'a>(
 fn extract_definition_name(line: &str) -> Option<String> {
     // Match patterns like: pub struct Foo { / pub enum Bar { / const X: ...
     let prefixes = [
-        "pub struct ", "struct ",
-        "pub enum ", "enum ",
-        "pub const ", "const ",
-        "pub type ", "type ",
+        "pub struct ",
+        "struct ",
+        "pub enum ",
+        "enum ",
+        "pub const ",
+        "const ",
+        "pub type ",
+        "type ",
     ];
     for prefix in &prefixes {
         if let Some(rest) = line.strip_prefix(prefix) {
@@ -198,7 +210,8 @@ fn extract_impl_target(line: &str) -> Option<String> {
     // Check for "Trait for Type" pattern
     if let Some(for_pos) = rest.find(" for ") {
         let after_for = &rest[for_pos + 5..];
-        let name: String = after_for.chars()
+        let name: String = after_for
+            .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_')
             .collect();
         if !name.is_empty() {
@@ -206,14 +219,11 @@ fn extract_impl_target(line: &str) -> Option<String> {
         }
     }
     // Direct impl: "impl Type {"
-    let name: String = rest.chars()
+    let name: String = rest
+        .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect();
-    if !name.is_empty() {
-        Some(name)
-    } else {
-        None
-    }
+    if !name.is_empty() { Some(name) } else { None }
 }
 
 /// Skip a braced block starting at line `start`. Returns the index after the closing brace.
@@ -266,11 +276,9 @@ fn trim_empty_lines<'a>(lines: &[&'a str]) -> Vec<&'a str> {
 /// into `use std::io::{self, Read, Seek, Write};`.
 /// Simple `use foo::Bar;` are kept as-is (deduplicated by exact match).
 pub(crate) fn merge_use_statements(uses: Vec<String>) -> Vec<String> {
-    let brace_re =
-        regex::Regex::new(r"^use\s+(?P<path>[^{;]+)::\{(?P<items>[^}]+)\};$")
-            .expect("static regex");
-    let simple_re =
-        regex::Regex::new(r"^use\s+(?P<full>[^{]+);$").expect("static regex");
+    let brace_re = regex::Regex::new(r"^use\s+(?P<path>[^{;]+)::\{(?P<items>[^}]+)\};$")
+        .expect("static regex");
+    let simple_re = regex::Regex::new(r"^use\s+(?P<full>[^{]+);$").expect("static regex");
 
     // path -> set of items
     let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -444,9 +452,21 @@ mod tests {
     #[test]
     fn test_assemble_truncated_module_auto_closed() {
         let modules = vec![
-            ("mod_a".to_string(), "use std::io;\n\nfn foo() {\n    1\n}".to_string(), true),
-            ("mod_b".to_string(), "fn bar() {\n    if true {\n        let x = 1;".to_string(), false),
-            ("mod_c".to_string(), "fn baz() {\n    2\n}".to_string(), true),
+            (
+                "mod_a".to_string(),
+                "use std::io;\n\nfn foo() {\n    1\n}".to_string(),
+                true,
+            ),
+            (
+                "mod_b".to_string(),
+                "fn bar() {\n    if true {\n        let x = 1;".to_string(),
+                false,
+            ),
+            (
+                "mod_c".to_string(),
+                "fn baz() {\n    2\n}".to_string(),
+                true,
+            ),
         ];
         let result = assemble_module_outputs(&modules, None);
         assert!(result.contains("fn foo()"), "mod_a present");
@@ -479,11 +499,15 @@ mod tests {
         ];
         let result = assemble_module_outputs(&modules, None);
         assert_eq!(
-            result.matches("pub struct ZipArchive").count(), 1,
+            result.matches("pub struct ZipArchive").count(),
+            1,
             "ZipArchive should be deduplicated: {result}"
         );
         assert!(result.contains("fn read("), "fn read should survive dedup");
-        assert!(result.contains("fn write("), "fn write should survive dedup");
+        assert!(
+            result.contains("fn write("),
+            "fn write should survive dedup"
+        );
     }
 
     #[test]
@@ -495,15 +519,24 @@ mod tests {
             ("ext".to_string(), mod_b, true),
         ];
         let result = assemble_module_outputs(&modules, None);
-        assert_eq!(result.matches("pub enum ZipError").count(), 1, "enum should be deduped");
-        assert_eq!(result.matches("pub const HEADER_SIZE").count(), 1, "const should be deduped");
+        assert_eq!(
+            result.matches("pub enum ZipError").count(),
+            1,
+            "enum should be deduped"
+        );
+        assert_eq!(
+            result.matches("pub const HEADER_SIZE").count(),
+            1,
+            "const should be deduped"
+        );
         assert!(result.contains("fn init()"));
         assert!(result.contains("fn process()"));
     }
 
     #[test]
     fn test_assemble_dedup_preserves_first_definition() {
-        let mod_a = "pub struct ZipArchive {\n    pub data: Vec<u8>,\n    pub name: String,\n}\n".to_string();
+        let mod_a = "pub struct ZipArchive {\n    pub data: Vec<u8>,\n    pub name: String,\n}\n"
+            .to_string();
         let mod_b = "pub struct ZipArchive {\n    pub data: Vec<u8>,\n    pub name: String,\n    pub extra: bool,\n}\n\nfn check() -> bool { true }\n".to_string();
         let modules = vec![
             ("first".to_string(), mod_a, true),
@@ -511,8 +544,14 @@ mod tests {
         ];
         let result = assemble_module_outputs(&modules, None);
         assert_eq!(result.matches("pub struct ZipArchive").count(), 1);
-        assert!(result.contains("pub name: String"), "first def fields should be present");
-        assert!(!result.contains("pub extra: bool"), "second def fields should be stripped");
+        assert!(
+            result.contains("pub name: String"),
+            "first def fields should be present"
+        );
+        assert!(
+            !result.contains("pub extra: bool"),
+            "second def fields should be stripped"
+        );
         assert!(result.contains("fn check()"), "functions should survive");
     }
 
@@ -594,8 +633,7 @@ mod tests {
         assert!(!result_alone.success, "module B alone should not compile");
 
         let combined = format!("{module_a}\n{module_b}");
-        let result_with_context =
-            noricum_tools::compiler::check_rust_compiles(&combined).unwrap();
+        let result_with_context = noricum_tools::compiler::check_rust_compiles(&combined).unwrap();
         assert!(
             result_with_context.success,
             "module B with A should compile"
@@ -610,8 +648,14 @@ mod tests {
             ("mod_broken".to_string(), "fn broken( {".to_string(), false),
         ];
         let ctx = build_assembly_context(&outputs_with_broken);
-        assert!(ctx.contains("ZipArchive"), "compiling module should be included");
-        assert!(!ctx.contains("broken"), "non-compiling module should be filtered");
+        assert!(
+            ctx.contains("ZipArchive"),
+            "compiling module should be included"
+        );
+        assert!(
+            !ctx.contains("broken"),
+            "non-compiling module should be filtered"
+        );
     }
 
     #[test]
@@ -623,10 +667,22 @@ mod tests {
 
     #[test]
     fn test_extract_definition_name() {
-        assert_eq!(extract_definition_name("pub struct ZipArchive {"), Some("ZipArchive".to_string()));
-        assert_eq!(extract_definition_name("pub enum ZipError {"), Some("ZipError".to_string()));
-        assert_eq!(extract_definition_name("pub const HEADER: u32 = 30;"), Some("HEADER".to_string()));
-        assert_eq!(extract_definition_name("pub type Result = std::result::Result;"), Some("Result".to_string()));
+        assert_eq!(
+            extract_definition_name("pub struct ZipArchive {"),
+            Some("ZipArchive".to_string())
+        );
+        assert_eq!(
+            extract_definition_name("pub enum ZipError {"),
+            Some("ZipError".to_string())
+        );
+        assert_eq!(
+            extract_definition_name("pub const HEADER: u32 = 30;"),
+            Some("HEADER".to_string())
+        );
+        assert_eq!(
+            extract_definition_name("pub type Result = std::result::Result;"),
+            Some("Result".to_string())
+        );
         assert_eq!(extract_definition_name("fn foo() {}"), None);
         assert_eq!(extract_definition_name("let x = 5;"), None);
     }

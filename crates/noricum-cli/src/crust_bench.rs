@@ -428,10 +428,7 @@ fn select_module_model(interface_loc: u32, config: &MigrationConfig) -> String {
             .unwrap_or("qwen2.5-coder:32b")
             .to_string();
     }
-    let provider = config
-        .primary_provider
-        .as_deref()
-        .unwrap_or("anthropic");
+    let provider = config.primary_provider.as_deref().unwrap_or("anthropic");
     match provider {
         "deepseek" => "deepseek-chat".to_string(),
         _ => match interface_loc {
@@ -620,10 +617,7 @@ fn select_model(c_loc: u32, config: &MigrationConfig) -> String {
             .to_string();
     }
     // Respect --provider flag for model selection
-    let provider = config
-        .primary_provider
-        .as_deref()
-        .unwrap_or("anthropic");
+    let provider = config.primary_provider.as_deref().unwrap_or("anthropic");
     match provider {
         "deepseek" => "deepseek-chat".to_string(),
         _ => match c_loc {

@@ -6,18 +6,18 @@
 //! validation (`noricum-validation`) crates.
 
 pub mod artifacts;
+pub(crate) mod assembly;
 pub mod audit;
+pub mod budget;
 pub mod dependency;
 pub mod ensemble;
 pub mod incremental;
+pub(crate) mod module_migration;
 pub mod orchestrator;
 pub mod router;
 pub mod surgical_repair;
 pub mod type_contract;
-pub mod budget;
 pub(crate) mod warmstart;
-pub(crate) mod assembly;
-pub(crate) mod module_migration;
 
 pub use orchestrator::MigrationConfig;
 

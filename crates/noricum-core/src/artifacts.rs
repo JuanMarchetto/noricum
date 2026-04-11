@@ -643,9 +643,18 @@ mod tests {
 
         let dest = store.run_dir().join("08-crate");
         assert!(dest.exists(), "08-crate dir should exist");
-        assert!(dest.join("Cargo.toml").exists(), "Cargo.toml should be copied");
-        assert!(dest.join("src/lib.rs").exists(), "src/lib.rs should be copied");
-        assert!(dest.join("src/utils.rs").exists(), "src/utils.rs should be copied");
+        assert!(
+            dest.join("Cargo.toml").exists(),
+            "Cargo.toml should be copied"
+        );
+        assert!(
+            dest.join("src/lib.rs").exists(),
+            "src/lib.rs should be copied"
+        );
+        assert!(
+            dest.join("src/utils.rs").exists(),
+            "src/utils.rs should be copied"
+        );
         assert!(!dest.join("target").exists(), "target/ should be skipped");
     }
 }

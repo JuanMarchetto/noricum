@@ -3,8 +3,8 @@
 //! Uses CrateBuilder + check_crate_compiles to verify the
 //! multi-file output pipeline produces compilable Rust crates.
 
-use noricum_tools::crate_builder::CrateBuilder;
 use noricum_tools::compiler::check_crate_compiles;
+use noricum_tools::crate_builder::CrateBuilder;
 
 /// Test that CrateBuilder produces a compilable crate from pre-translated modules.
 #[test]
@@ -95,9 +95,15 @@ fn test_crate_builder_backward_compat_assembly() {
     let tmp = tempfile::tempdir().unwrap();
     let mut builder = CrateBuilder::new(tmp.path(), "compat_test").unwrap();
 
-    builder.write_types("pub struct Foo { pub x: i32 }").unwrap();
-    builder.write_module("a", "pub fn a(f: &Foo) -> i32 { f.x }").unwrap();
-    builder.write_module("b", "pub fn b() -> Foo { Foo { x: 42 } }").unwrap();
+    builder
+        .write_types("pub struct Foo { pub x: i32 }")
+        .unwrap();
+    builder
+        .write_module("a", "pub fn a(f: &Foo) -> i32 { f.x }")
+        .unwrap();
+    builder
+        .write_module("b", "pub fn b() -> Foo { Foo { x: 42 } }")
+        .unwrap();
     builder.write_lib_rs().unwrap();
     builder.write_cargo_toml().unwrap();
 

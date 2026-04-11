@@ -11,10 +11,10 @@ use crate::ToolError;
 
 /// Rust reserved keywords that need raw identifier syntax in `pub mod` declarations.
 const RUST_KEYWORDS: &[&str] = &[
-    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
-    "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
-    "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true",
-    "type", "unsafe", "use", "where", "while", "yield",
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
+    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
+    "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+    "unsafe", "use", "where", "while", "yield",
 ];
 
 /// Manages the output directory layout for a generated Rust crate.
@@ -89,7 +89,11 @@ impl CrateBuilder {
     ///
     /// Automatically prepends `use crate::types::*;` if types.rs exists.
     /// The module name is sanitized (lowercase, underscores only).
-    pub fn write_module(&mut self, module_name: &str, rust_source: &str) -> Result<PathBuf, ToolError> {
+    pub fn write_module(
+        &mut self,
+        module_name: &str,
+        rust_source: &str,
+    ) -> Result<PathBuf, ToolError> {
         let safe_name = sanitize_module_name(module_name);
         let path = self.output_dir.join(format!("src/{safe_name}.rs"));
 
@@ -180,7 +184,10 @@ bin = []
             content.push_str("use crate::types::*;\n");
         }
         for module in &self.modules {
-            content.push_str(&format!("use {crate_name}::{module}::*;\n", crate_name = self.crate_name));
+            content.push_str(&format!(
+                "use {crate_name}::{module}::*;\n",
+                crate_name = self.crate_name
+            ));
         }
         content.push('\n');
         content.push_str(main_source);
@@ -284,7 +291,10 @@ mod tests {
         assert_eq!(sanitize_crate_name("hash_table"), "hash_table");
         assert_eq!(sanitize_crate_name("miniz_zip.c"), "miniz_zip_c");
         assert_eq!(sanitize_crate_name("CamelCase"), "camelcase");
-        assert_eq!(sanitize_crate_name("123starts_with_digit"), "crate_123starts_with_digit");
+        assert_eq!(
+            sanitize_crate_name("123starts_with_digit"),
+            "crate_123starts_with_digit"
+        );
         assert_eq!(sanitize_crate_name(""), "output");
     }
 
@@ -301,11 +311,15 @@ mod tests {
         let mut builder = CrateBuilder::new(tmp.path(), "test_crate").unwrap();
 
         // Write types
-        builder.write_types("pub struct Foo { pub x: i32 }").unwrap();
+        builder
+            .write_types("pub struct Foo { pub x: i32 }")
+            .unwrap();
         assert!(builder.has_types);
 
         // Write module
-        builder.write_module("utils", "pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+        builder
+            .write_module("utils", "pub fn add(a: i32, b: i32) -> i32 { a + b }")
+            .unwrap();
         assert_eq!(builder.modules(), &["utils"]);
 
         // Read module back
@@ -331,7 +345,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut builder = CrateBuilder::new(tmp.path(), "no_types").unwrap();
 
-        builder.write_module("core", "pub fn run() -> i32 { 42 }").unwrap();
+        builder
+            .write_module("core", "pub fn run() -> i32 { 42 }")
+            .unwrap();
         let source = builder.read_module("core").unwrap();
         // Without types.rs, no types import should be added
         assert!(!source.contains("use crate::types::*;"));
@@ -343,8 +359,12 @@ mod tests {
         let mut builder = CrateBuilder::new(tmp.path(), "asm_test").unwrap();
 
         builder.write_types("pub struct S { pub v: i32 }").unwrap();
-        builder.write_module("a", "pub fn a() -> i32 { 1 }").unwrap();
-        builder.write_module("b", "pub fn b() -> i32 { 2 }").unwrap();
+        builder
+            .write_module("a", "pub fn a() -> i32 { 1 }")
+            .unwrap();
+        builder
+            .write_module("b", "pub fn b() -> i32 { 2 }")
+            .unwrap();
 
         let assembled = builder.assemble_all().unwrap();
         assert!(assembled.contains("pub struct S"));
@@ -372,7 +392,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut builder = CrateBuilder::new(tmp.path(), "keyword_test").unwrap();
 
-        builder.write_module("if", "pub fn check() -> bool { true }").unwrap();
+        builder
+            .write_module("if", "pub fn check() -> bool { true }")
+            .unwrap();
         builder.write_lib_rs().unwrap();
 
         let lib_rs = std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap();

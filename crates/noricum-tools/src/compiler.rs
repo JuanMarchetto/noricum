@@ -251,7 +251,10 @@ pub fn check_crate_compiles(crate_dir: &Path) -> Result<CompileResult, ToolError
 ///
 /// Runs `cargo check` on the whole crate but focuses error output
 /// on the specified module file for targeted repair.
-pub fn check_module_compiles(crate_dir: &Path, module_name: &str) -> Result<CompileResult, ToolError> {
+pub fn check_module_compiles(
+    crate_dir: &Path,
+    module_name: &str,
+) -> Result<CompileResult, ToolError> {
     let result = check_crate_compiles(crate_dir)?;
     if result.success {
         return Ok(result);
@@ -262,7 +265,9 @@ pub fn check_module_compiles(crate_dir: &Path, module_name: &str) -> Result<Comp
     let filtered_stderr: String = result
         .stderr
         .lines()
-        .filter(|line| line.contains(&module_file) || line.starts_with("error") || line.starts_with("warning"))
+        .filter(|line| {
+            line.contains(&module_file) || line.starts_with("error") || line.starts_with("warning")
+        })
         .collect::<Vec<&str>>()
         .join("\n");
 
@@ -381,20 +386,23 @@ fn uses_unsafe() {
         std::fs::write(
             tmp.path().join("Cargo.toml"),
             "[package]\nname = \"test_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
-        std::fs::write(
-            src_dir.join("lib.rs"),
-            "pub mod utils;\n",
-        ).unwrap();
+        std::fs::write(src_dir.join("lib.rs"), "pub mod utils;\n").unwrap();
 
         std::fs::write(
             src_dir.join("utils.rs"),
             "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = check_crate_compiles(tmp.path()).unwrap();
-        assert!(result.success, "simple crate should compile: {}", result.stderr);
+        assert!(
+            result.success,
+            "simple crate should compile: {}",
+            result.stderr
+        );
     }
 
     #[test]
@@ -406,12 +414,14 @@ fn uses_unsafe() {
         std::fs::write(
             tmp.path().join("Cargo.toml"),
             "[package]\nname = \"bad_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::write(
             src_dir.join("lib.rs"),
             "pub fn broken( -> i32 { 42 }\n", // syntax error
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = check_crate_compiles(tmp.path()).unwrap();
         assert!(!result.success, "broken crate should not compile");
@@ -434,17 +444,16 @@ fn uses_unsafe() {
         std::fs::write(
             tmp.path().join("Cargo.toml"),
             "[package]\nname = \"typed_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
-        std::fs::write(
-            src_dir.join("lib.rs"),
-            "pub mod types;\npub mod utils;\n",
-        ).unwrap();
+        std::fs::write(src_dir.join("lib.rs"), "pub mod types;\npub mod utils;\n").unwrap();
 
         std::fs::write(
             src_dir.join("types.rs"),
             "pub struct Point { pub x: f64, pub y: f64 }\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::write(
             src_dir.join("utils.rs"),
@@ -452,6 +461,10 @@ fn uses_unsafe() {
         ).unwrap();
 
         let result = check_crate_compiles(tmp.path()).unwrap();
-        assert!(result.success, "crate with types should compile: {}", result.stderr);
+        assert!(
+            result.success,
+            "crate with types should compile: {}",
+            result.stderr
+        );
     }
 }

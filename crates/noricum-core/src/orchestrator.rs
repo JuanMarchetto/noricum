@@ -30,18 +30,14 @@ const MAX_C_SOURCE_SIZE: usize = 10 * 1024 * 1024;
 const LARGE_FILE_LOC: usize = 1000;
 
 use crate::CoreError;
-use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit};
-use crate::budget::{BudgetPhase, budget_phase, compute_adaptive_budget, check_budget};
-use crate::warmstart::{WarmAction, warm_start_action};
 use crate::assembly::{assemble_module_outputs, validate_module_with_assembly};
+use crate::audit::{AuditEvent, SharedAuditTrail, audit_log, create_shared_audit};
+use crate::budget::{BudgetPhase, budget_phase, check_budget, compute_adaptive_budget};
 use crate::module_migration::{
-    MEDIUM_FILE_LOC, MODULAR_FILE_LOC, MASSIVE_FILE_LOC,
-    VERY_LARGE_FILE_LOC,
-    graduated_state, has_substance, should_retranslate,
-    ModularResult, ModuleMigrationResult,
+    MASSIVE_FILE_LOC, MEDIUM_FILE_LOC, MODULAR_FILE_LOC, ModularResult, ModuleMigrationResult,
+    VERY_LARGE_FILE_LOC, graduated_state, has_substance, should_retranslate,
 };
-
-
+use crate::warmstart::{WarmAction, warm_start_action};
 
 /// Configuration for the async LLM-based migration pipeline.
 #[derive(Debug, Clone)]
@@ -194,7 +190,6 @@ impl MigrationConfig {
     }
 }
 
-
 /// Build a `## Semantic Hints` prompt section from detected patterns.
 ///
 /// Returns `None` when no hints were detected so callers can skip injection.
@@ -203,7 +198,10 @@ fn format_semantic_hints(c_source: &str) -> Option<String> {
     if hints.is_empty() {
         return None;
     }
-    debug!(hint_count = hints.len(), "semantic hints detected for translation");
+    debug!(
+        hint_count = hints.len(),
+        "semantic hints detected for translation"
+    );
     let lines: Vec<String> = hints.iter().map(|h| h.to_prompt_line()).collect();
     Some(format!("## Semantic Hints\n{}\n", lines.join("\n")))
 }
@@ -270,7 +268,6 @@ fn effective_repair_iterations(configured_max: u32, c_lines: usize, was_chunked:
         configured_max
     }
 }
-
 
 /// Number of consecutive stalled iterations before triggering re-translation.
 const STALL_THRESHOLD: u32 = 2;
@@ -597,12 +594,8 @@ async fn hybrid_repair(
             "P30 Phase 2: sending surgical repair request"
         );
 
-        let repair_result = noricum_agents::repair::repair_with_prompt(
-            client,
-            &repair_model.model,
-            &prompt,
-        )
-        .await;
+        let repair_result =
+            noricum_agents::repair::repair_with_prompt(client, &repair_model.model, &prompt).await;
 
         match repair_result {
             Ok(fixed_fn) => {
@@ -613,7 +606,10 @@ async fn hybrid_repair(
                     let _ = store.save_repair_iteration(
                         (cycle + 1) as u32,
                         &current_source,
-                        &format!("P30 Phase 2 cycle {cycle}: fixed {fn_name} ({} error)", err.code),
+                        &format!(
+                            "P30 Phase 2 cycle {cycle}: fixed {fn_name} ({} error)",
+                            err.code
+                        ),
                     );
                 }
             }
@@ -627,9 +623,8 @@ async fn hybrid_repair(
     unit.rust_output = Some(current_source);
 
     // Check if Phase 2 resolved everything
-    let final_check = noricum_tools::compiler::check_rust_compiles(
-        unit.rust_output.as_deref().unwrap_or(""),
-    )?;
+    let final_check =
+        noricum_tools::compiler::check_rust_compiles(unit.rust_output.as_deref().unwrap_or(""))?;
 
     if final_check.success {
         info!(function = %name, "P30 Phase 2: all errors resolved after surgical repair");
@@ -857,7 +852,11 @@ pub async fn migrate_file(
         analysis_ms = unit.metrics.analysis_ms,
         "state -> Analyzed"
     );
-    check_budget(config.max_tokens_budget, config.max_llm_calls, &unit.metrics)?;
+    check_budget(
+        config.max_tokens_budget,
+        config.max_llm_calls,
+        &unit.metrics,
+    )?;
 
     if let Some(ref trail) = audit {
         audit_log(
@@ -880,10 +879,11 @@ pub async fn migrate_file(
                     "P37: mined behavioral specs"
                 );
                 if let Some(ref store) = artifacts
-                    && let Ok(trace_json) = serde_json::to_string_pretty(&traces) {
-                        let trace_path = store.run_dir().join("spec-traces.json");
-                        let _ = std::fs::write(&trace_path, &trace_json);
-                    }
+                    && let Ok(trace_json) = serde_json::to_string_pretty(&traces)
+                {
+                    let trace_path = store.run_dir().join("spec-traces.json");
+                    let _ = std::fs::write(&trace_path, &trace_json);
+                }
                 traces
             }
             Err(e) => {
@@ -970,11 +970,12 @@ pub async fn migrate_file(
             "calling translation agent"
         );
         // Inject semantic hints into the C source for the translation agent
-        let translation_c_source = if let Some(hints_section) = format_semantic_hints(&unit.c_source) {
-            format!("{}\n{}", hints_section, unit.c_source)
-        } else {
-            unit.c_source.clone()
-        };
+        let translation_c_source =
+            if let Some(hints_section) = format_semantic_hints(&unit.c_source) {
+                format!("{}\n{}", hints_section, unit.c_source)
+            } else {
+                unit.c_source.clone()
+            };
 
         let c_lines_for_chunk = unit.c_source.lines().count();
         let use_chunked = c_lines_for_chunk > MEDIUM_FILE_LOC;
@@ -991,8 +992,10 @@ pub async fn migrate_file(
                 p.contains("struct") || p.contains("linked_list") || p.contains("recursive")
             });
             let chunks = if has_data_model {
-                let structural =
-                    noricum_tools::ast::chunk_c_source_structural(&translation_c_source, chunk_target);
+                let structural = noricum_tools::ast::chunk_c_source_structural(
+                    &translation_c_source,
+                    chunk_target,
+                );
                 if structural.len() > 1 {
                     info!(
                         function = %name,
@@ -1193,7 +1196,11 @@ pub async fn migrate_file(
             unit.metrics.output_tokens += noricum_agents::estimate_tokens(rust);
         }
         info!(function = %name, state = ?unit.state, translation_ms = unit.metrics.translation_ms, "state -> Refined");
-        check_budget(config.max_tokens_budget, config.max_llm_calls, &unit.metrics)?;
+        check_budget(
+            config.max_tokens_budget,
+            config.max_llm_calls,
+            &unit.metrics,
+        )?;
     }
 
     // --- Stage 5.5: P34 Incremental Completion (for local models) ---
@@ -1244,9 +1251,8 @@ pub async fn migrate_file(
                     unit.rust_output = Some(result.rust_source);
                     unit.metrics.llm_calls += result.passes as u32;
                     if let Some(ref store) = artifacts {
-                        let _ = store.save_translation_final(
-                            unit.rust_output.as_deref().unwrap_or(""),
-                        );
+                        let _ =
+                            store.save_translation_final(unit.rust_output.as_deref().unwrap_or(""));
                     }
                 }
                 Err(e) => {
@@ -1294,31 +1300,33 @@ pub async fn migrate_file(
     }
 
     // --- Stage 6.5: Spec Validation (P37) ---
-    if !spec_traces.is_empty() && validation.compiles
-        && let Some(ref rust_source) = unit.rust_output {
-            match noricum_tools::spec_mining::validate_against_specs(rust_source, &spec_traces) {
-                Ok(spec_result) => {
-                    info!(
-                        function = %name,
-                        total = spec_result.total_specs,
-                        passed = spec_result.passed,
-                        failed = spec_result.failed,
-                        "P37: spec validation"
-                    );
-                    unit.metrics.spec_count = spec_result.total_specs;
-                    unit.metrics.specs_passed = spec_result.passed;
-                    if spec_result.failed > 0 {
-                        for failure in &spec_result.failures {
-                            unit.last_diff_feedback
-                                .push(format!("Spec failure: {failure}"));
-                        }
+    if !spec_traces.is_empty()
+        && validation.compiles
+        && let Some(ref rust_source) = unit.rust_output
+    {
+        match noricum_tools::spec_mining::validate_against_specs(rust_source, &spec_traces) {
+            Ok(spec_result) => {
+                info!(
+                    function = %name,
+                    total = spec_result.total_specs,
+                    passed = spec_result.passed,
+                    failed = spec_result.failed,
+                    "P37: spec validation"
+                );
+                unit.metrics.spec_count = spec_result.total_specs;
+                unit.metrics.specs_passed = spec_result.passed;
+                if spec_result.failed > 0 {
+                    for failure in &spec_result.failures {
+                        unit.last_diff_feedback
+                            .push(format!("Spec failure: {failure}"));
                     }
                 }
-                Err(e) => {
-                    debug!(function = %name, error = %e, "P37: spec validation failed (non-fatal)");
-                }
+            }
+            Err(e) => {
+                debug!(function = %name, error = %e, "P37: spec validation failed (non-fatal)");
             }
         }
+    }
 
     // --- Stage 7: Repair loop (token-aware iteration limit) ---
     // P0: Track baseline unsafe count from translation to enforce quality floor.
@@ -1332,15 +1340,13 @@ pub async fn migrate_file(
         let mut hybrid_resolved = false;
         if c_lines > MODULAR_FILE_LOC {
             info!(function = %name, c_lines, "P30: using hybrid repair for assembled output");
-            hybrid_resolved = hybrid_repair(
-                &mut unit, &client, &provider_config, difficulty, &artifacts,
-            ).await?;
+            hybrid_resolved =
+                hybrid_repair(&mut unit, &client, &provider_config, difficulty, &artifacts).await?;
 
             if hybrid_resolved {
                 // Re-validate after hybrid repair
-                let post_hybrid = noricum_validation::validate_with_threshold(
-                    &unit, config.min_idiomatic_score,
-                )?;
+                let post_hybrid =
+                    noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
                 noricum_validation::apply_validation_with_max(&mut unit, &post_hybrid, max_iters);
                 unit.metrics.repair_ms = repair_start.elapsed().as_millis() as u64;
                 info!(function = %name, "P30: hybrid repair resolved all compilation errors");
@@ -1357,148 +1363,147 @@ pub async fn migrate_file(
 
         // Skip legacy repair if hybrid resolved everything or P34b skipped Phase 3
         if !hybrid_resolved {
+            // P29: Use fast repair model for assembly repair (deepseek-chat instead of R1).
+            // R1 is ~5 min/iter on assembly vs ~1 min for deepseek-chat.
+            let repair_model_sel = select_repair_model(&provider_config, difficulty)?;
 
-        // P29: Use fast repair model for assembly repair (deepseek-chat instead of R1).
-        // R1 is ~5 min/iter on assembly vs ~1 min for deepseek-chat.
-        let repair_model_sel = select_repair_model(&provider_config, difficulty)?;
-
-        // P30: Cap legacy repair to 3 iterations if used as Phase 3 fallback
-        let max_iters = if c_lines > MODULAR_FILE_LOC {
-            max_iters.min(3)
-        } else {
-            max_iters
-        };
-
-        if max_iters < config.max_repair_iterations {
-            info!(
-                function = %name,
-                c_lines,
-                configured = config.max_repair_iterations,
-                effective = max_iters,
-                "reducing repair iterations for large file"
-            );
-        }
-
-        // P0: Baseline unsafe count from the initial translation.
-        // Repair must NEVER produce more unsafe blocks than this.
-        let baseline_unsafe = validation.unsafe_count;
-        // P21: Effective unsafe ceiling — allows configurable tolerance above baseline
-        let unsafe_ceiling = config
-            .max_unsafe_blocks
-            .map_or(baseline_unsafe, |max| max.max(baseline_unsafe));
-
-        // P1: Best-version tracking — keep the version with the highest score
-        // that doesn't exceed the unsafe ceiling.
-        // P6b: Only seed best version if it has substance (not empty stubs).
-        let initial_has_substance = unit
-            .rust_output
-            .as_deref()
-            .is_some_and(|r| has_substance(r, &unit.c_source));
-        let mut best_version: Option<String> = if initial_has_substance {
-            unit.rust_output.clone()
-        } else {
-            warn!(function = %name, "P6b: initial translation is stub, not seeding as best version");
-            None
-        };
-        let mut best_score: u32 = if initial_has_substance {
-            validation.idiomatic_score
-        } else {
-            0
-        };
-        let mut best_unsafe: u32 = baseline_unsafe;
-        let mut best_compiles: bool = if initial_has_substance {
-            validation.compiles
-        } else {
-            false
-        };
-
-        let mut iteration = 1u32;
-        let mut prev_error_count: Option<usize> = None;
-        let mut stall_count: u32 = 0;
-        let mut retranslated_on_stall = false;
-
-        while iteration <= max_iters {
-            info!(
-                function = %name,
-                iteration,
-                max = max_iters,
-                model = %repair_model_sel.model,
-                "entering repair iteration"
-            );
-
-            let current_rust = unit.rust_output.as_deref().unwrap_or("");
-            let errors = &unit.last_errors;
-            let diff_feedback = &unit.last_diff_feedback;
-
-            // P5: When code compiles and diff passes but score is below threshold,
-            // generate idiomatic improvement hints so the repair agent has actionable feedback
-            // instead of returning the code unchanged.
-            let idiomatic_hints = if errors.is_empty()
-                && diff_feedback.is_empty()
-                && unit.idiomatic_score.unwrap_or(0) < config.min_idiomatic_score
-            {
-                let hints = noricum_validation::generate_idiomatic_hints(current_rust);
-                if !hints.is_empty() {
-                    info!(
-                        function = %name,
-                        score = unit.idiomatic_score.unwrap_or(0),
-                        target = config.min_idiomatic_score,
-                        hint_count = hints.len(),
-                        "P5: injecting idiomatic improvement hints"
-                    );
-                }
-                hints
+            // P30: Cap legacy repair to 3 iterations if used as Phase 3 fallback
+            let max_iters = if c_lines > MODULAR_FILE_LOC {
+                max_iters.min(3)
             } else {
-                Vec::new()
-            };
-            let effective_diff_feedback = if idiomatic_hints.is_empty() {
-                diff_feedback.clone()
-            } else {
-                idiomatic_hints
+                max_iters
             };
 
-            if errors.is_empty()
-                && effective_diff_feedback.is_empty()
-                && unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
-            {
-                debug!(function = %name, "no errors or diff feedback remaining, re-validating");
+            if max_iters < config.max_repair_iterations {
+                info!(
+                    function = %name,
+                    c_lines,
+                    configured = config.max_repair_iterations,
+                    effective = max_iters,
+                    "reducing repair iterations for large file"
+                );
             }
 
-            // --- Stall detection ---
-            let current_error_count = errors.len() + effective_diff_feedback.len();
-            if let Some(prev) = prev_error_count {
-                if current_error_count == prev && current_error_count > 0 {
-                    stall_count += 1;
+            // P0: Baseline unsafe count from the initial translation.
+            // Repair must NEVER produce more unsafe blocks than this.
+            let baseline_unsafe = validation.unsafe_count;
+            // P21: Effective unsafe ceiling — allows configurable tolerance above baseline
+            let unsafe_ceiling = config
+                .max_unsafe_blocks
+                .map_or(baseline_unsafe, |max| max.max(baseline_unsafe));
+
+            // P1: Best-version tracking — keep the version with the highest score
+            // that doesn't exceed the unsafe ceiling.
+            // P6b: Only seed best version if it has substance (not empty stubs).
+            let initial_has_substance = unit
+                .rust_output
+                .as_deref()
+                .is_some_and(|r| has_substance(r, &unit.c_source));
+            let mut best_version: Option<String> = if initial_has_substance {
+                unit.rust_output.clone()
+            } else {
+                warn!(function = %name, "P6b: initial translation is stub, not seeding as best version");
+                None
+            };
+            let mut best_score: u32 = if initial_has_substance {
+                validation.idiomatic_score
+            } else {
+                0
+            };
+            let mut best_unsafe: u32 = baseline_unsafe;
+            let mut best_compiles: bool = if initial_has_substance {
+                validation.compiles
+            } else {
+                false
+            };
+
+            let mut iteration = 1u32;
+            let mut prev_error_count: Option<usize> = None;
+            let mut stall_count: u32 = 0;
+            let mut retranslated_on_stall = false;
+
+            while iteration <= max_iters {
+                info!(
+                    function = %name,
+                    iteration,
+                    max = max_iters,
+                    model = %repair_model_sel.model,
+                    "entering repair iteration"
+                );
+
+                let current_rust = unit.rust_output.as_deref().unwrap_or("");
+                let errors = &unit.last_errors;
+                let diff_feedback = &unit.last_diff_feedback;
+
+                // P5: When code compiles and diff passes but score is below threshold,
+                // generate idiomatic improvement hints so the repair agent has actionable feedback
+                // instead of returning the code unchanged.
+                let idiomatic_hints = if errors.is_empty()
+                    && diff_feedback.is_empty()
+                    && unit.idiomatic_score.unwrap_or(0) < config.min_idiomatic_score
+                {
+                    let hints = noricum_validation::generate_idiomatic_hints(current_rust);
+                    if !hints.is_empty() {
+                        info!(
+                            function = %name,
+                            score = unit.idiomatic_score.unwrap_or(0),
+                            target = config.min_idiomatic_score,
+                            hint_count = hints.len(),
+                            "P5: injecting idiomatic improvement hints"
+                        );
+                    }
+                    hints
+                } else {
+                    Vec::new()
+                };
+                let effective_diff_feedback = if idiomatic_hints.is_empty() {
+                    diff_feedback.clone()
+                } else {
+                    idiomatic_hints
+                };
+
+                if errors.is_empty()
+                    && effective_diff_feedback.is_empty()
+                    && unit.idiomatic_score.unwrap_or(0) >= config.min_idiomatic_score
+                {
+                    debug!(function = %name, "no errors or diff feedback remaining, re-validating");
+                }
+
+                // --- Stall detection ---
+                let current_error_count = errors.len() + effective_diff_feedback.len();
+                if let Some(prev) = prev_error_count {
+                    if current_error_count == prev && current_error_count > 0 {
+                        stall_count += 1;
+                        warn!(
+                            function = %name,
+                            stall_count,
+                            error_count = current_error_count,
+                            "repair stalled — error count unchanged"
+                        );
+                    } else {
+                        stall_count = 0;
+                    }
+                }
+                prev_error_count = Some(current_error_count);
+
+                // --- Re-translate on stall ---
+                // If repair is stuck for STALL_THRESHOLD iterations, try a fresh translation
+                // with higher temperature instead of continuing to patch the same broken code.
+                // P28: Skip retranslation for assembled outputs (>MODULAR_FILE_LOC lines).
+                // Assembly repair combines 17+ modules (~6000 LOC) but retranslation can only
+                // generate ~1000 LOC, destroying most of the assembled content.
+                let is_assembly = c_lines > MODULAR_FILE_LOC;
+                if stall_count >= STALL_THRESHOLD && !retranslated_on_stall && !is_assembly {
+                    retranslated_on_stall = true;
                     warn!(
                         function = %name,
                         stall_count,
-                        error_count = current_error_count,
-                        "repair stalled — error count unchanged"
+                        "repair stalled — attempting re-translation with temperature 0.7"
                     );
-                } else {
-                    stall_count = 0;
-                }
-            }
-            prev_error_count = Some(current_error_count);
 
-            // --- Re-translate on stall ---
-            // If repair is stuck for STALL_THRESHOLD iterations, try a fresh translation
-            // with higher temperature instead of continuing to patch the same broken code.
-            // P28: Skip retranslation for assembled outputs (>MODULAR_FILE_LOC lines).
-            // Assembly repair combines 17+ modules (~6000 LOC) but retranslation can only
-            // generate ~1000 LOC, destroying most of the assembled content.
-            let is_assembly = c_lines > MODULAR_FILE_LOC;
-            if stall_count >= STALL_THRESHOLD && !retranslated_on_stall && !is_assembly {
-                retranslated_on_stall = true;
-                warn!(
-                    function = %name,
-                    stall_count,
-                    "repair stalled — attempting re-translation with temperature 0.7"
-                );
-
-                let stall_patterns = PatternStore::load_seed_patterns();
-                let stall_relevant = stall_patterns.find_relevant(&unit.c_source, 3);
-                let retranslate_result =
+                    let stall_patterns = PatternStore::load_seed_patterns();
+                    let stall_relevant = stall_patterns.find_relevant(&unit.c_source, 3);
+                    let retranslate_result =
                     noricum_agents::translation::translate_function_with_patterns_and_temperature(
                         &client,
                         &repair_model_sel.model,
@@ -1510,249 +1515,255 @@ pub async fn migrate_file(
                     )
                     .await;
 
-                if let Ok(retranslated) = retranslate_result {
-                    unit.rust_output = Some(retranslated);
-                    if let Some(ref store) = artifacts {
-                        let _ = store
-                            .save_retranslation_stall(unit.rust_output.as_deref().unwrap_or(""));
-                    }
-                    unit.metrics.llm_calls += 1;
-                    stall_count = 0;
-                    prev_error_count = None;
-                    info!(function = %name, "re-translation complete, resetting repair loop");
-                    // Re-validate with the new translation
-                    let re_validation = noricum_validation::validate_with_threshold(
-                        &unit,
-                        config.min_idiomatic_score,
-                    )?;
-                    noricum_validation::apply_validation_with_max(
-                        &mut unit,
-                        &re_validation,
-                        max_iters,
-                    );
-
-                    // P1+P6b: Update best version if this re-translation is better and has substance
-                    let retrans_has_substance = unit
-                        .rust_output
-                        .as_deref()
-                        .is_some_and(|r| has_substance(r, &unit.c_source));
-                    if retrans_has_substance
-                        && re_validation.unsafe_count <= unsafe_ceiling
-                        && (re_validation.idiomatic_score > best_score
-                            || (re_validation.compiles && !best_compiles))
-                    {
-                        best_version = unit.rust_output.clone();
-                        best_score = re_validation.idiomatic_score;
-                        best_unsafe = re_validation.unsafe_count;
-                        best_compiles = re_validation.compiles;
-                        info!(
-                            function = %name,
-                            best_score,
-                            best_unsafe,
-                            best_compiles,
-                            "new best version from re-translation"
+                    if let Ok(retranslated) = retranslate_result {
+                        unit.rust_output = Some(retranslated);
+                        if let Some(ref store) = artifacts {
+                            let _ = store.save_retranslation_stall(
+                                unit.rust_output.as_deref().unwrap_or(""),
+                            );
+                        }
+                        unit.metrics.llm_calls += 1;
+                        stall_count = 0;
+                        prev_error_count = None;
+                        info!(function = %name, "re-translation complete, resetting repair loop");
+                        // Re-validate with the new translation
+                        let re_validation = noricum_validation::validate_with_threshold(
+                            &unit,
+                            config.min_idiomatic_score,
+                        )?;
+                        noricum_validation::apply_validation_with_max(
+                            &mut unit,
+                            &re_validation,
+                            max_iters,
                         );
-                        if let Some(ref store) = artifacts
-                            && let Some(ref best) = best_version
+
+                        // P1+P6b: Update best version if this re-translation is better and has substance
+                        let retrans_has_substance = unit
+                            .rust_output
+                            .as_deref()
+                            .is_some_and(|r| has_substance(r, &unit.c_source));
+                        if retrans_has_substance
+                            && re_validation.unsafe_count <= unsafe_ceiling
+                            && (re_validation.idiomatic_score > best_score
+                                || (re_validation.compiles && !best_compiles))
                         {
-                            let _ = store.save_best_version(
-                                best,
+                            best_version = unit.rust_output.clone();
+                            best_score = re_validation.idiomatic_score;
+                            best_unsafe = re_validation.unsafe_count;
+                            best_compiles = re_validation.compiles;
+                            info!(
+                                function = %name,
                                 best_score,
                                 best_unsafe,
                                 best_compiles,
+                                "new best version from re-translation"
                             );
+                            if let Some(ref store) = artifacts
+                                && let Some(ref best) = best_version
+                            {
+                                let _ = store.save_best_version(
+                                    best,
+                                    best_score,
+                                    best_unsafe,
+                                    best_compiles,
+                                );
+                            }
                         }
-                    }
 
-                    if re_validation.passed {
-                        info!(function = %name, "re-translation passed validation directly");
-                        break;
+                        if re_validation.passed {
+                            info!(function = %name, "re-translation passed validation directly");
+                            break;
+                        }
+                        iteration += 1;
+                        continue;
+                    } else {
+                        warn!(function = %name, "re-translation failed, continuing repair");
                     }
-                    iteration += 1;
-                    continue;
-                } else {
-                    warn!(function = %name, "re-translation failed, continuing repair");
                 }
-            }
 
-            if let Some(ref trail) = audit {
-                audit_log(
-                    trail,
-                    AuditEvent::RepairIteration {
-                        function_name: name.clone(),
-                        iteration,
-                        max_iterations: max_iters,
-                        error_count: errors.len(),
-                        diff_feedback_count: effective_diff_feedback.len(),
-                    },
-                );
-            }
+                if let Some(ref trail) = audit {
+                    audit_log(
+                        trail,
+                        AuditEvent::RepairIteration {
+                            function_name: name.clone(),
+                            iteration,
+                            max_iterations: max_iters,
+                            error_count: errors.len(),
+                            diff_feedback_count: effective_diff_feedback.len(),
+                        },
+                    );
+                }
 
-            // P22: After 3+ failed iterations, hint that unsafe is acceptable to fix compilation
-            let mut effective_diff_feedback = effective_diff_feedback;
-            if !errors.is_empty() && iteration >= 3 && unsafe_ceiling > 0 {
-                effective_diff_feedback.push(format!(
+                // P22: After 3+ failed iterations, hint that unsafe is acceptable to fix compilation
+                let mut effective_diff_feedback = effective_diff_feedback;
+                if !errors.is_empty() && iteration >= 3 && unsafe_ceiling > 0 {
+                    effective_diff_feedback.push(format!(
                     "IMPORTANT: If you cannot fix the compilation errors with safe code, \
                      you MAY use up to {} unsafe block(s) to make the code compile. \
                      A compiling program with minimal unsafe is better than one that doesn't compile. \
                      Wrap only the minimum necessary code in unsafe.",
                     unsafe_ceiling
                 ));
-            }
+                }
 
-            // Pass full C source for files <1500 LOC, abbreviated for larger ones
-            let c_abbrev_limit = if c_lines < 1500 { None } else { Some(500) };
-            let repair_result = noricum_agents::repair::repair_function_full(
-                &client,
-                &repair_model_sel.model,
-                current_rust,
-                errors,
-                &effective_diff_feedback,
-                &unit.c_source,
-                iteration,
-                max_iters,
-                config.repair_base_temperature,
-                c_abbrev_limit,
-            )
-            .await;
+                // Pass full C source for files <1500 LOC, abbreviated for larger ones
+                let c_abbrev_limit = if c_lines < 1500 { None } else { Some(500) };
+                let repair_result = noricum_agents::repair::repair_function_full(
+                    &client,
+                    &repair_model_sel.model,
+                    current_rust,
+                    errors,
+                    &effective_diff_feedback,
+                    &unit.c_source,
+                    iteration,
+                    max_iters,
+                    config.repair_base_temperature,
+                    c_abbrev_limit,
+                )
+                .await;
 
-            let repaired = match repair_result {
-                Ok(r) => r,
-                Err(e) => {
+                let repaired = match repair_result {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(
+                            function = %name,
+                            iteration,
+                            error = %e,
+                            "repair LLM call failed (transient error), skipping iteration"
+                        );
+                        unit.metrics.llm_calls += 1;
+                        unit.metrics.repair_iterations = iteration;
+                        iteration += 1;
+                        continue;
+                    }
+                };
+
+                // P0: Quality floor — reject repair if it introduces more unsafe blocks
+                let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
+                if repaired_unsafe > unsafe_ceiling {
                     warn!(
                         function = %name,
                         iteration,
-                        error = %e,
-                        "repair LLM call failed (transient error), skipping iteration"
+                        repaired_unsafe,
+                        unsafe_ceiling,
+                        "P0: repair rejected — exceeds unsafe ceiling (P21)"
                     );
+                    if let Some(ref store) = artifacts {
+                        let _ = store.save_repair_rejected(iteration, &repaired);
+                    }
+                    // Don't apply this repair; keep the current version and continue
                     unit.metrics.llm_calls += 1;
                     unit.metrics.repair_iterations = iteration;
                     iteration += 1;
                     continue;
                 }
-            };
 
-            // P0: Quality floor — reject repair if it introduces more unsafe blocks
-            let repaired_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&repaired);
-            if repaired_unsafe > unsafe_ceiling {
+                // Estimate token usage for repair call
+                let input_token_est = noricum_agents::estimate_tokens(current_rust);
+                let output_token_est = noricum_agents::estimate_tokens(&repaired);
+                unit.rust_output = Some(repaired);
+                unit.state = MigrationState::Repairing(iteration);
+                unit.metrics.llm_calls += 1;
+                unit.metrics.input_tokens += input_token_est;
+                unit.metrics.output_tokens += output_token_est;
+                unit.metrics.repair_iterations = iteration;
+                check_budget(
+                    config.max_tokens_budget,
+                    config.max_llm_calls,
+                    &unit.metrics,
+                )?;
+
+                let re_validation =
+                    noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
+                noricum_validation::apply_validation_with_max(&mut unit, &re_validation, max_iters);
+                if let Some(ref store) = artifacts
+                    && let Ok(val_json) = serde_json::to_string_pretty(&re_validation)
+                {
+                    let _ = store.save_repair_iteration(
+                        iteration,
+                        unit.rust_output.as_deref().unwrap_or(""),
+                        &val_json,
+                    );
+                }
+                info!(
+                    function = %name,
+                    iteration,
+                    state = ?unit.state,
+                    compiles = re_validation.compiles,
+                    idiomatic_score = re_validation.idiomatic_score,
+                    unsafe_count = re_validation.unsafe_count,
+                    diff_test = ?re_validation.diff_test_passed,
+                    "repair iteration result"
+                );
+
+                // P1+P6b: Update best version if this repair is better AND has substance
+                let repair_has_substance = unit
+                    .rust_output
+                    .as_deref()
+                    .is_some_and(|r| has_substance(r, &unit.c_source));
+                if repair_has_substance
+                    && re_validation.unsafe_count <= unsafe_ceiling
+                    && (re_validation.idiomatic_score > best_score
+                        || (re_validation.compiles && !best_compiles))
+                {
+                    best_version = unit.rust_output.clone();
+                    best_score = re_validation.idiomatic_score;
+                    best_unsafe = re_validation.unsafe_count;
+                    best_compiles = re_validation.compiles;
+                    info!(
+                        function = %name,
+                        iteration,
+                        best_score,
+                        best_unsafe,
+                        best_compiles,
+                        "new best version from repair"
+                    );
+                    if let Some(ref store) = artifacts
+                        && let Some(ref best) = best_version
+                    {
+                        let _ =
+                            store.save_best_version(best, best_score, best_unsafe, best_compiles);
+                    }
+                }
+
+                if re_validation.passed {
+                    info!(function = %name, "repair succeeded, validated");
+                    break;
+                }
+
+                iteration += 1;
+            }
+
+            unit.metrics.repair_ms = repair_start.elapsed().as_millis() as u64;
+
+            // --- Stage 8: Fallback ---
+            // P1: Use best-tracked version instead of falling back to raw c2rust output.
+            // This preserves the highest-quality translation even if it didn't fully pass.
+            if unit.state != MigrationState::Validated {
+                // P23: Assign graduated state based on best-version quality
+                let error_count = unit.last_errors.len();
+                if let Some(best) = best_version {
+                    info!(
+                        function = %name,
+                        best_score,
+                        best_unsafe,
+                        best_compiles,
+                        "P1: using best-tracked version instead of c2rust fallback"
+                    );
+                    unit.rust_output = Some(best);
+                    unit.idiomatic_score = Some(best_score);
+                    unit.unsafe_count = Some(best_unsafe);
+                } else if let Some(ref c2rust) = unit.c2rust_output {
+                    unit.rust_output = Some(c2rust.clone());
+                }
+                unit.state =
+                    graduated_state(best_compiles, best_unsafe, best_score, 80, error_count);
                 warn!(
                     function = %name,
-                    iteration,
-                    repaired_unsafe,
-                    unsafe_ceiling,
-                    "P0: repair rejected — exceeds unsafe ceiling (P21)"
-                );
-                if let Some(ref store) = artifacts {
-                    let _ = store.save_repair_rejected(iteration, &repaired);
-                }
-                // Don't apply this repair; keep the current version and continue
-                unit.metrics.llm_calls += 1;
-                unit.metrics.repair_iterations = iteration;
-                iteration += 1;
-                continue;
-            }
-
-            // Estimate token usage for repair call
-            let input_token_est = noricum_agents::estimate_tokens(current_rust);
-            let output_token_est = noricum_agents::estimate_tokens(&repaired);
-            unit.rust_output = Some(repaired);
-            unit.state = MigrationState::Repairing(iteration);
-            unit.metrics.llm_calls += 1;
-            unit.metrics.input_tokens += input_token_est;
-            unit.metrics.output_tokens += output_token_est;
-            unit.metrics.repair_iterations = iteration;
-            check_budget(config.max_tokens_budget, config.max_llm_calls, &unit.metrics)?;
-
-            let re_validation =
-                noricum_validation::validate_with_threshold(&unit, config.min_idiomatic_score)?;
-            noricum_validation::apply_validation_with_max(&mut unit, &re_validation, max_iters);
-            if let Some(ref store) = artifacts
-                && let Ok(val_json) = serde_json::to_string_pretty(&re_validation)
-            {
-                let _ = store.save_repair_iteration(
-                    iteration,
-                    unit.rust_output.as_deref().unwrap_or(""),
-                    &val_json,
+                    state = ?unit.state,
+                    "max repair iterations reached, using graduated state (P23)"
                 );
             }
-            info!(
-                function = %name,
-                iteration,
-                state = ?unit.state,
-                compiles = re_validation.compiles,
-                idiomatic_score = re_validation.idiomatic_score,
-                unsafe_count = re_validation.unsafe_count,
-                diff_test = ?re_validation.diff_test_passed,
-                "repair iteration result"
-            );
-
-            // P1+P6b: Update best version if this repair is better AND has substance
-            let repair_has_substance = unit
-                .rust_output
-                .as_deref()
-                .is_some_and(|r| has_substance(r, &unit.c_source));
-            if repair_has_substance
-                && re_validation.unsafe_count <= unsafe_ceiling
-                && (re_validation.idiomatic_score > best_score
-                    || (re_validation.compiles && !best_compiles))
-            {
-                best_version = unit.rust_output.clone();
-                best_score = re_validation.idiomatic_score;
-                best_unsafe = re_validation.unsafe_count;
-                best_compiles = re_validation.compiles;
-                info!(
-                    function = %name,
-                    iteration,
-                    best_score,
-                    best_unsafe,
-                    best_compiles,
-                    "new best version from repair"
-                );
-                if let Some(ref store) = artifacts
-                    && let Some(ref best) = best_version
-                {
-                    let _ = store.save_best_version(best, best_score, best_unsafe, best_compiles);
-                }
-            }
-
-            if re_validation.passed {
-                info!(function = %name, "repair succeeded, validated");
-                break;
-            }
-
-            iteration += 1;
-        }
-
-        unit.metrics.repair_ms = repair_start.elapsed().as_millis() as u64;
-
-        // --- Stage 8: Fallback ---
-        // P1: Use best-tracked version instead of falling back to raw c2rust output.
-        // This preserves the highest-quality translation even if it didn't fully pass.
-        if unit.state != MigrationState::Validated {
-            // P23: Assign graduated state based on best-version quality
-            let error_count = unit.last_errors.len();
-            if let Some(best) = best_version {
-                info!(
-                    function = %name,
-                    best_score,
-                    best_unsafe,
-                    best_compiles,
-                    "P1: using best-tracked version instead of c2rust fallback"
-                );
-                unit.rust_output = Some(best);
-                unit.idiomatic_score = Some(best_score);
-                unit.unsafe_count = Some(best_unsafe);
-            } else if let Some(ref c2rust) = unit.c2rust_output {
-                unit.rust_output = Some(c2rust.clone());
-            }
-            unit.state = graduated_state(best_compiles, best_unsafe, best_score, 80, error_count);
-            warn!(
-                function = %name,
-                state = ?unit.state,
-                "max repair iterations reached, using graduated state (P23)"
-            );
-        }
-
         } // end if !hybrid_resolved
     }
 
@@ -1986,7 +1997,10 @@ async fn migrate_file_modular(
     .await?;
 
     if let Some(ref tc) = type_contract {
-        tracing::info!("P33: type contract generated ({} lines)", tc.lines().count());
+        tracing::info!(
+            "P33: type contract generated ({} lines)",
+            tc.lines().count()
+        );
     } else {
         tracing::info!("P33: no type contract (will use per-module type discovery)");
     }
@@ -1998,12 +2012,14 @@ async fn migrate_file_modular(
 
         // Write type contract to types.rs
         if let Some(ref tc) = type_contract {
-            builder.write_types(tc)
+            builder
+                .write_types(tc)
                 .map_err(|e| CoreError::Orchestration(format!("write types.rs: {e}")))?;
         }
 
         // Write Cargo.toml early so cargo check works incrementally
-        builder.write_cargo_toml()
+        builder
+            .write_cargo_toml()
             .map_err(|e| CoreError::Orchestration(format!("write Cargo.toml: {e}")))?;
 
         info!(function = %name, output_dir = %output_dir.display(), "Phase 1: CrateBuilder initialized");
@@ -2194,8 +2210,7 @@ async fn migrate_file_modular(
                 // P33: When type contract active, only accumulate function signatures
                 // (types already in contract). Without contract, use P27 behavior.
                 if type_contract.is_none() {
-                    let type_defs =
-                        noricum_tools::ast::extract_rust_type_definitions(rust_output);
+                    let type_defs = noricum_tools::ast::extract_rust_type_definitions(rust_output);
                     if !type_defs.is_empty() {
                         accumulated_rust_context.push_str(&type_defs.join("\n\n"));
                         accumulated_rust_context.push('\n');
@@ -2248,7 +2263,11 @@ async fn migrate_file_modular(
             }
             BudgetPhase::Normal => {}
         }
-        check_budget(effective_config.max_tokens_budget, effective_config.max_llm_calls, &total_metrics)?;
+        check_budget(
+            effective_config.max_tokens_budget,
+            effective_config.max_llm_calls,
+            &total_metrics,
+        )?;
     } // end for wave in waves
 
     if !any_succeeded {
@@ -2258,7 +2277,8 @@ async fn migrate_file_modular(
 
     // Phase 1: Finalize crate output — write lib.rs and run cargo check
     if let Some(ref builder) = crate_builder {
-        builder.write_lib_rs()
+        builder
+            .write_lib_rs()
             .map_err(|e| CoreError::Orchestration(format!("write lib.rs: {e}")))?;
 
         let compile_result = noricum_tools::compiler::check_crate_compiles(builder.output_dir())
@@ -2403,8 +2423,7 @@ async fn migrate_single_module(
     let mut local_metrics = noricum_ir::MigrationMetrics::default();
 
     // Create a FunctionUnit for this module
-    let mut mod_unit =
-        FunctionUnit::new(mod_name.clone(), String::new(), module.source.clone());
+    let mut mod_unit = FunctionUnit::new(mod_name.clone(), String::new(), module.source.clone());
     mod_unit.difficulty = Some(difficulty);
 
     // P19: Check if warm-start provides a seed for this module (SeedRepair)
@@ -2527,8 +2546,7 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
                         local_metrics.input_tokens +=
                             noricum_agents::estimate_tokens(&chunk.rust_source);
                     }
-                    local_metrics.translation_ms +=
-                        translation_start.elapsed().as_millis() as u64;
+                    local_metrics.translation_ms += translation_start.elapsed().as_millis() as u64;
                     chunked_result.combined
                 }
                 Err(e) => {
@@ -2567,8 +2585,7 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
                     local_metrics.llm_calls += 1;
                     local_metrics.input_tokens += noricum_agents::estimate_tokens(&augmented_c);
                     local_metrics.output_tokens += noricum_agents::estimate_tokens(&code);
-                    local_metrics.translation_ms +=
-                        translation_start.elapsed().as_millis() as u64;
+                    local_metrics.translation_ms += translation_start.elapsed().as_millis() as u64;
                     code
                 }
                 Err(e) => {
@@ -2630,9 +2647,8 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
     // Relaxed threshold: min(user_score, 50) so compiling code passes per-module.
     let module_min_score = config.min_idiomatic_score.min(50);
     // P25: Validate against accumulated assembly to resolve cross-module deps
-    let mod_validation = validate_module_with_assembly(
-        &mod_unit, &module.name, module_outputs, module_min_score,
-    )?;
+    let mod_validation =
+        validate_module_with_assembly(&mod_unit, &module.name, module_outputs, module_min_score)?;
     noricum_validation::apply_validation_with_max(
         &mut mod_unit,
         &mod_validation,
@@ -2649,8 +2665,7 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
 
     // P13: Re-translate if error count is catastrophically high
     let mut mod_validation = mod_validation;
-    if !mod_validation.passed && should_retranslate(mod_validation.compiler_errors.len(), 0)
-    {
+    if !mod_validation.passed && should_retranslate(mod_validation.compiler_errors.len(), 0) {
         let error_count = mod_validation.compiler_errors.len();
         warn!(
             module = %mod_name,
@@ -2681,7 +2696,10 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
             mod_unit.rust_output = Some(new_code);
             // P24+P25: Re-validate with assembly context and relaxed threshold
             let re_val = validate_module_with_assembly(
-                &mod_unit, &module.name, module_outputs, module_min_score,
+                &mod_unit,
+                &module.name,
+                module_outputs,
+                module_min_score,
             )?;
             noricum_validation::apply_validation_with_max(
                 &mut mod_unit,
@@ -2781,8 +2799,7 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
             if repaired_unsafe > unsafe_ceiling {
                 warn!(module = %mod_name, iter, repaired_unsafe, unsafe_ceiling, "P0: repair rejected — exceeds unsafe ceiling (P21)");
                 if let Some(store) = artifacts {
-                    let _ =
-                        store.save_module_repair_rejected(&module.name, iter, &repaired);
+                    let _ = store.save_module_repair_rejected(&module.name, iter, &repaired);
                 }
                 continue;
             }
@@ -2792,13 +2809,12 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
 
             // P24+P25: Validate repair against assembly context
             let re_validation = validate_module_with_assembly(
-                &mod_unit, &module.name, module_outputs, module_min_score,
+                &mod_unit,
+                &module.name,
+                module_outputs,
+                module_min_score,
             )?;
-            noricum_validation::apply_validation_with_max(
-                &mut mod_unit,
-                &re_validation,
-                max_iters,
-            );
+            noricum_validation::apply_validation_with_max(&mut mod_unit, &re_validation, max_iters);
 
             info!(
                 module = %mod_name,
@@ -2820,8 +2836,7 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
                     re_validation.idiomatic_score,
                     re_validation.unsafe_count
                 );
-                let _ =
-                    store.save_module_repair_iteration(&module.name, iter, rust, &val_json);
+                let _ = store.save_module_repair_iteration(&module.name, iter, rust, &val_json);
             }
 
             // P1: Best-version tracking
@@ -2839,7 +2854,11 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
                 break;
             }
 
-            check_budget(config.max_tokens_budget, config.max_llm_calls, &local_metrics)?;
+            check_budget(
+                config.max_tokens_budget,
+                config.max_llm_calls,
+                &local_metrics,
+            )?;
         }
 
         local_metrics.repair_ms += repair_start.elapsed().as_millis() as u64;
@@ -2853,9 +2872,8 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
                 mod_unit.idiomatic_score = Some(best_score);
             }
             // P23: Graduated state for module
-            mod_unit.state = graduated_state(
-                best_compiles, mod_unsafe, best_score, 80, mod_error_count,
-            );
+            mod_unit.state =
+                graduated_state(best_compiles, mod_unsafe, best_score, 80, mod_error_count);
             if !best_compiles {
                 warn!(module = %mod_name, state = ?mod_unit.state, "module did not reach Validated state (P23)");
             }
@@ -2874,21 +2892,22 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
             );
 
             // Step 1: Re-translate once with truncation hint
-            let retranslated = noricum_agents::translation::translate_function_with_patterns_and_temperature(
-                client,
-                &select_model(provider_config, difficulty, "translation")?.model,
-                &format!(
-                    "/* IMPORTANT: Your previous translation of this code was TRUNCATED. \
+            let retranslated =
+                noricum_agents::translation::translate_function_with_patterns_and_temperature(
+                    client,
+                    &select_model(provider_config, difficulty, "translation")?.model,
+                    &format!(
+                        "/* IMPORTANT: Your previous translation of this code was TRUNCATED. \
                     Ensure ALL function bodies have matching closing braces. \
                     Output the COMPLETE translation. */\n\n{}",
-                    module.source
-                ),
-                None,
-                analysis,
-                &PatternStore::load_seed_patterns().find_relevant(&module.source, 3),
-                Some(0.3), // Lower temperature for more deterministic output
-            )
-            .await;
+                        module.source
+                    ),
+                    None,
+                    analysis,
+                    &PatternStore::load_seed_patterns().find_relevant(&module.source, 3),
+                    Some(0.3), // Lower temperature for more deterministic output
+                )
+                .await;
 
             let mut fixed = false;
             if let Ok(retrans_code) = retranslated {
@@ -2909,7 +2928,9 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
                 let truncated = noricum_tools::repair_rules::auto_close_braces(&rust_code);
                 mod_unit.rust_output = Some(truncated);
                 // Mark as non-compiling so it doesn't pollute assembly context (P26)
-                mod_unit.last_errors.push(format!("P32: truncated {brace_depth} unclosed brace(s)"));
+                mod_unit
+                    .last_errors
+                    .push(format!("P32: truncated {brace_depth} unclosed brace(s)"));
             }
         }
     }
@@ -2917,8 +2938,7 @@ just use it (e.g., `ZipArchive`, `ZipError`). Do NOT create your own version.\n\
     // Build the result — unit contains the FunctionUnit with rust_output
     let validated = mod_unit.state == MigrationState::Validated
         || mod_unit.state == MigrationState::CompilesUnsafe;
-    let compiles = mod_unit.state == MigrationState::Validated
-        || mod_unit.last_errors.is_empty();
+    let compiles = mod_unit.state == MigrationState::Validated || mod_unit.last_errors.is_empty();
 
     let artifact = crate::artifacts::ModuleArtifact {
         name: module.name.clone(),
@@ -3337,9 +3357,6 @@ fn main() {
         assert!(config.skip_c2rust);
     }
 
-
-
-
     #[test]
     fn test_max_unsafe_allowance() {
         // With max_unsafe=None (default), baseline_unsafe=0 means any unsafe rejects
@@ -3391,7 +3408,4 @@ fn main() {
         let should_hint = has_errors && iter >= 3 && unsafe_ceiling > 0;
         assert!(!should_hint);
     }
-
-
-
 }

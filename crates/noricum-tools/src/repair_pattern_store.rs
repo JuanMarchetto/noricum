@@ -95,8 +95,8 @@ impl RepairPatternStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::write(path, json)?;
         debug!(count = self.patterns.len(), path = %path.display(), "saved repair pattern store");
         Ok(())
@@ -148,18 +148,22 @@ impl RepairPatternStore {
 
     /// Record a successful application of a pattern (error was fixed).
     pub fn record_success(&mut self, error_code: &str, error_message_regex: &str) {
-        if let Some(p) = self.patterns.iter_mut().find(|p| {
-            p.error_code == error_code && p.error_message_regex == error_message_regex
-        }) {
+        if let Some(p) = self
+            .patterns
+            .iter_mut()
+            .find(|p| p.error_code == error_code && p.error_message_regex == error_message_regex)
+        {
             p.success_count += 1;
         }
     }
 
     /// Record a failed application of a pattern (error persisted after fix).
     pub fn record_failure(&mut self, error_code: &str, error_message_regex: &str) {
-        if let Some(p) = self.patterns.iter_mut().find(|p| {
-            p.error_code == error_code && p.error_message_regex == error_message_regex
-        }) {
+        if let Some(p) = self
+            .patterns
+            .iter_mut()
+            .find(|p| p.error_code == error_code && p.error_message_regex == error_message_regex)
+        {
             p.failure_count += 1;
         }
     }
@@ -268,11 +272,10 @@ impl RepairPatternStore {
             RepairPattern {
                 error_code: "E0425".to_string(),
                 error_message_regex: "cannot find value .+ in this scope".to_string(),
-                fix_description:
-                    "R13: Field name prefix normalization — m_xyz vs xyz mismatch".to_string(),
-                fix_diff:
-                    "self.m_field -> self.field (or vice versa, matching struct definition)"
-                        .to_string(),
+                fix_description: "R13: Field name prefix normalization — m_xyz vs xyz mismatch"
+                    .to_string(),
+                fix_diff: "self.m_field -> self.field (or vice versa, matching struct definition)"
+                    .to_string(),
                 success_count: 20,
                 failure_count: 2,
                 source_project: "miniz_zip".to_string(),
@@ -294,8 +297,7 @@ impl RepairPatternStore {
         for seed in seeds {
             // Only add if not already present (don't overwrite learned counts)
             if !store.patterns.iter().any(|p| {
-                p.error_code == seed.error_code
-                    && p.error_message_regex == seed.error_message_regex
+                p.error_code == seed.error_code && p.error_message_regex == seed.error_message_regex
             }) {
                 store.patterns.push(seed);
             }
@@ -461,8 +463,8 @@ mod tests {
     fn test_repair_pattern_creation() {
         let pattern = RepairPattern {
             error_code: "E0599".to_string(),
-            error_message_regex:
-                "no method named `clone`.*trait bounds were not satisfied".to_string(),
+            error_message_regex: "no method named `clone`.*trait bounds were not satisfied"
+                .to_string(),
             fix_description: "Add Clone bound to generic type parameter".to_string(),
             fix_diff: "- fn foo<T: Trait>(x: T)\n+ fn foo<T: Trait + Clone>(x: T)".to_string(),
             success_count: 1,
@@ -550,8 +552,7 @@ mod tests {
 
     #[test]
     fn test_store_load_nonexistent_returns_empty() {
-        let store =
-            RepairPatternStore::load_from(std::path::Path::new("/nonexistent/path.json"));
+        let store = RepairPatternStore::load_from(std::path::Path::new("/nonexistent/path.json"));
         assert!(store.is_ok());
         assert!(store.unwrap().is_empty());
     }
@@ -642,15 +643,23 @@ mod tests {
         let errors_before = vec![crate::repair_rules::CompilerError {
             code: "E0599".to_string(),
             line: 2,
-            message:
-                "no method named `clone` found for type `T`: trait bounds were not satisfied"
-                    .to_string(),
+            message: "no method named `clone` found for type `T`: trait bounds were not satisfied"
+                .to_string(),
         }];
         let errors_after: Vec<crate::repair_rules::CompilerError> = vec![]; // no errors
 
-        let patterns =
-            extract_patterns_from_diff(before, after, &errors_before, &errors_after, "test_project");
-        assert_eq!(patterns.len(), 1, "should extract 1 pattern for fixed error");
+        let patterns = extract_patterns_from_diff(
+            before,
+            after,
+            &errors_before,
+            &errors_after,
+            "test_project",
+        );
+        assert_eq!(
+            patterns.len(),
+            1,
+            "should extract 1 pattern for fixed error"
+        );
         assert_eq!(patterns[0].error_code, "E0599");
         assert!(patterns[0].fix_diff.contains("Clone"));
     }
@@ -666,8 +675,13 @@ mod tests {
         }];
         let errors_after = errors_before.clone(); // same errors
 
-        let patterns =
-            extract_patterns_from_diff(before, after, &errors_before, &errors_after, "test_project");
+        let patterns = extract_patterns_from_diff(
+            before,
+            after,
+            &errors_before,
+            &errors_after,
+            "test_project",
+        );
         assert!(
             patterns.is_empty(),
             "should not extract patterns when errors persist"
@@ -739,11 +753,7 @@ mod tests {
 
         // Second load should not duplicate seeds
         let store2 = RepairPatternStore::load_with_seeds(&path);
-        assert_eq!(
-            store2.len(),
-            count1,
-            "seeds should not duplicate on reload"
-        );
+        assert_eq!(store2.len(), count1, "seeds should not duplicate on reload");
     }
 
     // --- Task 3: build_repair_pattern_context ---

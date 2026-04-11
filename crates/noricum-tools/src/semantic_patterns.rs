@@ -24,7 +24,10 @@ pub fn detect_semantic_patterns(c_source: &str) -> Vec<SemanticHint> {
     detect_io_patterns(c_source, &mut hints);
     detect_concurrency(c_source, &mut hints);
 
-    debug!(hint_count = hints.len(), "semantic pattern detection complete");
+    debug!(
+        hint_count = hints.len(),
+        "semantic pattern detection complete"
+    );
     hints
 }
 
@@ -40,8 +43,8 @@ fn detect_memory_management(c_source: &str, hints: &mut Vec<SemanticHint>) {
     }
 
     // Extract function names that contain malloc/calloc/realloc
-    let fn_re = Regex::new(r"(?m)^\w[\w\s\*]*\s+(\w+)\s*\([^)]*\)\s*\{")
-        .expect("static regex is valid");
+    let fn_re =
+        Regex::new(r"(?m)^\w[\w\s\*]*\s+(\w+)\s*\([^)]*\)\s*\{").expect("static regex is valid");
 
     let mut alloc_fns = Vec::new();
     let mut free_fns = Vec::new();
@@ -147,8 +150,7 @@ fn detect_data_structures(c_source: &str, hints: &mut Vec<SemanticHint>) {
 
     // --- Hash table detection ---
     // Heuristic: struct with `**buckets` or name contains "hash", plus a hash function
-    let has_buckets =
-        c_source.contains("**buckets") || c_source.contains("** buckets");
+    let has_buckets = c_source.contains("**buckets") || c_source.contains("** buckets");
     let has_hash_fn = Regex::new(r"(?i)\b(hash|djb2|fnv|murmur)\b")
         .expect("static regex")
         .is_match(c_source);
@@ -158,8 +160,8 @@ fn detect_data_structures(c_source: &str, hints: &mut Vec<SemanticHint>) {
         && (c_source.contains("hash") || c_source.contains("Hash"))
     {
         let mut involved = Vec::new();
-        let struct_re = Regex::new(r"(?:typedef\s+)?struct\s+(\w*[Hh]ash\w*)")
-            .expect("static regex");
+        let struct_re =
+            Regex::new(r"(?:typedef\s+)?struct\s+(\w*[Hh]ash\w*)").expect("static regex");
         for cap in struct_re.captures_iter(c_source) {
             if let Some(name) = cap.get(1) {
                 involved.push(name.as_str().to_string());
@@ -180,9 +182,10 @@ fn detect_data_structures(c_source: &str, hints: &mut Vec<SemanticHint>) {
     let has_left = c_source.contains("*left") || c_source.contains("-> left");
     let has_right = c_source.contains("*right") || c_source.contains("-> right");
     if has_left && has_right {
-        let struct_re =
-            Regex::new(r"(?s)(?:typedef\s+)?struct\s+(\w+)\s*\{[^}]*\*\s*left\s*;[^}]*\*\s*right\s*;[^}]*\}")
-                .expect("static regex");
+        let struct_re = Regex::new(
+            r"(?s)(?:typedef\s+)?struct\s+(\w+)\s*\{[^}]*\*\s*left\s*;[^}]*\*\s*right\s*;[^}]*\}",
+        )
+        .expect("static regex");
         let involved: Vec<String> = struct_re
             .captures_iter(c_source)
             .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
@@ -201,8 +204,12 @@ fn detect_data_structures(c_source: &str, hints: &mut Vec<SemanticHint>) {
 
     // --- Stack detection ---
     // Heuristic: functions named push/pop with array + top/sp index
-    let has_push = Regex::new(r"\bpush\s*\(").expect("static regex").is_match(c_source);
-    let has_pop = Regex::new(r"\bpop\s*\(").expect("static regex").is_match(c_source);
+    let has_push = Regex::new(r"\bpush\s*\(")
+        .expect("static regex")
+        .is_match(c_source);
+    let has_pop = Regex::new(r"\bpop\s*\(")
+        .expect("static regex")
+        .is_match(c_source);
     let has_top = source_lower.contains("top") || source_lower.contains("->sp");
     if has_push && has_pop && has_top {
         hints.push(SemanticHint::DataStructure {
@@ -241,8 +248,7 @@ fn detect_algorithms(c_source: &str, hints: &mut Vec<SemanticHint>) {
     if has_qsort {
         let mut functions = vec!["qsort".to_string()];
         // Find the comparison function name
-        let cmp_re =
-            Regex::new(r"int\s+(\w+)\s*\(\s*const\s+void").expect("static regex");
+        let cmp_re = Regex::new(r"int\s+(\w+)\s*\(\s*const\s+void").expect("static regex");
         for cap in cmp_re.captures_iter(c_source) {
             if let Some(name) = cap.get(1) {
                 functions.push(name.as_str().to_string());
@@ -257,8 +263,7 @@ fn detect_algorithms(c_source: &str, hints: &mut Vec<SemanticHint>) {
         hints.push(SemanticHint::Algorithm {
             kind: "sort".to_string(),
             functions: vec!["(manual sort detected)".to_string()],
-            suggestion: "slice::sort() or sort_unstable_by() — avoid manual swap loops"
-                .to_string(),
+            suggestion: "slice::sort() or sort_unstable_by() — avoid manual swap loops".to_string(),
         });
     }
 
@@ -266,11 +271,10 @@ fn detect_algorithms(c_source: &str, hints: &mut Vec<SemanticHint>) {
     // Heuristic: low/high/mid variables with halving logic
     let has_low_high = (source_lower.contains("low") || source_lower.contains("left"))
         && (source_lower.contains("high") || source_lower.contains("right"));
-    let has_mid =
-        Regex::new(r"\bmid\b\s*=.*[/+].*2")
-            .expect("static regex")
-            .is_match(c_source)
-            || c_source.contains(">> 1");
+    let has_mid = Regex::new(r"\bmid\b\s*=.*[/+].*2")
+        .expect("static regex")
+        .is_match(c_source)
+        || c_source.contains(">> 1");
     if has_low_high && has_mid {
         let fn_re = Regex::new(r"(?i)\b(\w*search\w*)\s*\(").expect("static regex");
         let functions: Vec<String> = fn_re
@@ -325,9 +329,8 @@ fn detect_algorithms(c_source: &str, hints: &mut Vec<SemanticHint>) {
         hints.push(SemanticHint::Algorithm {
             kind: "checksum".to_string(),
             functions: checksum_fns,
-            suggestion:
-                "wrapping arithmetic (wrapping_add, wrapping_shl) for bit-exact results"
-                    .to_string(),
+            suggestion: "wrapping arithmetic (wrapping_add, wrapping_shl) for bit-exact results"
+                .to_string(),
         });
     }
 
@@ -355,13 +358,12 @@ fn detect_control_flow(c_source: &str, hints: &mut Vec<SemanticHint>) {
 
     // --- State machine detection ---
     // Heuristic: enum with STATE_* constants + switch on state variable + state transitions
-    let has_state_enum =
-        Regex::new(r"(?i)\bSTATE_\w+")
+    let has_state_enum = Regex::new(r"(?i)\bSTATE_\w+")
+        .expect("static regex")
+        .is_match(c_source)
+        || Regex::new(r"enum\s+\w*[Ss]tate\w*")
             .expect("static regex")
-            .is_match(c_source)
-            || Regex::new(r"enum\s+\w*[Ss]tate\w*")
-                .expect("static regex")
-                .is_match(c_source);
+            .is_match(c_source);
     let has_switch_state = Regex::new(r"switch\s*\(\s*\w*->?\s*state")
         .expect("static regex")
         .is_match(c_source);
@@ -383,8 +385,7 @@ fn detect_control_flow(c_source: &str, hints: &mut Vec<SemanticHint>) {
         hints.push(SemanticHint::ControlFlow {
             kind: "state_machine".to_string(),
             functions: vec![format!("{} states detected", states.len())],
-            suggestion: "enum State + match expression — one branch per state, no goto"
-                .to_string(),
+            suggestion: "enum State + match expression — one branch per state, no goto".to_string(),
         });
     }
 
@@ -619,7 +620,10 @@ void destroy_node(Node *n) {
     fn test_no_false_positive_on_simple_code() {
         let c_source = "int add(int a, int b) { return a + b; }";
         let hints = detect_semantic_patterns(c_source);
-        assert!(hints.is_empty(), "simple arithmetic should produce no hints");
+        assert!(
+            hints.is_empty(),
+            "simple arithmetic should produce no hints"
+        );
     }
 
     #[test]
@@ -635,7 +639,10 @@ void grow_buffer(Buffer *buf) {
             .iter()
             .filter(|h| matches!(h, SemanticHint::MemoryManagement { .. }))
             .collect();
-        assert!(!mem_hints.is_empty(), "should detect realloc as memory management");
+        assert!(
+            !mem_hints.is_empty(),
+            "should detect realloc as memory management"
+        );
     }
 
     #[test]
@@ -657,7 +664,9 @@ void traverse(Node *head) {
         let hints = detect_semantic_patterns(c_source);
         let ds_hints: Vec<_> = hints
             .iter()
-            .filter(|h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "linked_list"))
+            .filter(
+                |h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "linked_list"),
+            )
             .collect();
         assert!(!ds_hints.is_empty(), "should detect linked list");
     }
@@ -688,7 +697,9 @@ unsigned long hash_key(const char *str) {
         let hints = detect_semantic_patterns(c_source);
         let ds_hints: Vec<_> = hints
             .iter()
-            .filter(|h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "hash_table"))
+            .filter(
+                |h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "hash_table"),
+            )
             .collect();
         assert!(!ds_hints.is_empty(), "should detect hash table");
     }
@@ -768,7 +779,9 @@ int binary_search(int *arr, int n, int target) {
         let hints = detect_semantic_patterns(c_source);
         let alg_hints: Vec<_> = hints
             .iter()
-            .filter(|h| matches!(h, SemanticHint::Algorithm { kind, .. } if kind == "binary_search"))
+            .filter(
+                |h| matches!(h, SemanticHint::Algorithm { kind, .. } if kind == "binary_search"),
+            )
             .collect();
         assert!(!alg_hints.is_empty(), "should detect binary search pattern");
     }
@@ -844,7 +857,9 @@ void parse(Parser *p, const char *data, size_t len) {
         let hints = detect_semantic_patterns(c_source);
         let cf_hints: Vec<_> = hints
             .iter()
-            .filter(|h| matches!(h, SemanticHint::ControlFlow { kind, .. } if kind == "state_machine"))
+            .filter(
+                |h| matches!(h, SemanticHint::ControlFlow { kind, .. } if kind == "state_machine"),
+            )
             .collect();
         assert!(!cf_hints.is_empty(), "should detect state machine pattern");
     }
@@ -913,7 +928,9 @@ error:
         let hints = detect_semantic_patterns(c_source);
         let cf_hints: Vec<_> = hints
             .iter()
-            .filter(|h| matches!(h, SemanticHint::ControlFlow { kind, .. } if kind == "goto_cleanup"))
+            .filter(
+                |h| matches!(h, SemanticHint::ControlFlow { kind, .. } if kind == "goto_cleanup"),
+            )
             .collect();
         assert!(!cf_hints.is_empty(), "should detect goto cleanup pattern");
     }
@@ -1033,16 +1050,16 @@ void ht_destroy(HashTable *ht) {
 
         // Should detect hash table
         assert!(
-            hints
-                .iter()
-                .any(|h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "hash_table")),
+            hints.iter().any(
+                |h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "hash_table")
+            ),
             "should detect hash table in hash_table.c fixture"
         );
         // Should detect linked list (collision chaining)
         assert!(
-            hints
-                .iter()
-                .any(|h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "linked_list")),
+            hints.iter().any(
+                |h| matches!(h, SemanticHint::DataStructure { kind, .. } if kind == "linked_list")
+            ),
             "should detect linked list in hash_table.c (collision chains)"
         );
         // Should detect memory management

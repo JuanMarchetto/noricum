@@ -289,7 +289,15 @@ impl LlmClient {
             }
             LlmClient::Ollama(client, num_ctx) => {
                 let params = serde_json::json!({ "num_ctx": num_ctx });
-                build_and_prompt!(client, model, preamble, temperature, max_tokens, message, params)
+                build_and_prompt!(
+                    client,
+                    model,
+                    preamble,
+                    temperature,
+                    max_tokens,
+                    message,
+                    params
+                )
             }
         }
     }
@@ -316,7 +324,15 @@ impl LlmClient {
             }
             LlmClient::Ollama(client, num_ctx) => {
                 let params = serde_json::json!({ "num_ctx": num_ctx });
-                build_and_complete!(client, model, preamble, temperature, max_tokens, message, params)
+                build_and_complete!(
+                    client,
+                    model,
+                    preamble,
+                    temperature,
+                    max_tokens,
+                    message,
+                    params
+                )
             }
         }
     }
@@ -422,10 +438,11 @@ pub struct LlmClientPool {
 impl LlmClientPool {
     /// Build a pool from provider config, creating all available clients.
     pub fn from_config(config: &ProviderConfig) -> Result<Self, AgentError> {
-        let anthropic = config
-            .anthropic_api_key
-            .as_ref()
-            .and_then(|key| create_anthropic_client_with_key(key).ok().map(LlmClient::Anthropic));
+        let anthropic = config.anthropic_api_key.as_ref().and_then(|key| {
+            create_anthropic_client_with_key(key)
+                .ok()
+                .map(LlmClient::Anthropic)
+        });
 
         let deepseek = config
             .deepseek_api_key
@@ -653,13 +670,12 @@ pub fn parse_task_routing_spec(spec: &str) -> Result<(PipelineTask, TaskModelCon
     let config_parts: Vec<&str> = parts[1].split('/').collect();
 
     let provider = Some(config_parts[0].to_string());
-    let model = config_parts.get(1).filter(|s| !s.is_empty()).map(|s| s.to_string());
-    let temperature = config_parts
-        .get(2)
-        .and_then(|s| s.parse::<f64>().ok());
-    let num_ctx = config_parts
-        .get(3)
-        .and_then(|s| s.parse::<u64>().ok());
+    let model = config_parts
+        .get(1)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let temperature = config_parts.get(2).and_then(|s| s.parse::<f64>().ok());
+    let num_ctx = config_parts.get(3).and_then(|s| s.parse::<u64>().ok());
 
     Ok((
         task,
@@ -1036,16 +1052,27 @@ mod tests {
             },
         );
 
-        let resolved =
-            resolve_task(&pool, &routing, PipelineTask::Analysis, Difficulty::Easy, 0.3).unwrap();
+        let resolved = resolve_task(
+            &pool,
+            &routing,
+            PipelineTask::Analysis,
+            Difficulty::Easy,
+            0.3,
+        )
+        .unwrap();
         assert_eq!(resolved.model, "custom-model");
         assert_eq!(resolved.temperature, 0.1);
         assert_eq!(resolved.provider, ProviderKind::Ollama);
 
         // Non-overridden task uses default
-        let resolved_default =
-            resolve_task(&pool, &routing, PipelineTask::Translation, Difficulty::Easy, 0.3)
-                .unwrap();
+        let resolved_default = resolve_task(
+            &pool,
+            &routing,
+            PipelineTask::Translation,
+            Difficulty::Easy,
+            0.3,
+        )
+        .unwrap();
         assert_eq!(resolved_default.provider, ProviderKind::Ollama);
         assert_eq!(resolved_default.temperature, 0.3);
     }

@@ -54,8 +54,7 @@ pub async fn cmd_migrate(opts: MigrateParams) -> Result<()> {
         );
     }
 
-    let force_ollama =
-        opts.ollama_model.is_some() || opts.provider.as_deref() == Some("ollama");
+    let force_ollama = opts.ollama_model.is_some() || opts.provider.as_deref() == Some("ollama");
     let config = MigrationConfig {
         // Force Ollama: clear API keys so fallback chain doesn't intercept
         anthropic_api_key: if force_ollama {

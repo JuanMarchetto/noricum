@@ -60,7 +60,9 @@ pub fn gather_context(source: &str, fn_name: &str) -> String {
     let mut fn_start = None;
 
     for (i, line) in lines.iter().enumerate() {
-        if let Some(caps) = fn_re.captures(line) && &caps[1] == fn_name {
+        if let Some(caps) = fn_re.captures(line)
+            && &caps[1] == fn_name
+        {
             fn_start = Some(i);
             break;
         }
@@ -90,11 +92,49 @@ pub fn gather_context(source: &str, fn_name: &str) -> String {
 
     // Filter out common Rust built-in types and keywords.
     let builtins = [
-        "Some", "None", "Ok", "Err", "Self", "String", "Vec", "Box", "Option", "Result",
-        "HashMap", "HashSet", "BTreeMap", "Arc", "Rc", "Mutex", "RefCell", "Cow", "Pin",
-        "Future", "Iterator", "Display", "Debug", "Clone", "Copy", "Default", "From", "Into",
-        "Send", "Sync", "Sized", "Unpin", "Drop", "Fn", "FnMut", "FnOnce", "Ord", "Eq",
-        "PartialOrd", "PartialEq", "Hash", "Serialize", "Deserialize",
+        "Some",
+        "None",
+        "Ok",
+        "Err",
+        "Self",
+        "String",
+        "Vec",
+        "Box",
+        "Option",
+        "Result",
+        "HashMap",
+        "HashSet",
+        "BTreeMap",
+        "Arc",
+        "Rc",
+        "Mutex",
+        "RefCell",
+        "Cow",
+        "Pin",
+        "Future",
+        "Iterator",
+        "Display",
+        "Debug",
+        "Clone",
+        "Copy",
+        "Default",
+        "From",
+        "Into",
+        "Send",
+        "Sync",
+        "Sized",
+        "Unpin",
+        "Drop",
+        "Fn",
+        "FnMut",
+        "FnOnce",
+        "Ord",
+        "Eq",
+        "PartialOrd",
+        "PartialEq",
+        "Hash",
+        "Serialize",
+        "Deserialize",
     ];
     referenced_types.retain(|t| !builtins.contains(&t.as_str()));
 
@@ -123,11 +163,53 @@ pub fn gather_context(source: &str, fn_name: &str) -> String {
     called_fns.sort();
     called_fns.dedup();
     let keywords = [
-        "if", "for", "while", "match", "loop", "return", "let", "mut", "fn", "pub", "use",
-        "impl", "struct", "enum", "type", "where", "as", "in", "ref", "self", "super", "crate",
-        "mod", "const", "static", "unsafe", "extern", "async", "await", "move", "println",
-        "eprintln", "format", "write", "writeln", "vec", "todo", "unimplemented", "panic",
-        "assert", "assert_eq", "assert_ne", "debug_assert", "Some", "None", "Ok", "Err",
+        "if",
+        "for",
+        "while",
+        "match",
+        "loop",
+        "return",
+        "let",
+        "mut",
+        "fn",
+        "pub",
+        "use",
+        "impl",
+        "struct",
+        "enum",
+        "type",
+        "where",
+        "as",
+        "in",
+        "ref",
+        "self",
+        "super",
+        "crate",
+        "mod",
+        "const",
+        "static",
+        "unsafe",
+        "extern",
+        "async",
+        "await",
+        "move",
+        "println",
+        "eprintln",
+        "format",
+        "write",
+        "writeln",
+        "vec",
+        "todo",
+        "unimplemented",
+        "panic",
+        "assert",
+        "assert_eq",
+        "assert_ne",
+        "debug_assert",
+        "Some",
+        "None",
+        "Ok",
+        "Err",
     ];
     called_fns.retain(|f| f != fn_name && !keywords.contains(&f.as_str()));
 
@@ -166,7 +248,9 @@ pub fn splice_function(source: &str, fn_name: &str, new_fn: &str) -> String {
 
     let mut fn_start = None;
     for (i, line) in lines.iter().enumerate() {
-        if let Some(caps) = fn_re.captures(line) && &caps[1] == fn_name {
+        if let Some(caps) = fn_re.captures(line)
+            && &caps[1] == fn_name
+        {
             fn_start = Some(i);
             break;
         }

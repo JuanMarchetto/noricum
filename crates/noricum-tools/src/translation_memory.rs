@@ -63,8 +63,8 @@ impl TranslationMemory {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::write(path, json)?;
         debug!(entries = self.entries.len(), path = %path.display(), "saved translation memory");
         Ok(())
@@ -236,12 +236,12 @@ fn parse_signature(sig: &str) -> ParsedSignature {
     };
 
     // Extract parameter types
-    let param_str =
-        if let (Some(start), Some(end)) = (normalized.find('('), normalized.rfind(')')) {
-            &normalized[start + 1..end]
-        } else {
-            ""
-        };
+    let param_str = if let (Some(start), Some(end)) = (normalized.find('('), normalized.rfind(')'))
+    {
+        &normalized[start + 1..end]
+    } else {
+        ""
+    };
 
     let param_types: Vec<String> = if param_str.trim().is_empty() || param_str.trim() == "void" {
         Vec::new()
@@ -434,8 +434,7 @@ mod tests {
 
     #[test]
     fn test_memory_load_nonexistent_returns_empty() {
-        let memory =
-            TranslationMemory::load_from(std::path::Path::new("/nonexistent/path.json"));
+        let memory = TranslationMemory::load_from(std::path::Path::new("/nonexistent/path.json"));
         assert!(memory.is_ok());
         assert!(memory.unwrap().is_empty());
     }
@@ -464,7 +463,10 @@ mod tests {
     #[test]
     fn test_truncate_to_lines() {
         let source = "line1\nline2\nline3\nline4\nline5";
-        assert_eq!(truncate_to_lines(source, 3), "line1\nline2\nline3\n// ... (2 more lines)");
+        assert_eq!(
+            truncate_to_lines(source, 3),
+            "line1\nline2\nline3\n// ... (2 more lines)"
+        );
         assert_eq!(truncate_to_lines(source, 10), source);
     }
 

@@ -93,23 +93,27 @@ pub(crate) async fn repair_module_in_crate(
 ) -> Result<bool, crate::CoreError> {
     let mut iteration = 0u32;
     let baseline_unsafe = {
-        let source = builder.read_module(module_name)
+        let source = builder
+            .read_module(module_name)
             .map_err(|e| crate::CoreError::Orchestration(format!("read module: {e}")))?;
         noricum_tools::ast::count_unsafe_blocks_ast(&source)
     };
-    let unsafe_ceiling = max_unsafe_blocks.unwrap_or(baseline_unsafe).max(baseline_unsafe);
+    let unsafe_ceiling = max_unsafe_blocks
+        .unwrap_or(baseline_unsafe)
+        .max(baseline_unsafe);
 
     while iteration < max_iters {
         // Compile the whole crate, filtering errors for this module
-        let compile_result = noricum_tools::compiler::check_module_compiles(
-            builder.output_dir(), module_name,
-        ).map_err(crate::CoreError::Tool)?;
+        let compile_result =
+            noricum_tools::compiler::check_module_compiles(builder.output_dir(), module_name)
+                .map_err(crate::CoreError::Tool)?;
 
         if compile_result.success {
             return Ok(true);
         }
 
-        let current_source = builder.read_module(module_name)
+        let current_source = builder
+            .read_module(module_name)
             .map_err(|e| crate::CoreError::Orchestration(format!("read module: {e}")))?;
 
         // Apply mechanical rules first (R0-R14)
@@ -117,13 +121,14 @@ pub(crate) async fn repair_module_in_crate(
         let fixed = noricum_tools::repair_rules::apply_all_rules(&current_source, &errors);
 
         if fixed != current_source {
-            builder.write_module(module_name, &fixed)
+            builder
+                .write_module(module_name, &fixed)
                 .map_err(|e| crate::CoreError::Orchestration(format!("write module: {e}")))?;
 
             // Re-check after rules
-            let re_check = noricum_tools::compiler::check_module_compiles(
-                builder.output_dir(), module_name,
-            ).map_err(crate::CoreError::Tool)?;
+            let re_check =
+                noricum_tools::compiler::check_module_compiles(builder.output_dir(), module_name)
+                    .map_err(crate::CoreError::Tool)?;
 
             if re_check.success {
                 return Ok(true);
@@ -131,9 +136,10 @@ pub(crate) async fn repair_module_in_crate(
         }
 
         // LLM repair on this module's source
-        let error_strings: Vec<String> = errors.iter().map(|e| {
-            format!("{}: {} (line {})", e.code, e.message, e.line)
-        }).collect();
+        let error_strings: Vec<String> = errors
+            .iter()
+            .map(|e| format!("{}: {} (line {})", e.code, e.message, e.line))
+            .collect();
 
         let repaired = noricum_agents::repair::repair_function_full(
             client,
@@ -146,14 +152,18 @@ pub(crate) async fn repair_module_in_crate(
             max_iters,
             repair_base_temperature,
             None,
-        ).await;
+        )
+        .await;
 
         match repaired {
             Ok(new_source) => {
                 let new_unsafe = noricum_tools::ast::count_unsafe_blocks_ast(&new_source);
                 if new_unsafe <= unsafe_ceiling {
-                    builder.write_module(module_name, &new_source)
-                        .map_err(|e| crate::CoreError::Orchestration(format!("write module: {e}")))?;
+                    builder
+                        .write_module(module_name, &new_source)
+                        .map_err(|e| {
+                            crate::CoreError::Orchestration(format!("write module: {e}"))
+                        })?;
                 }
             }
             Err(e) => {

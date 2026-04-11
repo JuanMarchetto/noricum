@@ -1086,8 +1086,9 @@ pub fn extract_rust_signatures(rust_source: &str) -> Vec<String> {
 /// Returns a list of function names found via `fn name(` pattern.
 /// Used to detect which C functions are missing from the Rust translation.
 pub fn extract_rust_function_names(rust_source: &str) -> Vec<String> {
-    let re = regex::Regex::new(r"(?m)^\s*(?:pub\s+)?(?:pub\(crate\)\s+)?(?:async\s+)?fn\s+(\w+)\s*\(")
-        .expect("invalid regex");
+    let re =
+        regex::Regex::new(r"(?m)^\s*(?:pub\s+)?(?:pub\(crate\)\s+)?(?:async\s+)?fn\s+(\w+)\s*\(")
+            .expect("invalid regex");
     re.captures_iter(rust_source)
         .map(|cap| cap[1].to_string())
         .collect()
@@ -1561,7 +1562,12 @@ pub fn read_archive(a: &ZipArchive) -> usize {
 }
 ";
         let defs = extract_rust_type_definitions(rust);
-        assert_eq!(defs.len(), 4, "should extract struct, enum, const, impl: {:?}", defs);
+        assert_eq!(
+            defs.len(),
+            4,
+            "should extract struct, enum, const, impl: {:?}",
+            defs
+        );
         assert!(defs[0].contains("pub struct ZipArchive"));
         assert!(defs[0].contains("pub name: String"));
         assert!(defs[1].contains("pub enum ZipError"));

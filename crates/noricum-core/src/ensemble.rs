@@ -73,24 +73,21 @@ mod tests {
 
     #[test]
     fn test_should_trigger_ensemble_disabled() {
-        let mut unit =
-            FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
         unit.state = MigrationState::Repairing(3);
         assert!(!should_trigger_ensemble(&unit, false));
     }
 
     #[test]
     fn test_should_trigger_ensemble_early_repair() {
-        let mut unit =
-            FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
         unit.state = MigrationState::Repairing(1);
         assert!(!should_trigger_ensemble(&unit, true));
     }
 
     #[test]
     fn test_should_trigger_ensemble_after_threshold() {
-        let mut unit =
-            FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
         unit.state = MigrationState::Repairing(2);
         unit.last_errors = vec!["error".into()];
         assert!(should_trigger_ensemble(&unit, true));
@@ -98,24 +95,21 @@ mod tests {
 
     #[test]
     fn test_should_trigger_ensemble_fallback_unsafe() {
-        let mut unit =
-            FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
         unit.state = MigrationState::FallbackUnsafe;
         assert!(should_trigger_ensemble(&unit, true));
     }
 
     #[test]
     fn test_should_not_trigger_ensemble_validated() {
-        let mut unit =
-            FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
         unit.state = MigrationState::Validated;
         assert!(!should_trigger_ensemble(&unit, true));
     }
 
     #[test]
     fn test_apply_ensemble_result_better_candidate() {
-        let mut unit =
-            FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
         unit.rust_output = Some("fn f() -> i32 { 0 }".into());
         unit.idiomatic_score = Some(50);
         unit.last_errors = vec!["error".into()];
@@ -148,8 +142,7 @@ mod tests {
 
     #[test]
     fn test_apply_ensemble_result_no_improvement() {
-        let mut unit =
-            FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
+        let mut unit = FunctionUnit::new("f".into(), "f.c".into(), "int f() { return 0; }".into());
         unit.rust_output = Some("pub fn f() -> i32 { 0 }".into());
         unit.idiomatic_score = Some(90);
         unit.state = MigrationState::Repairing(3);

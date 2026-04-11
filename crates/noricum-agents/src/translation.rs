@@ -1027,7 +1027,13 @@ pub async fn translate_completion_pass(
         let max_tokens = ((batch_loc as u64) * 8).clamp(4096, 16384);
 
         let response = client
-            .run_prompt(model, TRANSLATION_PREAMBLE, temperature, max_tokens, &prompt)
+            .run_prompt(
+                model,
+                TRANSLATION_PREAMBLE,
+                temperature,
+                max_tokens,
+                &prompt,
+            )
             .await?;
 
         let new_code = crate::extract_rust_code(&response);
@@ -1046,8 +1052,10 @@ pub async fn translate_completion_pass(
                 continue; // skip duplicate use
             }
             // Skip type redefinitions
-            if (trimmed.starts_with("pub enum ") || trimmed.starts_with("enum ")
-                || trimmed.starts_with("pub struct ") || trimmed.starts_with("struct "))
+            if (trimmed.starts_with("pub enum ")
+                || trimmed.starts_with("enum ")
+                || trimmed.starts_with("pub struct ")
+                || trimmed.starts_with("struct "))
                 && rust_output.contains(trimmed)
             {
                 continue;
