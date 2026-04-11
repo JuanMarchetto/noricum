@@ -140,3 +140,53 @@ The differential test asserts on extracted content + metadata, NOT on raw archiv
 **Workaround:** Interactive agents doing C-to-Rust work should write Rust directly using their own reasoning + architectural references (zip-rs, hyper, etc.), and use `mcp__noricum__check_compilation` and `mcp__noricum__diff_test` MCP tools only for verification. The "translate via MCP" pattern the design doc assumed does not work as-is.
 
 **Unverified:** whether other pipeline stages (analyze_function, behavioral_review, etc.) have the same limitation or actually produce output via MCP. Check before relying on any of them.
+
+## Binary Size Expectations (C → Rust honest numbers)
+
+The miniz_zip interactive spike produced empirical size data for a minimal CLI (open hello.zip + extract one entry), equivalent functionality both sides, release + stripped:
+
+| Variant | Bytes | Ratio vs C-Os |
+|---|---:|---:|
+| C -O2 -s (no AES) | 92,376 | 1.28x |
+| C -Os -s | 71,896 | 1.00x |
+| Rust `--release` --strip | 457,016 | 6.36x |
+| Rust `release-min` (LTO+opt-z+abort+strip) | 353,400 | 4.92x |
+
+**Expect Rust to be 3-5x larger than C for small utilities.** Sources of overhead:
+- libstd baseline + panic unwinding + format! infrastructure: ~200 KB fixed cost
+- AES crypto crate family (aes, hmac, sha1, pbkdf2, constant_time_eq): ~80-100 KB when linked in
+- flate2 + miniz_oxide (Rust port of deflate): ~60-100 KB
+- Generic monomorphization of library code: variable, typically 20-40 KB
+
+**To minimize binary size in a Rust migration:**
+
+1. Add a `release-min` profile to `Cargo.toml`:
+```toml
+[profile.release-min]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"
+```
+This is ~23% smaller than `--release` for free, with no source changes.
+
+2. Feature-gate expensive optional subsystems (AES, compression beyond deflate, zip64-only code). Add `aes` as `optional = true` and gate the module with `#[cfg(feature = "aes")]`.
+
+3. For embedded or WASM targets, consider `#![no_std]` + `alloc`. This removes panic unwinding and most of libstd but requires refactoring `ZipError::Io(io::Error)` variants.
+
+**When binary size matters:** embedded, WASM, edge functions with cold-start constraints, CDN-distributed binaries with bandwidth costs. When it doesn't: desktop CLIs, server tools, libraries linked into larger binaries.
+
+**Flag in the blog post / design doc:** any claim that "Rust migration preserves performance characteristics" should be backed by an actual binary size measurement. The interactive-spike pattern bakes this in via the `release-min` profile and the /tmp/cbench vs `target/release/rbench` comparison.
+
+## Design Heuristic: "Can I Eliminate This Feature by Choosing a Different Rust Architecture?"
+
+Before translating any complexity source in a C library, audit it:
+- **Data-flow driven** (compression, CRC, actual algorithms): must port or delegate
+- **Architecture-driven** (branches that exist because of a particular C data flow choice): candidate for elimination by choosing a different Rust architecture
+- **Legacy baggage** (wrapper variants, 32-bit fallbacks, deprecated aliases): don't port unless needed
+
+The miniz_zip spike eliminated FOUR features this way: data descriptors (read from central dir instead of local header), `Box<dyn>` trait object indirection (use `ZipSource` enum), 32-bit fallback branches (use u64 everywhere), 8 writer init variants (collapsed to `ZipWriter::create(path)`). Net: ~700 LOC of C complexity became zero lines of Rust.
+
+See `memory/feedback_architectural_elimination.md` for the full pattern with examples and recognition rules.
