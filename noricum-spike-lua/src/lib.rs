@@ -25,6 +25,7 @@ pub mod lfunc;
 pub mod lmem;
 pub mod lobject;
 pub mod lopcodes;
+pub mod lstate;
 pub mod lstring;
 pub mod ltm;
 pub mod lzio;
