@@ -31,8 +31,29 @@
 
 #![allow(dead_code)]
 
-use crate::contract::{LuaInteger, LuaNumber, LuaState};
+use crate::contract::{LuaInteger, LuaNumber, LuaState, RawCFunction, TValue};
 use crate::lapi::LUA_TNONE;
+
+// ---------------------------------------------------------------------------
+// Public constants for the registry ref mechanism, matching lauxlib.h.
+// ---------------------------------------------------------------------------
+
+/// Sentinel returned by [`LuaState::registry_ref`] when the value
+/// at the top of the stack is `nil`. Matches `LUA_REFNIL` in
+/// `lauxlib.h`.
+pub const LUA_REFNIL: i32 = -1;
+
+/// Sentinel indicating a reference that's known to be invalid.
+/// Matches `LUA_NOREF` in `lauxlib.h`.
+pub const LUA_NOREF: i32 = -2;
+
+/// A single entry in the table passed to [`LuaState::set_funcs`].
+/// Matches `luaL_Reg` in `lauxlib.h`, minus the null-terminator
+/// sentinel — Rust slices carry their own length.
+pub struct LuaLReg {
+    pub name: &'static str,
+    pub func: RawCFunction,
+}
 
 impl LuaState {
     /// Assert that `arg` is a valid (in-range) stack index.
@@ -161,6 +182,82 @@ impl LuaState {
             self.check_string(arg)
         }
     }
+
+    // ---- 4.3.2 library registration and ref mechanism -------------
+
+    /// Bootstrap a fresh state with the default hash seed.
+    /// Matches `luaL_newstate`.
+    pub fn aux_new_state() -> LuaState {
+        LuaState::new(0)
+    }
+
+    /// Push a freshly-created table onto the stack sized as a
+    /// hint for `n` future entries (integer and record parts
+    /// both pre-allocated to `n`). Matches `luaL_newlibtable`.
+    pub fn new_lib_table(&mut self, n: usize) {
+        self.create_table(0, n);
+    }
+
+    /// Register every `{ name, func }` pair in `regs` into the
+    /// table at `table_idx`, storing each function as a
+    /// `TValue::LightCFunction`. Stage 4.3.2 only supports the
+    /// zero-upvalue form (C's `luaL_setfuncs(L, l, 0)`); the
+    /// upvalue-capturing variant needs the C closure builder
+    /// from Stage 4.2's deferred work.
+    pub fn set_funcs(&mut self, table_idx: i32, regs: &[LuaLReg]) {
+        let abs_idx = self.absindex(table_idx);
+        for reg in regs {
+            self.push_light_cfunction(reg.func);
+            self.raw_set_field(abs_idx, reg.name);
+        }
+    }
+
+    /// Convenience: create a fresh table and register every
+    /// function in `regs` into it. Matches `luaL_newlib`. The
+    /// new table is left on the top of the stack.
+    pub fn new_lib(&mut self, regs: &[LuaLReg]) {
+        self.new_lib_table(regs.len());
+        // set_funcs takes an index; top is -1.
+        self.set_funcs(-1, regs);
+    }
+
+    /// Pop the top value, store it in the table at `table_idx`
+    /// under a fresh integer key, and return that key. `nil`
+    /// returns [`LUA_REFNIL`] without mutating the table.
+    ///
+    /// Stage 4.3.2 uses a simple "next available key" strategy
+    /// based on [`crate::ltable::Heap::table_len`]. C Lua keeps
+    /// a free-list linked through `table[0]` for O(1) reclaim
+    /// on unref; we defer that optimization until a profile
+    /// shows the linear scan is a problem.
+    pub fn registry_ref(&mut self, table_idx: i32) -> i32 {
+        let value = self
+            .current_thread_mut()
+            .pop()
+            .unwrap_or(TValue::Nil);
+        if matches!(value, TValue::Nil) {
+            return LUA_REFNIL;
+        }
+        let abs_idx = self.absindex(table_idx);
+        let table = self.require_table(abs_idx, "registry_ref");
+        let next = self.global.heap.table_len(table) as LuaInteger + 1;
+        self.global.table_set_int(table, next, value);
+        next as i32
+    }
+
+    /// Remove the reference `ref_id` from the table at
+    /// `table_idx`. Matches `luaL_unref`. Ignores
+    /// [`LUA_REFNIL`] and [`LUA_NOREF`] — both are valid
+    /// to pass as a "no-op" cleanup signal.
+    pub fn registry_unref(&mut self, table_idx: i32, ref_id: i32) {
+        if ref_id < 0 {
+            return;
+        }
+        let abs_idx = self.absindex(table_idx);
+        let table = self.require_table(abs_idx, "registry_unref");
+        self.global
+            .table_set_int(table, ref_id as LuaInteger, TValue::Nil);
+    }
 }
 
 #[cfg(test)]
@@ -284,5 +381,123 @@ mod tests {
         // from showing up as unused if a future refactor drops
         // the handful of explicit TValue references in this mod.
         let _ = TValue::Nil;
+    }
+
+    // ---- 4.3.2 library registration + ref mechanism ---------------
+
+    use super::{LuaLReg, LUA_REFNIL};
+    use crate::contract::{LuaInteger, LuaState as _Alias, RawCFunction};
+
+    /// A tiny C function stub used by the registration tests —
+    /// it's never actually called, it just needs to be a valid
+    /// `RawCFunction` pointer.
+    unsafe extern "C" fn noop_cfn(
+        _state: *mut crate::contract::LuaState,
+    ) -> std::os::raw::c_int {
+        0
+    }
+
+    #[test]
+    fn new_state_bootstraps_usable_state() {
+        let state = LuaState::aux_new_state();
+        // A freshly-bootstrapped state has no stack slots but a
+        // live registry and main thread.
+        assert_eq!(state.get_top(), 0);
+        assert!(state.global.registry.is_some());
+        assert!(state.global.main_thread.is_some());
+    }
+
+    #[test]
+    fn new_lib_table_creates_empty_table_with_capacity_hint() {
+        let mut state = LuaState::new(0);
+        state.new_lib_table(8);
+        assert!(state.is_table(-1));
+        assert_eq!(state.raw_len(-1), 0);
+    }
+
+    #[test]
+    fn set_funcs_registers_every_entry_as_light_cfunction() {
+        let mut state = LuaState::new(0);
+        let regs = [
+            LuaLReg {
+                name: "a",
+                func: noop_cfn as RawCFunction,
+            },
+            LuaLReg {
+                name: "b",
+                func: noop_cfn as RawCFunction,
+            },
+        ];
+        state.new_table();
+        state.set_funcs(-1, &regs);
+        // Read back each entry — each should be a function.
+        state.raw_get_field(1, "a");
+        assert!(state.is_cfunction(-1));
+        state.set_top(-2); // pop
+        state.raw_get_field(1, "b");
+        assert!(state.is_cfunction(-1));
+    }
+
+    #[test]
+    fn new_lib_combines_new_lib_table_and_set_funcs() {
+        let mut state = LuaState::new(0);
+        let regs = [LuaLReg {
+            name: "only",
+            func: noop_cfn as RawCFunction,
+        }];
+        state.new_lib(&regs);
+        // Top of stack is now a table containing "only".
+        assert!(state.is_table(-1));
+        state.raw_get_field(-1, "only");
+        assert!(state.is_cfunction(-1));
+    }
+
+    #[test]
+    fn registry_ref_stores_value_and_returns_integer_key() {
+        let mut state = LuaState::new(0);
+        state.new_table(); // registry-like
+        state.push_integer(42);
+        let ref_id = state.registry_ref(1);
+        assert!(ref_id > 0);
+        // Read back via raw_get_i.
+        state.raw_get_i(1, ref_id as LuaInteger);
+        assert_eq!(state.to_integer_x(-1), Some(42));
+    }
+
+    #[test]
+    fn registry_ref_on_nil_returns_lua_refnil() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        state.push_nil();
+        let ref_id = state.registry_ref(1);
+        assert_eq!(ref_id, LUA_REFNIL);
+    }
+
+    #[test]
+    fn registry_unref_clears_the_stored_slot() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        state.push_string("keepme");
+        let ref_id = state.registry_ref(1);
+        state.registry_unref(1, ref_id);
+        // Look it up — should now be nil.
+        state.raw_get_i(1, ref_id as LuaInteger);
+        assert!(state.is_nil(-1));
+    }
+
+    #[test]
+    fn registry_unref_ignores_lua_refnil_and_noref() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        // These are no-ops, must not panic or touch the table.
+        state.registry_unref(1, LUA_REFNIL);
+        state.registry_unref(1, super::LUA_NOREF);
+    }
+
+    #[test]
+    fn unused_alias_silencer() {
+        // The `_Alias` import keeps the cross-reference visible
+        // in case a future refactor reshapes the test imports.
+        let _ = _Alias::new(0);
     }
 }

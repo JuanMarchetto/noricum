@@ -78,9 +78,10 @@ impl LuaState {
     }
 
     /// Mutably borrow the currently running thread. Mirror of
-    /// [`LuaState::current_thread`].
+    /// [`LuaState::current_thread`]. `pub(crate)` so `lauxlib`
+    /// can reuse the single-line path.
     #[inline]
-    fn current_thread_mut(&mut self) -> &mut Thread {
+    pub(crate) fn current_thread_mut(&mut self) -> &mut Thread {
         self.global.heap.thread_mut(self.current_thread)
     }
 
@@ -718,8 +719,9 @@ impl LuaState {
     /// Read the table handle at `idx`, panicking with a
     /// diagnostic that names `ctx` if the slot is missing or
     /// not a table. Centralizes the error wording for the
-    /// raw get/set family.
-    fn require_table(&self, idx: i32, ctx: &str) -> crate::contract::TableHandle {
+    /// raw get/set family. `pub(crate)` so `lauxlib` can reuse
+    /// the same panic message format.
+    pub(crate) fn require_table(&self, idx: i32, ctx: &str) -> crate::contract::TableHandle {
         match self.value_at(idx) {
             Some(TValue::Table(h)) => h,
             Some(other) => panic!(
