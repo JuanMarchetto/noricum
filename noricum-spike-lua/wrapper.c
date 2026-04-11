@@ -8,6 +8,8 @@
 #include "lmem.h"
 #include "lzio.h"
 #include "lobject.h"
+#include "lstring.h"
+#include "lstate.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -375,4 +377,34 @@ int wr_lobject_rawarith(int op,
     *out_int = probe.out_i;
     *out_float = probe.out_f;
     return 1;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * lstring oracle: expose luaS_hash behavior through the public API.
+ *
+ * luaS_hash is static in lstring.c, so we cannot call it directly.
+ * Instead we create an ephemeral lua_State with a caller-chosen seed,
+ * allocate a string through luaS_newlstr, and return its hash. Short
+ * strings store the hash in ts->hash after interning; long strings go
+ * through luaS_hashlongstr which in turn invokes the same luaS_hash
+ * with the same seed.
+ * ---------------------------------------------------------------------------
+ */
+
+unsigned int wr_lstring_hash(const char* bytes, size_t len, unsigned int seed) {
+    /* lua_newstate takes the seed as a parameter, so we can pin it. */
+    lua_State* L = lua_newstate(luaL_alloc, NULL, seed);
+    if (!L) return 0;
+    TString* ts = luaS_newlstr(L, bytes, len);
+    unsigned int h;
+    if (tsslen(ts) <= LUAI_MAXSHORTLEN) {
+        /* Short string: interning stored luaS_hash result in ts->hash. */
+        h = ts->hash;
+    } else {
+        /* Long string: force lazy hash computation. */
+        h = luaS_hashlongstr(ts);
+    }
+    lua_close(L);
+    return h;
 }

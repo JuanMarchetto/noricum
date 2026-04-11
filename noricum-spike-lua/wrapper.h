@@ -147,6 +147,20 @@ int wr_lobject_rawarith(int op,
                         int t2, long long i2, double f2,
                         int* out_tag, long long* out_int, double* out_float);
 
+/* lstring — hash function oracle.
+ *
+ * luaS_hash itself is `static` in lstring.c, so we can't call it
+ * directly. Instead, we spin up an ephemeral lua_State with the
+ * provided seed, create a string through the public API, and return
+ * its hash. Short strings store the hash in ts->hash after interning;
+ * long strings go through luaS_hashlongstr which also uses the same
+ * luaS_hash internally with the same seed.
+ *
+ * Returns the 32-bit hash on success, or 0 on failure. Since the
+ * empty string with seed 0 legitimately hashes to 0, callers should
+ * prefer a non-zero sanity seed when checking for errors. */
+unsigned int wr_lstring_hash(const char* bytes, size_t len, unsigned int seed);
+
 #ifdef __cplusplus
 }
 #endif

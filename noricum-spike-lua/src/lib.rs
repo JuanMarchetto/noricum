@@ -24,6 +24,7 @@ pub mod lctype;
 pub mod lmem;
 pub mod lobject;
 pub mod lopcodes;
+pub mod lstring;
 pub mod lzio;
 
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
@@ -128,6 +129,12 @@ unsafe extern "C" {
         out_int: *mut i64,
         out_float: *mut f64,
     ) -> c_int;
+
+    /// `luaS_hash` oracle. Creates an ephemeral lua_State pinned to
+    /// `seed` and returns the hash the C implementation computes for
+    /// the given byte sequence. Short and long strings both route
+    /// through the same static `luaS_hash` internally.
+    pub fn wr_lstring_hash(bytes: *const c_char, len: usize, seed: c_uint) -> c_uint;
 }
 
 // TODO: add `pub mod contract;` once the Rust-side type architecture is
