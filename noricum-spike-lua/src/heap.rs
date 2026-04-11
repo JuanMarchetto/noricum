@@ -7,9 +7,16 @@
 //! | method            | purpose                                   |
 //! |-------------------|-------------------------------------------|
 //! | `alloc_*(value)`  | pop a slot from the free list (or push a new one) and store the value; returns a handle |
-//! | `*(handle)`       | immutable accessor; panics on freed slot |
-//! | `*_mut(handle)`   | mutable accessor; panics on freed slot   |
-//! | `free_*(handle)`  | mark the slot as free and push the index onto the free list |
+//! | `*(handle)`       | immutable accessor; panics on freed slot (always, including release) |
+//! | `*_mut(handle)`   | mutable accessor; panics on freed slot (always, including release) |
+//! | `free_*(handle)`  | mark the slot as free and push the index onto the free list; panics always on double-free |
+//!
+//! The panic checks are plain `assert!` (not `debug_assert!`) because
+//! double-free corrupts the free list and access-after-free dereferences
+//! a stale handle into a recycled object — both are programming errors
+//! that are far more costly to debug in production than a single `is_some`
+//! check per operation. Stage 3's generation counters will reduce the
+//! access-after-free surface but not eliminate the need for this rail.
 //!
 //! # Generation counters
 //!
@@ -72,7 +79,7 @@ impl Heap {
     /// onto the string free list for reuse.
     pub fn free_string(&mut self, handle: StringHandle) {
         let slot = handle.0 as usize;
-        debug_assert!(
+        assert!(
             self.strings[slot].is_some(),
             "double free of StringHandle({})",
             handle.0
@@ -110,7 +117,7 @@ impl Heap {
 
     pub fn free_table(&mut self, handle: TableHandle) {
         let slot = handle.0 as usize;
-        debug_assert!(
+        assert!(
             self.tables[slot].is_some(),
             "double free of TableHandle({})",
             handle.0
@@ -148,7 +155,7 @@ impl Heap {
 
     pub fn free_proto(&mut self, handle: ProtoHandle) {
         let slot = handle.0 as usize;
-        debug_assert!(
+        assert!(
             self.protos[slot].is_some(),
             "double free of ProtoHandle({})",
             handle.0
@@ -186,7 +193,7 @@ impl Heap {
 
     pub fn free_lclosure(&mut self, handle: LClosureHandle) {
         let slot = handle.0 as usize;
-        debug_assert!(
+        assert!(
             self.lclosures[slot].is_some(),
             "double free of LClosureHandle({})",
             handle.0
@@ -224,7 +231,7 @@ impl Heap {
 
     pub fn free_cclosure(&mut self, handle: CClosureHandle) {
         let slot = handle.0 as usize;
-        debug_assert!(
+        assert!(
             self.cclosures[slot].is_some(),
             "double free of CClosureHandle({})",
             handle.0
@@ -262,7 +269,7 @@ impl Heap {
 
     pub fn free_upval(&mut self, handle: UpValHandle) {
         let slot = handle.0 as usize;
-        debug_assert!(
+        assert!(
             self.upvals[slot].is_some(),
             "double free of UpValHandle({})",
             handle.0
@@ -300,7 +307,7 @@ impl Heap {
 
     pub fn free_thread(&mut self, handle: ThreadHandle) {
         let slot = handle.0 as usize;
-        debug_assert!(
+        assert!(
             self.threads[slot].is_some(),
             "double free of ThreadHandle({})",
             handle.0
@@ -338,7 +345,7 @@ impl Heap {
 
     pub fn free_userdata(&mut self, handle: UserDataHandle) {
         let slot = handle.0 as usize;
-        debug_assert!(
+        assert!(
             self.userdata[slot].is_some(),
             "double free of UserDataHandle({})",
             handle.0
@@ -431,7 +438,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "StringHandle points to freed slot")]
-    fn access_after_free_panics_in_debug() {
+    fn access_after_free_panics() {
         let mut heap = Heap::default();
         let h = heap.alloc_string(fresh_string(b"doomed"));
         heap.free_string(h);
@@ -440,7 +447,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "double free of StringHandle")]
-    fn double_free_panics_in_debug() {
+    fn double_free_panics() {
         let mut heap = Heap::default();
         let h = heap.alloc_string(fresh_string(b"ghost"));
         heap.free_string(h);
