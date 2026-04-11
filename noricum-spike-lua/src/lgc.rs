@@ -783,6 +783,107 @@ impl GlobalState {
             HeapKind::UserData => self.heap.userdata.len(),
         }
     }
+
+    // --- Write barriers (commit 6) ---------------------------------
+    //
+    // The main tri-color invariant is: a BLACK object never points
+    // to a WHITE one. Sweep-incrementality breaks this invariant as
+    // soon as the program mutates a black object to reference a
+    // freshly allocated white one, so every mutation site must
+    // restore the invariant by calling one of these barriers.
+    //
+    // `barrier_forward` — called when a black parent gains a new
+    // white child. During propagate, mark the child so the
+    // invariant holds. During sweep, repaint the parent white so
+    // the next cycle reconsiders it (and so no other barrier fires
+    // for it until then).
+    //
+    // `barrier_backward` — called when a black container object
+    // (typically a table) undergoes a mutation we'd rather
+    // retraverse than walk eagerly. Repaint gray and push onto
+    // `gc_grayagain`, which the atomic phase (commit 5 / 6) will
+    // drain.
+    //
+    // Stage 3 v1 notes:
+    // * No dual-white yet. Single WHITE means objects allocated
+    //   during sweep and left ahead of the cursor get freed. Callers
+    //   avoid this by not mutating during sweep; a future commit
+    //   (Stage 3 v2 or when the VM forces it) replaces `WHITE` with
+    //   `WHITE_OLD` / `WHITE_NEW` and flips `gc_current_white` in
+    //   the atomic phase.
+    // * No generational age bits. Just the tri-color.
+    // * Barriers are no-ops when there's no invariant to maintain
+    //   (parent isn't black, or child isn't white). C Lua's
+    //   `luaC_barrier_` has the same shape.
+
+    /// True when the mark-phase invariant (BLACK never points to
+    /// WHITE) still needs to hold at this point in the cycle.
+    /// Matches C's `keepinvariant(g)` macro. Pause counts as
+    /// "invariant holds" because nothing changed since the last
+    /// sweep left everything correctly painted.
+    pub const fn keep_invariant(&self) -> bool {
+        matches!(
+            self.gc_state,
+            GcState::Pause | GcState::Propagate | GcState::Atomic
+        )
+    }
+
+    /// Is this handle currently painted black?
+    pub fn is_black(&self, handle: AnyHandle) -> bool {
+        self.mark_of(handle) == BLACK
+    }
+
+    /// Is this handle currently painted white?
+    pub fn is_white(&self, handle: AnyHandle) -> bool {
+        self.mark_of(handle) == WHITE
+    }
+
+    /// Forward write barrier. Call when a black parent acquires a
+    /// reference to a white child. Restores the tri-color invariant
+    /// by either marking the child (during propagate) or repainting
+    /// the parent white (during sweep, so the next cycle revisits
+    /// it).
+    ///
+    /// No-op if `parent` isn't currently black or `child` isn't
+    /// currently white — barriers are cheap to call unconditionally
+    /// from every mutation site because most calls fall through
+    /// this short-circuit.
+    pub fn barrier_forward(&mut self, parent: AnyHandle, child: AnyHandle) {
+        if !self.is_black(parent) || !self.is_white(child) {
+            return;
+        }
+        if self.keep_invariant() {
+            // Mark phase is still responsible for reachability.
+            // Mark the child so the invariant is preserved.
+            self.mark_object(child);
+        } else {
+            // Sweep phase. The mark set is already final for this
+            // cycle; repaint the parent white so sweep will
+            // reconsider it, and so subsequent mutations on the
+            // same parent don't re-fire this barrier.
+            self.set_mark(parent, WHITE);
+        }
+    }
+
+    /// Backward write barrier. Call when a black container-shaped
+    /// object (typically a table) mutates and you'd rather defer
+    /// the re-traversal of its children to the atomic phase than
+    /// mark them eagerly. Repaints `parent` gray and pushes it
+    /// onto `gc_grayagain` where the atomic phase (commit 5/6)
+    /// will drain it.
+    ///
+    /// No-op if `parent` isn't currently black. Idempotent in the
+    /// sense that repeated calls on the same parent push multiple
+    /// entries onto `gc_grayagain`, but the atomic drain
+    /// de-duplicates via the mark byte (a GRAY handle popped off
+    /// grayagain won't be re-enqueued).
+    pub fn barrier_backward(&mut self, parent: AnyHandle) {
+        if !self.is_black(parent) {
+            return;
+        }
+        self.set_mark(parent, GRAY);
+        self.gc_grayagain.push(parent);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,6 +1375,106 @@ mod tests {
         assert!(g.heap.lclosures[closure.slot as usize].is_some());
         assert!(g.heap.threads[th.slot as usize].is_some());
     }
+
+    // ---- commit 6: write-barrier tests -----------------------------
+
+    #[test]
+    fn forward_barrier_during_propagate_marks_white_child() {
+        // Black parent, white child, mid-mark phase. Forward
+        // barrier must paint the child gray and push it onto the
+        // main gray frontier so propagate_one picks it up.
+        let mut g = GlobalState::default();
+        let parent = g.heap.alloc_table(Table::default());
+        let child = g.heap.alloc_string(fresh_string(b"new"));
+        g.heap.marks_tables[parent.slot as usize] = BLACK;
+        g.heap.marks_strings[child.slot as usize] = WHITE;
+        g.gc_state = GcState::Propagate;
+
+        g.barrier_forward(AnyHandle::Table(parent), AnyHandle::String(child));
+
+        assert_eq!(g.heap.marks_strings[child.slot as usize], GRAY);
+        assert!(g.gc_gray.contains(&AnyHandle::String(child)));
+        // Parent untouched.
+        assert_eq!(g.heap.marks_tables[parent.slot as usize], BLACK);
+    }
+
+    #[test]
+    fn forward_barrier_during_sweep_repaints_black_parent_to_white() {
+        // Same setup, but gc_state == Sweep. Forward barrier
+        // must leave the child alone and repaint the parent
+        // white so the next cycle will reconsider it.
+        let mut g = GlobalState::default();
+        let parent = g.heap.alloc_table(Table::default());
+        let child = g.heap.alloc_string(fresh_string(b"new"));
+        g.heap.marks_tables[parent.slot as usize] = BLACK;
+        g.heap.marks_strings[child.slot as usize] = WHITE;
+        g.gc_state = GcState::Sweep;
+
+        g.barrier_forward(AnyHandle::Table(parent), AnyHandle::String(child));
+
+        assert_eq!(g.heap.marks_tables[parent.slot as usize], WHITE);
+        // Child is still white; not queued.
+        assert_eq!(g.heap.marks_strings[child.slot as usize], WHITE);
+        assert!(!g.gc_gray.contains(&AnyHandle::String(child)));
+    }
+
+    #[test]
+    fn forward_barrier_ignores_non_black_parent() {
+        // Parent is gray (still propagating), not black. Barrier
+        // is a no-op because there's no invariant to restore yet.
+        let mut g = GlobalState::default();
+        let parent = g.heap.alloc_table(Table::default());
+        let child = g.heap.alloc_string(fresh_string(b"new"));
+        g.heap.marks_tables[parent.slot as usize] = GRAY;
+        g.heap.marks_strings[child.slot as usize] = WHITE;
+        g.gc_state = GcState::Propagate;
+
+        g.barrier_forward(AnyHandle::Table(parent), AnyHandle::String(child));
+
+        assert_eq!(g.heap.marks_tables[parent.slot as usize], GRAY);
+        assert_eq!(g.heap.marks_strings[child.slot as usize], WHITE);
+        assert!(g.gc_gray.is_empty());
+    }
+
+    #[test]
+    fn backward_barrier_repaints_black_parent_gray_and_pushes_to_grayagain() {
+        // Black table mutates. Backward barrier paints it gray
+        // and queues it on grayagain so the atomic phase
+        // re-traverses it.
+        let mut g = GlobalState::default();
+        let parent = g.heap.alloc_table(Table::default());
+        g.heap.marks_tables[parent.slot as usize] = BLACK;
+        g.gc_state = GcState::Propagate;
+
+        g.barrier_backward(AnyHandle::Table(parent));
+
+        assert_eq!(g.heap.marks_tables[parent.slot as usize], GRAY);
+        assert_eq!(g.gc_grayagain, vec![AnyHandle::Table(parent)]);
+        // Not on the main gray list — that's what grayagain exists for.
+        assert!(g.gc_gray.is_empty());
+    }
+
+    #[test]
+    fn backward_barrier_ignores_non_black_parent() {
+        // Gray and white parents don't need the backward barrier
+        // because they're either being walked already or weren't
+        // visited at all.
+        let mut g = GlobalState::default();
+        let gray_parent = g.heap.alloc_table(Table::default());
+        let white_parent = g.heap.alloc_table(Table::default());
+        g.heap.marks_tables[gray_parent.slot as usize] = GRAY;
+        g.heap.marks_tables[white_parent.slot as usize] = WHITE;
+        g.gc_state = GcState::Propagate;
+
+        g.barrier_backward(AnyHandle::Table(gray_parent));
+        g.barrier_backward(AnyHandle::Table(white_parent));
+
+        assert_eq!(g.heap.marks_tables[gray_parent.slot as usize], GRAY);
+        assert_eq!(g.heap.marks_tables[white_parent.slot as usize], WHITE);
+        assert!(g.gc_grayagain.is_empty());
+    }
+
+    // ---- commit 5 continued: cross-cycle sweep behavior ------------
 
     #[test]
     fn two_sequential_cycles_collect_the_changing_dead_set() {
