@@ -611,6 +611,24 @@ pub struct GlobalState {
     /// stays `None` on an uninitialized `GlobalState::default()`.
     /// Matches the `G(L)->tmname[TM_N]` array in `lstate.h`.
     pub tm_names: Vec<StringHandle>,
+
+    // -----------------------------------------------------------------------
+    // GC state — Stage 3. Minimal fields required by `lgc::gc_step`'s
+    // skeleton dispatcher. Commits 4–7 add debt counters, mark bytes,
+    // and the remaining tuning knobs as each phase comes online.
+    // -----------------------------------------------------------------------
+    /// Current phase of the incremental collector. See [`crate::lgc::GcState`].
+    pub gc_state: crate::lgc::GcState,
+    /// Gray frontier — handles queued for the propagate phase.
+    /// Replaces C's intrusive `g->gray` linked list.
+    pub gc_gray: Vec<crate::lgc::AnyHandle>,
+    /// Deferred gray list drained in the atomic phase. Replaces
+    /// C's `g->grayagain`. Populated by the backward write barrier
+    /// (commit 6) when a black object is mutated.
+    pub gc_grayagain: Vec<crate::lgc::AnyHandle>,
+    /// Position of the incremental sweep across arenas. Replaces
+    /// C's `g->sweepgc` `GCObject**`.
+    pub gc_sweep_cursor: crate::lgc::SweepCursor,
 }
 
 /// The public VM handle. At the drop-in ABI boundary this is passed
