@@ -19,6 +19,7 @@
 //! Locked decisions: persistent memory `project_lua_full_port.md`.
 
 pub mod contract;
+pub mod heap;
 pub mod lctype;
 pub mod lmem;
 pub mod lobject;
