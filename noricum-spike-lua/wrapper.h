@@ -38,6 +38,30 @@ void           wr_close(spike_handle_t h);
  */
 spike_handle_t wr_open(const char* filename);
 
+/*
+ * ---------------------------------------------------------------------------
+ * Module-level oracle shims for the full Lua 5.4 port differential tests.
+ *
+ * Each group below exposes real C functions for the macros / tables that
+ * Lua's headers define preprocessor-only, so the Rust side can call into
+ * the C oracle via plain extern "C" bindings without re-implementing the
+ * header logic.
+ *
+ * Inputs are `int` (not `unsigned char`) so the shims can carry Lua's
+ * `EOZ = -1` sentinel value unchanged.
+ * ---------------------------------------------------------------------------
+ */
+
+/* lctype — ASCII character classification (ground truth: lctype.{c,h}). */
+int wr_lctype_byte(int c);       /* luai_ctype_[c+1]; -1 if c is out of range. */
+int wr_lctype_islalpha(int c);
+int wr_lctype_islalnum(int c);
+int wr_lctype_isdigit(int c);
+int wr_lctype_isspace(int c);
+int wr_lctype_isprint(int c);
+int wr_lctype_isxdigit(int c);
+int wr_lctype_tolower(int c);    /* Only defined for 'A'..'Z'; returns (c | 0x20). */
+
 #ifdef __cplusplus
 }
 #endif

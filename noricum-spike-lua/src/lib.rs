@@ -19,6 +19,7 @@
 //! Locked decisions: persistent memory `project_lua_full_port.md`.
 
 pub mod contract;
+pub mod lctype;
 
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
@@ -34,6 +35,17 @@ unsafe extern "C" {
     pub fn wr_close(h: SpikeHandle);
 
     pub fn wr_open(filename: *const c_char) -> SpikeHandle;
+
+    // lctype oracle shims (see wrapper.c). Each takes an int to carry
+    // Lua's EOZ = -1 sentinel through unchanged.
+    pub fn wr_lctype_byte(c: c_int) -> c_int;
+    pub fn wr_lctype_islalpha(c: c_int) -> c_int;
+    pub fn wr_lctype_islalnum(c: c_int) -> c_int;
+    pub fn wr_lctype_isdigit(c: c_int) -> c_int;
+    pub fn wr_lctype_isspace(c: c_int) -> c_int;
+    pub fn wr_lctype_isprint(c: c_int) -> c_int;
+    pub fn wr_lctype_isxdigit(c: c_int) -> c_int;
+    pub fn wr_lctype_tolower(c: c_int) -> c_int;
 }
 
 // TODO: add `pub mod contract;` once the Rust-side type architecture is

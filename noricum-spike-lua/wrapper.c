@@ -3,6 +3,7 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
+#include "lctype.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,4 +90,31 @@ spike_handle_t wr_open(const char* filename) {
     if (rc != LUA_OK) { lua_close(L); return NULL; }
 
     return (spike_handle_t) L;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * lctype oracle shims. Each predicate evaluates the macro from lctype.h
+ * for the provided int (to preserve the EOZ = -1 sentinel) and normalizes
+ * the result to 1/0.
+ * ---------------------------------------------------------------------------
+ */
+
+int wr_lctype_byte(int c) {
+    if (c < -1 || c > 255) return -1;
+    return (int) luai_ctype_[c + 1];
+}
+
+int wr_lctype_islalpha(int c) { return lislalpha(c) ? 1 : 0; }
+int wr_lctype_islalnum(int c) { return lislalnum(c) ? 1 : 0; }
+int wr_lctype_isdigit(int c)  { return lisdigit(c)  ? 1 : 0; }
+int wr_lctype_isspace(int c)  { return lisspace(c)  ? 1 : 0; }
+int wr_lctype_isprint(int c)  { return lisprint(c)  ? 1 : 0; }
+int wr_lctype_isxdigit(int c) { return lisxdigit(c) ? 1 : 0; }
+
+int wr_lctype_tolower(int c) {
+    /* Lua's ltolower macro asserts c is A..Z or already unchanged by the
+     * transform. We mirror exactly that domain and return the same bits. */
+    if (c >= 'A' && c <= 'Z') return c | 0x20;
+    return c;
 }
