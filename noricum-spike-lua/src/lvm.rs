@@ -37,10 +37,11 @@
 #![allow(dead_code)]
 
 use crate::contract::{
-    LClosure, LClosureHandle, LuaError, LuaResult, LuaState, TValue, UpVal,
-    UpValState,
+    LClosure, LClosureHandle, LuaError, LuaResult, LuaState, TValue, TableHandle,
+    UpVal, UpValState,
 };
 use crate::lobject::{raw_arith, to_number_ns, ArithOp};
+use crate::ltm::TagMethod;
 use crate::lopcodes::{
     get_opcode_raw, getarg_a, getarg_b, getarg_bx, getarg_c, getarg_k, getarg_sbx,
     getarg_sc, getarg_sj, OpCode,
@@ -112,6 +113,10 @@ const OP_SETUPVAL_U8: u8 = OpCode::OP_SETUPVAL as u8;
 
 const OP_CONCAT_U8: u8 = OpCode::OP_CONCAT as u8;
 const OP_LEN_U8: u8 = OpCode::OP_LEN as u8;
+
+/// Maximum depth of metamethod chain walks for `__index` /
+/// `__newindex`. Matches `MAXTAGLOOP` in `lvm.c`.
+const MAX_TAG_LOOP: u32 = 2000;
 
 impl LuaState {
     /// Run the bytecode interpreter for the top call frame until
@@ -293,16 +298,7 @@ impl LuaState {
                     let c = getarg_c(instruction) as u32;
                     let rb = self.current_thread().stack[(base + b) as usize];
                     let rc = self.current_thread().stack[(base + c) as usize];
-                    let table_handle = match rb {
-                        TValue::Table(h) => h,
-                        _ => return Err(LuaError::Runtime(TValue::Nil)),
-                    };
-                    let value = self
-                        .global
-                        .heap
-                        .table_get(table_handle, rc)
-                        .unwrap_or(TValue::Nil);
-                    self.current_thread_mut().stack[(base + a) as usize] = value;
+                    self.lua_get_index(rb, rc, base + a)?;
                 }
                 OP_GETI_U8 => {
                     // R(A) := R(B)[C]  — C is a small integer
@@ -310,16 +306,7 @@ impl LuaState {
                     let b = getarg_b(instruction) as u32;
                     let c = getarg_c(instruction);
                     let rb = self.current_thread().stack[(base + b) as usize];
-                    let table_handle = match rb {
-                        TValue::Table(h) => h,
-                        _ => return Err(LuaError::Runtime(TValue::Nil)),
-                    };
-                    let value = self
-                        .global
-                        .heap
-                        .table_get_int(table_handle, c as i64)
-                        .unwrap_or(TValue::Nil);
-                    self.current_thread_mut().stack[(base + a) as usize] = value;
+                    self.lua_get_index(rb, TValue::Integer(c as i64), base + a)?;
                 }
                 OP_GETFIELD_U8 => {
                     // R(A) := R(B)[K[C]]  — C indexes the constant pool
@@ -327,17 +314,8 @@ impl LuaState {
                     let b = getarg_b(instruction) as u32;
                     let c = getarg_c(instruction) as usize;
                     let rb = self.current_thread().stack[(base + b) as usize];
-                    let table_handle = match rb {
-                        TValue::Table(h) => h,
-                        _ => return Err(LuaError::Runtime(TValue::Nil)),
-                    };
                     let key = self.constant_at(func_slot, c);
-                    let value = self
-                        .global
-                        .heap
-                        .table_get(table_handle, key)
-                        .unwrap_or(TValue::Nil);
-                    self.current_thread_mut().stack[(base + a) as usize] = value;
+                    self.lua_get_index(rb, key, base + a)?;
                 }
                 OP_SETTABLE_U8 => {
                     // R(A)[R(B)] := R/K(C)   (k flag selects K)
@@ -348,11 +326,7 @@ impl LuaState {
                     let ra = self.current_thread().stack[(base + a) as usize];
                     let rb = self.current_thread().stack[(base + b) as usize];
                     let rc = self.rk_value(func_slot, base, c, k);
-                    let table_handle = match ra {
-                        TValue::Table(h) => h,
-                        _ => return Err(LuaError::Runtime(TValue::Nil)),
-                    };
-                    self.global.table_set(table_handle, rb, rc);
+                    self.lua_set_index(ra, rb, rc)?;
                 }
                 OP_SETI_U8 => {
                     // R(A)[B] := R/K(C)
@@ -362,11 +336,7 @@ impl LuaState {
                     let k = getarg_k(instruction);
                     let ra = self.current_thread().stack[(base + a) as usize];
                     let rc = self.rk_value(func_slot, base, c, k);
-                    let table_handle = match ra {
-                        TValue::Table(h) => h,
-                        _ => return Err(LuaError::Runtime(TValue::Nil)),
-                    };
-                    self.global.table_set_int(table_handle, b as i64, rc);
+                    self.lua_set_index(ra, TValue::Integer(b as i64), rc)?;
                 }
                 OP_SETFIELD_U8 => {
                     // R(A)[K[B]] := R/K(C)
@@ -377,11 +347,7 @@ impl LuaState {
                     let ra = self.current_thread().stack[(base + a) as usize];
                     let key = self.constant_at(func_slot, b);
                     let rc = self.rk_value(func_slot, base, c, k);
-                    let table_handle = match ra {
-                        TValue::Table(h) => h,
-                        _ => return Err(LuaError::Runtime(TValue::Nil)),
-                    };
-                    self.global.table_set(table_handle, key, rc);
+                    self.lua_set_index(ra, key, rc)?;
                 }
                 OP_LEN_U8 => {
                     // R(A) := #R(B) — length operator.
@@ -886,6 +852,208 @@ impl LuaState {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Table read/write with __index / __newindex metamethod dispatch.
+    //
+    // Matches `luaV_finishget` / `luaV_finishset` in lvm.c. Walks
+    // metatable chains up to `MAX_TAG_LOOP` deep. When the hop is a
+    // function we call it via `call_value` on a scratch stack region;
+    // when it's a table we tail-recurse the lookup.
+    // ------------------------------------------------------------------
+
+    /// Direct raw-table lookup. Returns `TValue::Nil` if the key is
+    /// absent (or present with Nil; Lua can't distinguish the two).
+    pub(crate) fn raw_table_get(&self, handle: TableHandle, key: TValue) -> TValue {
+        self.global
+            .heap
+            .table_get(handle, key)
+            .unwrap_or(TValue::Nil)
+    }
+
+    /// Perform a Lua indexing operation (`R(a) := t[key]`) with
+    /// full metamethod dispatch. On entry, the result slot is
+    /// written to `dest_slot` (an absolute slot index on the
+    /// current thread's stack). `dest_slot` MUST be distinct from
+    /// whatever register holds `t` and `key` — callers use
+    /// per-opcode register allocation to ensure that.
+    pub(crate) fn lua_get_index(
+        &mut self,
+        t: TValue,
+        key: TValue,
+        dest_slot: u32,
+    ) -> LuaResult<()> {
+        let mut target = t;
+        let k = key;
+        for _ in 0..MAX_TAG_LOOP {
+            match target {
+                TValue::Table(h) => {
+                    let direct = self.raw_table_get(h, k);
+                    if !matches!(direct, TValue::Nil) {
+                        self.current_thread_mut().stack[dest_slot as usize] =
+                            direct;
+                        return Ok(());
+                    }
+                    // Empty slot: consult __index.
+                    let tm = self
+                        .global
+                        .get_metamethod(target, TagMethod::Index);
+                    if matches!(tm, TValue::Nil) {
+                        self.current_thread_mut().stack[dest_slot as usize] =
+                            TValue::Nil;
+                        return Ok(());
+                    }
+                    if Self::is_callable(tm) {
+                        return self.call_index_metamethod(
+                            tm, target, k, dest_slot,
+                        );
+                    }
+                    // Tail into the metatable value.
+                    target = tm;
+                    continue;
+                }
+                _ => {
+                    let tm = self
+                        .global
+                        .get_metamethod(target, TagMethod::Index);
+                    if matches!(tm, TValue::Nil) {
+                        return Err(LuaError::Runtime(TValue::Nil));
+                    }
+                    if Self::is_callable(tm) {
+                        return self.call_index_metamethod(
+                            tm, target, k, dest_slot,
+                        );
+                    }
+                    target = tm;
+                    continue;
+                }
+            }
+        }
+        Err(LuaError::Runtime(TValue::Nil))
+    }
+
+    /// Perform a Lua store operation (`t[key] := value`) with
+    /// full metamethod dispatch. Mirrors `lua_get_index` for the
+    /// write path.
+    pub(crate) fn lua_set_index(
+        &mut self,
+        t: TValue,
+        key: TValue,
+        value: TValue,
+    ) -> LuaResult<()> {
+        let mut target = t;
+        let k = key;
+        for _ in 0..MAX_TAG_LOOP {
+            match target {
+                TValue::Table(h) => {
+                    // Raw check: if the slot already has a non-nil
+                    // value, we write straight without consulting
+                    // __newindex (Lua semantics).
+                    let existing = self.raw_table_get(h, k);
+                    if !matches!(existing, TValue::Nil) {
+                        self.global.table_set(h, k, value);
+                        return Ok(());
+                    }
+                    let tm = self
+                        .global
+                        .get_metamethod(target, TagMethod::NewIndex);
+                    if matches!(tm, TValue::Nil) {
+                        // No metamethod — raw set on the table.
+                        self.global.table_set(h, k, value);
+                        return Ok(());
+                    }
+                    if Self::is_callable(tm) {
+                        return self.call_newindex_metamethod(
+                            tm, target, k, value,
+                        );
+                    }
+                    target = tm;
+                    continue;
+                }
+                _ => {
+                    let tm = self
+                        .global
+                        .get_metamethod(target, TagMethod::NewIndex);
+                    if matches!(tm, TValue::Nil) {
+                        return Err(LuaError::Runtime(TValue::Nil));
+                    }
+                    if Self::is_callable(tm) {
+                        return self.call_newindex_metamethod(
+                            tm, target, k, value,
+                        );
+                    }
+                    target = tm;
+                    continue;
+                }
+            }
+        }
+        Err(LuaError::Runtime(TValue::Nil))
+    }
+
+    /// True for the three "function" variants Lua recognises as
+    /// callable via plain call: Lua closures, C closures, and
+    /// light C functions. Tables and userdata with `__call`
+    /// metamethods are NOT yet handled (Stage 5.14).
+    pub(crate) fn is_callable(v: TValue) -> bool {
+        matches!(
+            v,
+            TValue::LuaClosure(_) | TValue::CClosure(_) | TValue::LightCFunction(_)
+        )
+    }
+
+    /// Invoke a `__index` metamethod as `metamethod(t, key)` and
+    /// move the single return value into `dest_slot`. Uses a
+    /// scratch stack region above the current top so it doesn't
+    /// clobber the caller's registers.
+    fn call_index_metamethod(
+        &mut self,
+        metamethod: TValue,
+        t: TValue,
+        key: TValue,
+        dest_slot: u32,
+    ) -> LuaResult<()> {
+        let saved_top = self.current_thread().top;
+        let func_slot = saved_top;
+        {
+            let thread = self.current_thread_mut();
+            thread.grow_stack(3);
+            thread.stack[func_slot as usize] = metamethod;
+            thread.stack[(func_slot + 1) as usize] = t;
+            thread.stack[(func_slot + 2) as usize] = key;
+            thread.top = func_slot + 3;
+        }
+        self.call_value(func_slot, 2, 1)?;
+        let result = self.current_thread().stack[func_slot as usize];
+        self.current_thread_mut().stack[dest_slot as usize] = result;
+        // Restore the top (call_value leaves it at func_slot + 1).
+        self.current_thread_mut().top = saved_top;
+        Ok(())
+    }
+
+    /// Invoke a `__newindex` metamethod as
+    /// `metamethod(t, key, value)` discarding return values.
+    fn call_newindex_metamethod(
+        &mut self,
+        metamethod: TValue,
+        t: TValue,
+        key: TValue,
+        value: TValue,
+    ) -> LuaResult<()> {
+        let saved_top = self.current_thread().top;
+        let func_slot = saved_top;
+        {
+            let thread = self.current_thread_mut();
+            thread.grow_stack(4);
+            thread.stack[func_slot as usize] = metamethod;
+            thread.stack[(func_slot + 1) as usize] = t;
+            thread.stack[(func_slot + 2) as usize] = key;
+            thread.stack[(func_slot + 3) as usize] = value;
+            thread.top = func_slot + 4;
+        }
+        self.call_value(func_slot, 3, 0)?;
+        self.current_thread_mut().top = saved_top;
+        Ok(())
+    }
+
     /// Called by [`LuaState::call_value`] when the callable is a
     /// Lua closure. Sets up the register window, pushes a call
     /// frame, and delegates to [`LuaState::execute`].
@@ -1022,6 +1190,7 @@ fn lua_less_equal(a: &TValue, b: &TValue) -> LuaResult<bool> {
 mod tests {
     use crate::contract::{LClosure, LuaState, Proto, TValue, UpVal, UpValState};
     use crate::lopcodes::{create_abck, create_abx, OpCode, OFFSET_sBx};
+    use crate::ltm::TagMethod;
 
     /// Helper that builds a simple Proto with the supplied code
     /// and `max_stack_size`, then wraps it in an LClosure with no
@@ -2106,5 +2275,265 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(999));
+    }
+
+    // ---- Stage 5.13 __index / __newindex metamethods --------------
+
+    /// Build a metatable that maps `__index` to the given
+    /// fallback value. Used by tests that want to observe the
+    /// metamethod walk.
+    fn install_index_table(
+        state: &mut LuaState,
+        target: crate::contract::TableHandle,
+        fallback_table: crate::contract::TableHandle,
+    ) {
+        let mt = state.global.heap.alloc_table(crate::contract::Table::default());
+        let index_name = state.global.tag_method_name(TagMethod::Index);
+        state
+            .global
+            .table_set_shortstr(mt, index_name, TValue::Table(fallback_table));
+        state.global.heap.table_mut(target).metatable = Some(mt);
+    }
+
+    #[test]
+    fn gettable_walks_index_table_chain() {
+        // parent = {x = 100}; child = setmetatable({}, {__index = parent});
+        // assert child.x == 100.
+        let mut state = LuaState::new(0);
+        let parent = state.global.heap.alloc_table(crate::contract::Table::default());
+        let x_name = state.global.new_string(b"x", 0);
+        state.global.table_set_shortstr(parent, x_name, TValue::Integer(100));
+
+        let child = state.global.heap.alloc_table(crate::contract::Table::default());
+        install_index_table(&mut state, child, parent);
+
+        // Proto: R(0) := child; R(1) := R(0).x; return R(1)
+        let x_tv = TValue::ShortString(x_name);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_GETFIELD, 1, 0, 1, false),
+                return1(1),
+            ],
+            vec![TValue::Table(child), x_tv],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(100));
+    }
+
+    #[test]
+    fn gettable_returns_nil_when_key_and_metamethod_both_absent() {
+        // empty {} with no metatable returns nil for any access.
+        let mut state = LuaState::new(0);
+        let x_name = state.global.new_string(b"x", 0);
+        let x_tv = TValue::ShortString(x_name);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_NEWTABLE, 0, 0, 0, false),
+                extraarg(),
+                create_abck(OpCode::OP_GETFIELD, 1, 0, 0, false),
+                return1(1),
+            ],
+            vec![x_tv],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert!(state.is_nil(1));
+    }
+
+    #[test]
+    fn gettable_calls_index_function_metamethod() {
+        // __index = function(t, k) return 77 end
+        unsafe extern "C" fn index_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            // Arguments are at index 1 (table) and 2 (key); we
+            // ignore both and push a constant.
+            state.push_integer(77);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let child = state.global.heap.alloc_table(crate::contract::Table::default());
+        let mt = state.global.heap.alloc_table(crate::contract::Table::default());
+        let index_name = state.global.tag_method_name(TagMethod::Index);
+        state.global.table_set_shortstr(
+            mt,
+            index_name,
+            TValue::LightCFunction(index_fn as crate::contract::RawCFunction),
+        );
+        state.global.heap.table_mut(child).metatable = Some(mt);
+
+        let x_name = state.global.new_string(b"x", 0);
+        let x_tv = TValue::ShortString(x_name);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_GETFIELD, 1, 0, 1, false),
+                return1(1),
+            ],
+            vec![TValue::Table(child), x_tv],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(77));
+    }
+
+    #[test]
+    fn settable_with_newindex_table_redirects_write() {
+        // storage = {}; target = setmetatable({}, {__newindex = storage})
+        // target.key = 42; assert target.key == nil; assert storage.key == 42
+        let mut state = LuaState::new(0);
+        let storage = state.global.heap.alloc_table(crate::contract::Table::default());
+        let target = state.global.heap.alloc_table(crate::contract::Table::default());
+        let mt = state.global.heap.alloc_table(crate::contract::Table::default());
+        let newindex_name = state.global.tag_method_name(TagMethod::NewIndex);
+        state
+            .global
+            .table_set_shortstr(mt, newindex_name, TValue::Table(storage));
+        state.global.heap.table_mut(target).metatable = Some(mt);
+
+        let key_handle = state.global.new_string(b"key", 0);
+        let key_tv = TValue::ShortString(key_handle);
+
+        // Proto: R(0) := target; R(1) := 42; SETFIELD R(0)[K[1]] := R(1); RETURN0
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadi(1, 42),
+                create_abck(OpCode::OP_SETFIELD, 0, 1, 1, false),
+                return0(),
+            ],
+            vec![TValue::Table(target), key_tv],
+            2,
+        );
+        state.call_value(0, 0, 0).unwrap();
+        // Target still has no direct entry.
+        assert!(
+            state
+                .global
+                .heap
+                .table_get_shortstr(target, key_handle)
+                .is_none()
+        );
+        // Storage received the write.
+        assert_eq!(
+            state
+                .global
+                .heap
+                .table_get_shortstr(storage, key_handle),
+            Some(TValue::Integer(42))
+        );
+    }
+
+    #[test]
+    fn settable_with_newindex_function_metamethod_invokes_it() {
+        // __newindex = function(t, k, v) side_effect += v end
+        // Side effect is stored in a thread_local we read after the VM runs.
+        use std::cell::Cell;
+        thread_local! {
+            static SINK: Cell<i64> = const { Cell::new(0) };
+        }
+        SINK.with(|c| c.set(0));
+
+        unsafe extern "C" fn newindex_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            // arg 3 (value) is at stack slot 3 (function @1, t @2, k @3?
+            // actually func is at index 0 conceptually, args at 1..).
+            // Use lapi to_integer_x which is frame-base-relative.
+            let v = state.to_integer_x(3).unwrap_or(0);
+            SINK.with(|c| c.set(c.get() + v));
+            0
+        }
+
+        let mut state = LuaState::new(0);
+        let target = state.global.heap.alloc_table(crate::contract::Table::default());
+        let mt = state.global.heap.alloc_table(crate::contract::Table::default());
+        let newindex_name = state.global.tag_method_name(TagMethod::NewIndex);
+        state.global.table_set_shortstr(
+            mt,
+            newindex_name,
+            TValue::LightCFunction(newindex_fn as crate::contract::RawCFunction),
+        );
+        state.global.heap.table_mut(target).metatable = Some(mt);
+
+        let key_handle = state.global.new_string(b"k", 0);
+        let key_tv = TValue::ShortString(key_handle);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadi(1, 99),
+                create_abck(OpCode::OP_SETFIELD, 0, 1, 1, false),
+                return0(),
+            ],
+            vec![TValue::Table(target), key_tv],
+            2,
+        );
+        state.call_value(0, 0, 0).unwrap();
+        assert_eq!(SINK.with(|c| c.get()), 99);
+    }
+
+    #[test]
+    fn gettable_raw_slot_shadows_metamethod() {
+        // child = {x = 10}; parent = {x = 200};
+        // mt.__index = parent; child's own x wins over the walk.
+        let mut state = LuaState::new(0);
+        let parent = state.global.heap.alloc_table(crate::contract::Table::default());
+        let child = state.global.heap.alloc_table(crate::contract::Table::default());
+        let x_name = state.global.new_string(b"x", 0);
+        state.global.table_set_shortstr(parent, x_name, TValue::Integer(200));
+        state.global.table_set_shortstr(child, x_name, TValue::Integer(10));
+        install_index_table(&mut state, child, parent);
+
+        let x_tv = TValue::ShortString(x_name);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_GETFIELD, 1, 0, 1, false),
+                return1(1),
+            ],
+            vec![TValue::Table(child), x_tv],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(10));
+    }
+
+    #[test]
+    fn gettable_walks_nested_index_chain() {
+        // grand = {x = 7}; parent = {__index = grand}; child = {__index = parent}
+        // child.x == 7
+        let mut state = LuaState::new(0);
+        let grand = state.global.heap.alloc_table(crate::contract::Table::default());
+        let parent = state.global.heap.alloc_table(crate::contract::Table::default());
+        let child = state.global.heap.alloc_table(crate::contract::Table::default());
+        let x_name = state.global.new_string(b"x", 0);
+        state.global.table_set_shortstr(grand, x_name, TValue::Integer(7));
+        install_index_table(&mut state, parent, grand);
+        install_index_table(&mut state, child, parent);
+
+        let x_tv = TValue::ShortString(x_name);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_GETFIELD, 1, 0, 1, false),
+                return1(1),
+            ],
+            vec![TValue::Table(child), x_tv],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(7));
     }
 }

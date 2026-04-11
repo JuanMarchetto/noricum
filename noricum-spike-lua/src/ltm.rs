@@ -28,7 +28,7 @@
 
 #![allow(dead_code)]
 
-use crate::contract::{GlobalState, StringHandle};
+use crate::contract::{GlobalState, StringHandle, TValue, TableHandle};
 use crate::lstring::LUAI_MAXSHORTLEN;
 
 /// Tag method identifiers. The ordering of the first seven variants
@@ -225,6 +225,112 @@ impl GlobalState {
             "tag_method_name called before init_metamethod_names"
         );
         self.tm_names[event as usize]
+    }
+
+    /// Return the metatable bound to `value`, respecting the
+    /// "own metatable" rule for tables/userdata and the
+    /// per-type fallback in [`GlobalState::basic_mt`] for every
+    /// other value. Matches the switch inside
+    /// `luaT_gettmbyobj` in C Lua.
+    pub fn metatable_for_value(&self, value: TValue) -> Option<TableHandle> {
+        match value {
+            TValue::Table(h) => self.heap.table(h).metatable,
+            TValue::UserData(h) => self.heap.userdata_get(h).metatable,
+            _ => {
+                let tt = value.base_type_tag() as usize;
+                if tt < self.basic_mt.len() {
+                    self.basic_mt[tt]
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Fast-path metamethod fetch honoring the
+    /// `meta_cache_flags` bitmap on the metatable. Returns:
+    ///
+    /// * `Some(TValue::Nil)` — the cache or a positive lookup
+    ///   says "no metamethod", short-circuiting the walk.
+    /// * `Some(v)` — the actual metamethod value (function,
+    ///   table, or arbitrary value — type-checking is the
+    ///   caller's job).
+    /// * `None` — unreachable for current callers; included so
+    ///   future non-short-fast-string keys can opt out.
+    ///
+    /// `event` must be one of the fast-access variants
+    /// (`Index..=Eq`); other tag methods don't share the cache
+    /// bitmap.
+    pub fn fast_tm_get(
+        &self,
+        mt: TableHandle,
+        event: TagMethod,
+    ) -> Option<TValue> {
+        debug_assert!((event as u8) <= TagMethod::Eq as u8);
+        let table = self.heap.table(mt);
+        if table.meta_cache_flags & event.cache_bit() != 0 {
+            return Some(TValue::Nil);
+        }
+        let name = self.tm_names[event as usize];
+        let result = self
+            .heap
+            .table_get_shortstr(mt, name)
+            .unwrap_or(TValue::Nil);
+        Some(result)
+    }
+
+    /// Slow-path metamethod fetch for non-fast-access events
+    /// (arithmetic, concat, call, ...). Always walks the
+    /// metatable — no caching.
+    pub fn get_tm(&self, mt: TableHandle, event: TagMethod) -> TValue {
+        let name = self.tm_names[event as usize];
+        self.heap
+            .table_get_shortstr(mt, name)
+            .unwrap_or(TValue::Nil)
+    }
+
+    /// End-to-end metamethod fetch for an arbitrary value —
+    /// resolves the metatable, runs the fast cache check
+    /// (or slow walk for non-fast events), and returns
+    /// `TValue::Nil` if none is present at any step. Matches
+    /// `luaT_gettmbyobj`.
+    pub fn get_metamethod(&self, value: TValue, event: TagMethod) -> TValue {
+        let Some(mt) = self.metatable_for_value(value) else {
+            return TValue::Nil;
+        };
+        if (event as u8) <= TagMethod::Eq as u8 {
+            self.fast_tm_get(mt, event).unwrap_or(TValue::Nil)
+        } else {
+            self.get_tm(mt, event)
+        }
+    }
+
+    /// Update the fast-access cache on `mt` after a set
+    /// operation on the metamethod name `key`. If the new
+    /// value is `Nil`, the corresponding cache bit must be
+    /// cleared (set-via-nil removes the metamethod and the
+    /// cache would otherwise lie). If it's non-nil, the bit
+    /// is set so the next `fast_tm_get` short-circuits.
+    ///
+    /// Currently unused — it's the hook for when we give
+    /// tables a setmetatable-compatible API that reaches for
+    /// the cache. Kept here so its shape is locked in.
+    pub fn invalidate_fast_cache(
+        &mut self,
+        mt: TableHandle,
+        event: TagMethod,
+        new_value: TValue,
+    ) {
+        if (event as u8) > TagMethod::Eq as u8 {
+            return;
+        }
+        let table = self.heap.table_mut(mt);
+        let bit = event.cache_bit();
+        if matches!(new_value, TValue::Nil) {
+            table.meta_cache_flags |= bit;
+        } else {
+            table.meta_cache_flags &= !bit;
+        }
     }
 }
 

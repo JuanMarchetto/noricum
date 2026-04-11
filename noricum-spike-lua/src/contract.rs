@@ -259,6 +259,25 @@ impl TValue {
         }
     }
 
+    /// Base Lua type tag (`LUA_TNIL..=LUA_TTHREAD`) — used as
+    /// the index into `GlobalState::basic_mt` for per-type
+    /// metatables. Matches C's `ttype(o)` (not the variant tag).
+    pub const fn base_type_tag(&self) -> u8 {
+        match self {
+            TValue::Nil => LUA_TNIL,
+            TValue::False | TValue::True => LUA_TBOOLEAN,
+            TValue::LightUserData(_) => LUA_TLIGHTUSERDATA,
+            TValue::Integer(_) | TValue::Number(_) => LUA_TNUMBER,
+            TValue::ShortString(_) | TValue::LongString(_) => LUA_TSTRING,
+            TValue::Table(_) => LUA_TTABLE,
+            TValue::LuaClosure(_) | TValue::LightCFunction(_) | TValue::CClosure(_) => {
+                LUA_TFUNCTION
+            }
+            TValue::UserData(_) => LUA_TUSERDATA,
+            TValue::Thread(_) => LUA_TTHREAD,
+        }
+    }
+
     /// Lua 5.4 variant tag — the `tt_` byte the C VM dispatches on.
     pub const fn variant_tag(&self) -> u8 {
         match self {
@@ -667,6 +686,14 @@ pub struct GlobalState {
     /// stays `None` on an uninitialized `GlobalState::default()`.
     /// Matches the `G(L)->tmname[TM_N]` array in `lstate.h`.
     pub tm_names: Vec<StringHandle>,
+
+    /// Per-basic-type metatables indexed by Lua type tag
+    /// (`LUA_TNIL..=LUA_TTHREAD`, i.e. 0..=8). Tables and
+    /// userdata use their own per-object metatable (see
+    /// [`Table::metatable`] / [`UserData::metatable`]); every
+    /// other type shares the entry here. Matches the
+    /// `G(L)->mt[LUA_NUMTYPES]` array in `lstate.h`.
+    pub basic_mt: [Option<TableHandle>; 9],
 
     // -----------------------------------------------------------------------
     // GC state — Stage 3. Minimal fields required by `lgc::gc_step`'s
