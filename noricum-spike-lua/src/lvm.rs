@@ -36,9 +36,10 @@
 
 #![allow(dead_code)]
 
-use crate::contract::{LClosureHandle, LuaResult, LuaState, TValue};
+use crate::contract::{LClosureHandle, LuaError, LuaResult, LuaState, TValue};
+use crate::lobject::{raw_arith, ArithOp};
 use crate::lopcodes::{
-    get_opcode_raw, getarg_a, getarg_b, getarg_sbx, OpCode,
+    get_opcode_raw, getarg_a, getarg_b, getarg_c, getarg_sbx, OpCode,
 };
 
 // Raw u8 discriminants for the opcodes we dispatch on. Rust's
@@ -51,6 +52,21 @@ const OP_LOADNIL_U8: u8 = OpCode::OP_LOADNIL as u8;
 const OP_RETURN_U8: u8 = OpCode::OP_RETURN as u8;
 const OP_RETURN0_U8: u8 = OpCode::OP_RETURN0 as u8;
 const OP_RETURN1_U8: u8 = OpCode::OP_RETURN1 as u8;
+
+const OP_ADD_U8: u8 = OpCode::OP_ADD as u8;
+const OP_SUB_U8: u8 = OpCode::OP_SUB as u8;
+const OP_MUL_U8: u8 = OpCode::OP_MUL as u8;
+const OP_MOD_U8: u8 = OpCode::OP_MOD as u8;
+const OP_POW_U8: u8 = OpCode::OP_POW as u8;
+const OP_DIV_U8: u8 = OpCode::OP_DIV as u8;
+const OP_IDIV_U8: u8 = OpCode::OP_IDIV as u8;
+const OP_BAND_U8: u8 = OpCode::OP_BAND as u8;
+const OP_BOR_U8: u8 = OpCode::OP_BOR as u8;
+const OP_BXOR_U8: u8 = OpCode::OP_BXOR as u8;
+const OP_SHL_U8: u8 = OpCode::OP_SHL as u8;
+const OP_SHR_U8: u8 = OpCode::OP_SHR as u8;
+const OP_UNM_U8: u8 = OpCode::OP_UNM as u8;
+const OP_BNOT_U8: u8 = OpCode::OP_BNOT as u8;
 
 impl LuaState {
     /// Run the bytecode interpreter for the top call frame until
@@ -122,6 +138,25 @@ impl LuaState {
                         thread.stack[(base + a + i) as usize] = TValue::Nil;
                     }
                 }
+                // Binary arithmetic opcodes — R(A) := R(B) OP R(C).
+                // Every variant dispatches through lobject::raw_arith
+                // so integer/float coercion, error on non-numbers,
+                // and floor-division semantics all stay in one place.
+                OP_ADD_U8 => self.exec_arith_binary(base, instruction, ArithOp::Add)?,
+                OP_SUB_U8 => self.exec_arith_binary(base, instruction, ArithOp::Sub)?,
+                OP_MUL_U8 => self.exec_arith_binary(base, instruction, ArithOp::Mul)?,
+                OP_MOD_U8 => self.exec_arith_binary(base, instruction, ArithOp::Mod)?,
+                OP_POW_U8 => self.exec_arith_binary(base, instruction, ArithOp::Pow)?,
+                OP_DIV_U8 => self.exec_arith_binary(base, instruction, ArithOp::Div)?,
+                OP_IDIV_U8 => self.exec_arith_binary(base, instruction, ArithOp::IDiv)?,
+                OP_BAND_U8 => self.exec_arith_binary(base, instruction, ArithOp::BAnd)?,
+                OP_BOR_U8 => self.exec_arith_binary(base, instruction, ArithOp::BOr)?,
+                OP_BXOR_U8 => self.exec_arith_binary(base, instruction, ArithOp::BXor)?,
+                OP_SHL_U8 => self.exec_arith_binary(base, instruction, ArithOp::Shl)?,
+                OP_SHR_U8 => self.exec_arith_binary(base, instruction, ArithOp::Shr)?,
+                // Unary arithmetic — R(A) := OP R(B).
+                OP_UNM_U8 => self.exec_arith_unary(base, instruction, ArithOp::Unm)?,
+                OP_BNOT_U8 => self.exec_arith_unary(base, instruction, ArithOp::BNot)?,
                 OP_RETURN0_U8 => {
                     self.finish_vm_return(func_slot, base, 0, 0, n_expected);
                     return Ok(());
@@ -153,6 +188,65 @@ impl LuaState {
                     );
                 }
             }
+        }
+    }
+
+    /// Dispatch a binary arithmetic opcode (R(A) := R(B) op R(C)).
+    /// Reads the operands out of the current frame, calls
+    /// [`crate::lobject::raw_arith`], writes the result back to
+    /// R(A). Returns `Err` on domain errors (e.g. integer
+    /// div-by-zero) and panics on "needs metamethod fallback"
+    /// because that path lands with a later commit.
+    fn exec_arith_binary(
+        &mut self,
+        base: u32,
+        instruction: u32,
+        op: ArithOp,
+    ) -> LuaResult<()> {
+        let a = getarg_a(instruction) as u32;
+        let b = getarg_b(instruction) as u32;
+        let c = getarg_c(instruction) as u32;
+        let rb = self.current_thread().stack[(base + b) as usize];
+        let rc = self.current_thread().stack[(base + c) as usize];
+        let result = raw_arith(op, &rb, &rc)?;
+        match result {
+            Some(v) => {
+                self.current_thread_mut().stack[(base + a) as usize] = v;
+                Ok(())
+            }
+            None => {
+                // Stage 5.5 punts metamethod fallback to the
+                // commit that introduces __add/__sub/... dispatch.
+                // Raising a runtime error is strictly wrong for
+                // well-formed Lua programs that rely on
+                // metamethods, but it's loud and diagnosable
+                // until the real path lands.
+                Err(LuaError::Runtime(TValue::Nil))
+            }
+        }
+    }
+
+    /// Unary arithmetic dispatcher — R(A) := op R(B). Follows
+    /// raw_arith's convention of passing the same operand twice
+    /// for unary ops so the type-check short-circuit sees a
+    /// valid number on both sides (the result ignores the
+    /// right operand's value).
+    fn exec_arith_unary(
+        &mut self,
+        base: u32,
+        instruction: u32,
+        op: ArithOp,
+    ) -> LuaResult<()> {
+        let a = getarg_a(instruction) as u32;
+        let b = getarg_b(instruction) as u32;
+        let rb = self.current_thread().stack[(base + b) as usize];
+        let result = raw_arith(op, &rb, &rb)?;
+        match result {
+            Some(v) => {
+                self.current_thread_mut().stack[(base + a) as usize] = v;
+                Ok(())
+            }
+            None => Err(LuaError::Runtime(TValue::Nil)),
         }
     }
 
@@ -375,5 +469,151 @@ mod tests {
         push_simple_closure(&mut state, vec![loadi(0, 100), return1(0)], 1);
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(100));
+    }
+
+    // ---- Stage 5.5 arithmetic opcodes -----------------------------
+
+    fn arith_binary(op: OpCode, a: u32, b: u32, c: u32) -> u32 {
+        create_abck(op, a, b, c, false)
+    }
+
+    #[test]
+    fn op_add_two_integers_produces_sum() {
+        // R(0) = 10; R(1) = 32; R(2) = R(0) + R(1); return R(2)
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 10),
+                loadi(1, 32),
+                arith_binary(OpCode::OP_ADD, 2, 0, 1),
+                return1(2),
+            ],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn op_sub_two_integers_produces_difference() {
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 50),
+                loadi(1, 8),
+                arith_binary(OpCode::OP_SUB, 2, 0, 1),
+                return1(2),
+            ],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn op_mul_two_integers_produces_product() {
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 6),
+                loadi(1, 7),
+                arith_binary(OpCode::OP_MUL, 2, 0, 1),
+                return1(2),
+            ],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn op_div_produces_float_even_for_integer_inputs() {
+        // Lua's `/` is always float division.
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 10),
+                loadi(1, 4),
+                arith_binary(OpCode::OP_DIV, 2, 0, 1),
+                return1(2),
+            ],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_number_x(1), Some(2.5));
+    }
+
+    #[test]
+    fn op_idiv_produces_floor_division_of_integers() {
+        // 10 // 3 == 3. The integer floor-div path in raw_arith.
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 10),
+                loadi(1, 3),
+                arith_binary(OpCode::OP_IDIV, 2, 0, 1),
+                return1(2),
+            ],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(3));
+    }
+
+    #[test]
+    fn op_mod_produces_floor_modulo() {
+        // -5 mod 3 in Lua's floor-mod semantics is 1, not -2.
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, -5),
+                loadi(1, 3),
+                arith_binary(OpCode::OP_MOD, 2, 0, 1),
+                return1(2),
+            ],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    #[test]
+    fn op_band_two_integers_produces_bitwise_and() {
+        // 0b1100 & 0b1010 = 0b1000 = 8
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 12),
+                loadi(1, 10),
+                arith_binary(OpCode::OP_BAND, 2, 0, 1),
+                return1(2),
+            ],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(8));
+    }
+
+    #[test]
+    fn op_unm_unary_minus_flips_sign() {
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 5),
+                arith_binary(OpCode::OP_UNM, 1, 0, 0),
+                return1(1),
+            ],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(-5));
     }
 }
