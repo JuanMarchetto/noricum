@@ -180,12 +180,30 @@ fn format_g(val: f64) -> String {
 }
 ```
 
+## Dependency Budget — decide at the start of every migration
+
+Before writing any translation, pick one of three modes:
+
+| Mode | Policy | Binary vs C | Source vs C | Use case |
+|---|---|---:|---:|---|
+| **FREE** | delegate algorithms to best-in-class crates | 3-5x | 0.15-0.25x | research spikes, demos, reference implementations |
+| **MATCHING** | match the C original's dep count (vendor primitives as source) | 2-3x | 0.3-0.5x | drop-in replacements |
+| **ZERO** | no external runtime deps at all (everything in-tree) | ~2x | 0.4-0.7x | embedded, WASM, defense, regulated |
+
+**Initial-instructions template** for an interactive spike:
+
+> "Migrate {target}.c to Rust. Target: {N}-hour budget, byte-match with C oracle on {K} fixtures. **Dependency budget: {FREE|MATCHING|ZERO}.** [If MATCHING/ZERO:] Do not pull in `{example_crate}` or any wrapping crate; vendor the primitives as source under `src/{subdir}/`. Run `cargo tree` at each commit and confirm only the spike crate is listed."
+
+**Full recipe for each mode + conversion paths:** `docs/methodology/dependency-budget.md`.
+
+**Enforcement:** `tools/spike/dep-gate.sh` reads the mode from `SPIKE.md` (or `SPIKE_DEP_MODE` env var) and fails the commit if runtime deps exceed the allowed count. `tools/spike/binary-size-gate.sh <rust_bin> <c_bin> [max_ratio]` measures against a C baseline and fails if the ratio exceeds the threshold (default 3.5x).
+
 ## Binary Format Container Migration (learned from miniz_zip.c interactive spike)
 
 **Pattern:** For C libraries that wrap a well-specified binary format (ZIP, PNG, ELF, gzip, tar) around an algorithm-heavy core (deflate, DCT, LZW), the migration splits into three parts:
 
 1. **Container layer** — parse/emit the format's headers, tables, and records. Translate this by hand using the format spec as ground truth.
-2. **Algorithm layer** — compression, hashing, encryption. Delegate to an existing Rust crate (`flate2`, `crc32fast`, `aes`, `sha1/2`).
+2. **Algorithm layer** — compression, hashing, encryption. In FREE mode, delegate to an existing Rust crate (`flate2`, `crc32fast`, `aes`, `sha1/2`). In MATCHING/ZERO mode, vendor the primitives as source.
 3. **Oracle differential test** — compile the C library, expose a thin wrapper, compare Rust output against it on a fixture corpus.
 
 ```rust
