@@ -157,6 +157,9 @@ impl LuaState {
                 let raw_fn = self.global.heap.cclosure(handle).f;
                 self.invoke_c_function(func_slot, raw_fn, n_results)
             }
+            TValue::LuaClosure(handle) => {
+                self.invoke_lua_closure(func_slot, handle, n_results)
+            }
             TValue::Nil => Err(LuaError::Runtime(TValue::Nil)),
             _ => Err(LuaError::Runtime(TValue::Nil)),
         }

@@ -33,6 +33,7 @@ pub mod lstate;
 pub mod lstring;
 pub mod ltable;
 pub mod ltm;
+pub mod lvm;
 pub mod lzio;
 
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
