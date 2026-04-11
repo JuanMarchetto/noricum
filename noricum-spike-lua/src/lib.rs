@@ -22,6 +22,7 @@ pub mod contract;
 pub mod lctype;
 pub mod lmem;
 pub mod lopcodes;
+pub mod lzio;
 
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 
@@ -78,6 +79,28 @@ unsafe extern "C" {
         nelems: c_int,
         limit: c_int,
         out_size: *mut c_int,
+    ) -> c_int;
+
+    // lzio oracle shims. Each runs the operation through a real ZIO
+    // backed by a chunked in-memory reader over (src, src_len).
+    pub fn wr_lzio_read(
+        src: *const c_char,
+        src_len: usize,
+        chunk_size: usize,
+        out_buf: *mut u8,
+        n: usize,
+    ) -> usize;
+    pub fn wr_lzio_getaddr(
+        src: *const c_char,
+        src_len: usize,
+        chunk_size: usize,
+        out_buf: *mut u8,
+        n: usize,
+    ) -> c_int;
+    pub fn wr_lzio_fill_first(
+        src: *const c_char,
+        src_len: usize,
+        chunk_size: usize,
     ) -> c_int;
 }
 

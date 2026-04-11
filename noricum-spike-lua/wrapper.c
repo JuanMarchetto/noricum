@@ -6,6 +6,7 @@
 #include "lctype.h"
 #include "lopcodes.h"
 #include "lmem.h"
+#include "lzio.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -200,4 +201,78 @@ int wr_lmem_grow_array_size(int size_in, int nelems, int limit, int* out_size) {
     if (ok) *out_size = probe.size_out;
     lua_close(L);
     return ok ? 1 : 0;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * lzio oracle shims. Each helper spins up an ephemeral lua_State, wires
+ * a chunked in-memory reader into a real ZIO, and runs the requested
+ * operation. The fixture format (src_data + src_len + chunk_size) is
+ * shared across helpers so the Rust side can call each over the same
+ * backing store.
+ * ---------------------------------------------------------------------------
+ */
+
+typedef struct {
+    const char* data;
+    size_t size;
+    size_t pos;
+    size_t chunk_size;
+} wr_zio_source_t;
+
+static const char* wr_zio_chunked_reader(lua_State* L, void* ud, size_t* sz) {
+    wr_zio_source_t* src = (wr_zio_source_t*) ud;
+    (void) L;
+    if (src->pos >= src->size) {
+        *sz = 0;
+        return NULL;
+    }
+    size_t remaining = src->size - src->pos;
+    size_t take = remaining < src->chunk_size ? remaining : src->chunk_size;
+    const char* result = src->data + src->pos;
+    src->pos += take;
+    *sz = take;
+    return result;
+}
+
+size_t wr_lzio_read(const char* src, size_t src_len, size_t chunk_size,
+                    unsigned char* out_buf, size_t n) {
+    if (chunk_size == 0) chunk_size = 1;
+    lua_State* L = luaL_newstate();
+    if (!L) return n;
+    wr_zio_source_t source = { src, src_len, 0, chunk_size };
+    ZIO z;
+    luaZ_init(L, &z, wr_zio_chunked_reader, &source);
+    size_t missing = luaZ_read(&z, out_buf, n);
+    lua_close(L);
+    return missing;
+}
+
+int wr_lzio_getaddr(const char* src, size_t src_len, size_t chunk_size,
+                    unsigned char* out_buf, size_t n) {
+    if (chunk_size == 0) chunk_size = 1;
+    lua_State* L = luaL_newstate();
+    if (!L) return 0;
+    wr_zio_source_t source = { src, src_len, 0, chunk_size };
+    ZIO z;
+    luaZ_init(L, &z, wr_zio_chunked_reader, &source);
+    const void* addr = luaZ_getaddr(&z, n);
+    int ok = (addr != NULL);
+    if (ok && out_buf) {
+        memcpy(out_buf, addr, n);
+    }
+    lua_close(L);
+    return ok ? 1 : 0;
+}
+
+int wr_lzio_fill_first(const char* src, size_t src_len, size_t chunk_size) {
+    if (chunk_size == 0) chunk_size = 1;
+    lua_State* L = luaL_newstate();
+    if (!L) return -1;
+    wr_zio_source_t source = { src, src_len, 0, chunk_size };
+    ZIO z;
+    luaZ_init(L, &z, wr_zio_chunked_reader, &source);
+    int b = luaZ_fill(&z);
+    lua_close(L);
+    return b;
 }

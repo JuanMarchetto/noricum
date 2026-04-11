@@ -95,6 +95,27 @@ int wr_lopcodes_op_extraarg(void);
  * initialize. */
 int wr_lmem_grow_array_size(int size_in, int nelems, int limit, int* out_size);
 
+/* lzio — buffered input stream (lzio.{c,h}).
+ *
+ * Spins up an ephemeral lua_State, wires a chunked in-memory reader
+ * into a real ZIO, and runs the operation through it. All three
+ * helpers work over the same (src, src_len, chunk_size) fixture so
+ * the Rust port can test chunk-boundary behavior identically. */
+
+/* Returns the number of missing bytes (0 on a full read). Writes up
+ * to `n` bytes into `out_buf`. */
+size_t wr_lzio_read(const char* src, size_t src_len, size_t chunk_size,
+                    unsigned char* out_buf, size_t n);
+
+/* Returns 1 on success, 0 on EOF or cross-chunk shortfall. Copies up
+ * to `n` bytes into `out_buf` if the contiguous block exists. */
+int wr_lzio_getaddr(const char* src, size_t src_len, size_t chunk_size,
+                    unsigned char* out_buf, size_t n);
+
+/* Returns the first byte of the first chunk as an unsigned int (0-255),
+ * or -1 on EOZ. Mirrors luaZ_fill's return semantics. */
+int wr_lzio_fill_first(const char* src, size_t src_len, size_t chunk_size);
+
 #ifdef __cplusplus
 }
 #endif
