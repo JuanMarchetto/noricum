@@ -207,6 +207,31 @@ fn parse_central_directory(
     Ok(entries)
 }
 
+// ---- Local file header parsing (needed for extract_to_mem) --------
+
+/// Signature for a local file header.
+pub const LOCAL_HEADER_SIGNATURE: u32 = 0x0403_4b50;
+/// Fixed size of the local file header block (excluding name/extra).
+pub const LOCAL_HEADER_FIXED_SIZE: usize = 30;
+
+/// Parse a local file header at the given offset in the archive. Returns
+/// the absolute byte offset of the compressed data that follows the
+/// header (fixed size + file_name_length + extra_field_length).
+fn find_data_start(source: &mut ZipSource, local_header_offset: u64) -> ZipResult<u64> {
+    source.seek(SeekFrom::Start(local_header_offset))?;
+    let mut hdr = [0u8; LOCAL_HEADER_FIXED_SIZE];
+    source.read_exact(&mut hdr)?;
+
+    if read_u32_le(&hdr, 0) != LOCAL_HEADER_SIGNATURE {
+        return Err(ZipError::InvalidHeaderOrCorrupted);
+    }
+
+    let file_name_length = read_u16_le(&hdr, 26) as u64;
+    let extra_field_length = read_u16_le(&hdr, 28) as u64;
+
+    Ok(local_header_offset + LOCAL_HEADER_FIXED_SIZE as u64 + file_name_length + extra_field_length)
+}
+
 // ---- Public ZipReader API ------------------------------------------
 
 impl ZipReader {
@@ -244,6 +269,82 @@ impl ZipReader {
     /// Slice of all parsed entries.
     pub fn entries(&self) -> &[CentralDirHeader] {
         &self.archive.entries
+    }
+
+    /// Rust analogue of `mz_zip_reader_locate_file`. Linear scan over the
+    /// central directory for an entry whose filename matches `name` byte
+    /// for byte. Returns the entry's index, or `FileNotFound`.
+    pub fn locate_file(&self, name: &str) -> ZipResult<usize> {
+        self.archive
+            .entries
+            .iter()
+            .position(|e| e.file_name == name)
+            .ok_or(ZipError::FileNotFound)
+    }
+
+    /// Rust analogue of `mz_zip_reader_file_stat`. Returns the central
+    /// directory header at the given index.
+    pub fn stat(&self, file_index: usize) -> ZipResult<&CentralDirHeader> {
+        self.archive
+            .entries
+            .get(file_index)
+            .ok_or(ZipError::InvalidParameter)
+    }
+
+    /// Rust analogue of `mz_zip_reader_extract_to_mem`. Decompresses the
+    /// entry at `file_index` into a freshly allocated `Vec<u8>` whose
+    /// length equals `uncompressed_size`. CRC32 is verified against the
+    /// central directory record.
+    pub fn extract_to_mem(&mut self, file_index: usize) -> ZipResult<Vec<u8>> {
+        // Clone the header fields we need before re-borrowing self.archive.source mutably.
+        let entry = self
+            .archive
+            .entries
+            .get(file_index)
+            .ok_or(ZipError::InvalidParameter)?;
+        let method = entry.compression_method;
+        let compressed_size = entry.compressed_size;
+        let uncompressed_size = entry.uncompressed_size;
+        let expected_crc32 = entry.crc32;
+        let local_header_offset = entry.local_header_offset;
+
+        if uncompressed_size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let data_start = find_data_start(&mut self.archive.source, local_header_offset)?;
+        self.archive.source.seek(SeekFrom::Start(data_start))?;
+
+        let mut out = Vec::with_capacity(uncompressed_size as usize);
+
+        match method {
+            CompressionMethod::Stored => {
+                let mut taken = (&mut self.archive.source).take(compressed_size);
+                taken
+                    .read_to_end(&mut out)
+                    .map_err(|_| ZipError::FileReadFailed)?;
+            }
+            CompressionMethod::Deflated => {
+                use flate2::read::DeflateDecoder;
+                let taken = (&mut self.archive.source).take(compressed_size);
+                let mut decoder = DeflateDecoder::new(taken);
+                decoder
+                    .read_to_end(&mut out)
+                    .map_err(|_| ZipError::DecompressionFailed)?;
+            }
+            CompressionMethod::Unsupported(_) => return Err(ZipError::UnsupportedMethod),
+        }
+
+        if out.len() as u64 != uncompressed_size {
+            return Err(ZipError::UnexpectedDecompressedSize);
+        }
+
+        let actual_crc32 = crc32fast::hash(&out);
+        if actual_crc32 != expected_crc32 {
+            return Err(ZipError::CrcCheckFailed);
+        }
+
+        Ok(out)
     }
 }
 
@@ -288,6 +389,54 @@ mod reader_tests {
             let expected = format!("content of file {i}\n");
             assert_eq!(entry.uncompressed_size, expected.len() as u64);
         }
+    }
+
+    #[test]
+    fn locate_and_stat_round_trip() {
+        let reader = ZipReader::open(fixture("multi_small.zip")).expect("open");
+        let idx = reader.locate_file("file3.txt").expect("locate");
+        let stat = reader.stat(idx).expect("stat");
+        assert_eq!(stat.file_name, "file3.txt");
+        assert_eq!(stat.uncompressed_size, "content of file 3\n".len() as u64);
+    }
+
+    #[test]
+    fn locate_missing_returns_file_not_found() {
+        let reader = ZipReader::open(fixture("hello.zip")).expect("open");
+        match reader.locate_file("nope.txt") {
+            Err(ZipError::FileNotFound) => {}
+            other => panic!("expected FileNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_hello_txt_from_hello_zip() {
+        let mut reader = ZipReader::open(fixture("hello.zip")).expect("open");
+        let idx = reader.locate_file("hello.txt").expect("locate");
+        let body = reader.extract_to_mem(idx).expect("extract");
+        assert_eq!(body, b"hello\n");
+    }
+
+    #[test]
+    fn extract_deflated_compresses_and_decompresses_back() {
+        let mut reader = ZipReader::open(fixture("deflated.zip")).expect("open");
+        let idx = reader.locate_file("deflated.txt").expect("locate");
+        let body = reader.extract_to_mem(idx).expect("extract");
+        let expected: Vec<u8> = b"this should compress well "
+            .iter()
+            .cycle()
+            .take(26 * 256)
+            .copied()
+            .collect();
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn extract_stored_passes_through() {
+        let mut reader = ZipReader::open(fixture("stored_only.zip")).expect("open");
+        let idx = reader.locate_file("stored.txt").expect("locate");
+        let body = reader.extract_to_mem(idx).expect("extract");
+        assert_eq!(body, b"no compression here\n");
     }
 
     #[test]

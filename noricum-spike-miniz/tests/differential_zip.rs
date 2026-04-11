@@ -269,6 +269,192 @@ fn reader_diff_test_multi_small_zip() {
     assert_eq!(rust, oracle, "multi_small.zip differential mismatch");
 }
 
+/// Rust-side snapshot equivalent of `snapshot_via_oracle`. Walks every
+/// entry, extracts the body via `ZipReader::extract_to_mem`, and produces
+/// the same `EntrySnapshot` shape so the two sides can be compared field
+/// by field.
+fn snapshot_via_rust(path: &Path) -> Result<ArchiveSnapshot, String> {
+    let mut reader = RustZipReader::open(path).map_err(|e| format!("rust open: {e:?}"))?;
+    let n = reader.num_entries();
+    let headers: Vec<_> = reader.entries().iter().cloned().collect();
+
+    let mut entries = Vec::with_capacity(n);
+    for (idx, hdr) in headers.into_iter().enumerate() {
+        let body = reader
+            .extract_to_mem(idx)
+            .map_err(|e| format!("rust extract({idx}): {e:?}"))?;
+        let first_bytes = body[..body.len().min(FIRST_BYTES_CAP)].to_vec();
+        entries.push(EntrySnapshot {
+            name: hdr.file_name,
+            size: hdr.uncompressed_size as usize,
+            crc32: hdr.crc32,
+            first_bytes,
+        });
+    }
+
+    Ok(ArchiveSnapshot {
+        fixture: path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string(),
+        entries,
+    })
+}
+
+/// The hour-7 full-corpus differential test for the reader path. Extracts
+/// every entry of every fixture via both the C oracle and the Rust reader,
+/// then compares the full `EntrySnapshot` (name + size + crc32 +
+/// first_bytes). This is the toughest reader-side assertion the spike can
+/// make short of byte-for-byte comparison of the whole extracted body,
+/// which is covered by the contained tests below for a few specific cases.
+#[test]
+fn reader_full_diff_oracle_vs_rust() {
+    let mut matched = 0usize;
+    let mut mismatched: Vec<String> = Vec::new();
+
+    for path in list_fixtures() {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let oracle = snapshot_via_oracle(&path).expect("oracle");
+        let rust = snapshot_via_rust(&path).expect("rust");
+        if oracle.entries == rust.entries {
+            matched += 1;
+            println!("  MATCH  {name}");
+        } else {
+            mismatched.push(name.clone());
+            println!("  DIFFER {name}");
+            for (i, (o, r)) in oracle.entries.iter().zip(rust.entries.iter()).enumerate() {
+                if o != r {
+                    println!(
+                        "    entry {i}: oracle={{name={:?}, size={}, crc={:08x}}}, rust={{name={:?}, size={}, crc={:08x}}}",
+                        o.name, o.size, o.crc32, r.name, r.size, r.crc32
+                    );
+                }
+            }
+        }
+    }
+
+    println!(
+        "\nFull diff: {} matched / {} mismatched",
+        matched,
+        mismatched.len()
+    );
+    assert!(
+        mismatched.is_empty(),
+        "full oracle-vs-rust diff failed on: {mismatched:?}"
+    );
+}
+
+/// Byte-for-byte comparison on a handful of fixtures where the content is
+/// small enough that we can afford the direct equality check on the full
+/// body, not just the first 64 bytes.
+#[test]
+fn reader_byte_equal_small_fixtures() {
+    let fixtures = [
+        "hello.zip",
+        "empty.zip",
+        "multi_small.zip",
+        "stored_only.zip",
+        "deflated.zip",
+    ];
+
+    for name in fixtures {
+        let path = fixtures_dir().join(name);
+        let mut rust_reader = RustZipReader::open(&path).expect("rust open");
+        let n = rust_reader.num_entries();
+
+        // Fetch the names and sizes up front to avoid borrow-issues during extract.
+        let headers: Vec<_> = rust_reader.entries().iter().cloned().collect();
+
+        for (idx, hdr) in headers.iter().enumerate() {
+            let rust_body = rust_reader.extract_to_mem(idx).expect("rust extract");
+
+            // C oracle extraction of the same entry.
+            let c_path = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+            let h = unsafe { wr_reader_open(c_path.as_ptr()) };
+            assert!(!h.is_null(), "c open {name}");
+            let mut c_body = vec![0u8; hdr.uncompressed_size as usize];
+            if hdr.uncompressed_size > 0 {
+                let rc = unsafe {
+                    wr_reader_extract(
+                        h,
+                        idx as i32,
+                        c_body.as_mut_ptr() as *mut _,
+                        c_body.len(),
+                    )
+                };
+                assert_eq!(rc, 0, "c extract {name}/{}", hdr.file_name);
+            }
+            unsafe { wr_reader_close(h) };
+
+            assert_eq!(
+                rust_body, c_body,
+                "byte mismatch in {name}/{} (entry {idx})",
+                hdr.file_name
+            );
+        }
+        let _ = n;
+    }
+}
+
+/// Cross-corpus diff test: run the Rust reader against every fixture and
+/// compare the central-directory view against the C oracle. Any fixture the
+/// Rust side cannot parse yet is recorded as a skip with its error, so we
+/// get a live map of what works and what doesn't as the reader evolves.
+#[test]
+fn reader_diff_test_all_fixtures() {
+    let mut matched = 0usize;
+    let mut skipped: Vec<(String, String)> = Vec::new();
+    let mut mismatched: Vec<String> = Vec::new();
+
+    for path in list_fixtures() {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let oracle = oracle_min_entries(&path);
+
+        match RustZipReader::open(&path) {
+            Ok(reader) => {
+                let rust: Vec<MinEntry> = reader
+                    .entries()
+                    .iter()
+                    .map(|e| MinEntry {
+                        name: e.file_name.clone(),
+                        size: e.uncompressed_size,
+                        crc32: e.crc32,
+                    })
+                    .collect();
+                if rust == oracle {
+                    matched += 1;
+                    println!("  MATCH  {name:24}");
+                } else {
+                    mismatched.push(name.clone());
+                    println!("  DIFFER {name:24}\n    oracle: {oracle:?}\n    rust:   {rust:?}");
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:?}");
+                skipped.push((name.clone(), msg.clone()));
+                println!("  SKIP   {name:24}  ({msg})");
+            }
+        }
+    }
+
+    println!(
+        "\nSummary: {} matched / {} skipped / {} mismatched",
+        matched,
+        skipped.len(),
+        mismatched.len()
+    );
+
+    // Hard failure only on MISMATCH (Rust parsed something and disagreed
+    // with C). Skips are expected for now — they're the "things still to
+    // build" todo list for this reader path. When skip count hits zero
+    // the reader path is complete.
+    assert!(
+        mismatched.is_empty(),
+        "differential mismatch on {mismatched:?}"
+    );
+}
+
 #[test]
 fn locate_by_name_matches_iterated_index() {
     let path = fixtures_dir().join("multi_small.zip");
