@@ -25,3 +25,11 @@ constant_time_eq = "0.3"
 
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2", "aes-crypto", "time"] }
+
+[profile.release-min]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"
