@@ -1,0 +1,35 @@
+[workspace]
+
+[package]
+name = "noricum-spike-miniz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "spike"
+path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+flate2 = "1"
+crc32fast = "1"
+# AES-encrypted ZIP entries (WinZip AES-256 extension, APPNOTE.TXT 7.4)
+aes = "0.8"
+hmac = { version = "0.12", features = ["reset"] }
+sha1 = "0.10"
+pbkdf2 = "0.12"
+constant_time_eq = "0.3"
+
+[dev-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2", "aes-crypto", "time"] }
+
+[profile.release-min]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"

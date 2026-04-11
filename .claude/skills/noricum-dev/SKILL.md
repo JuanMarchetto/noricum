@@ -88,3 +88,105 @@ Pending -> Extracted -> Characterized -> C2RustDone -> Analyzed -> Refined -> Va
 - Structural chunking: data model (structs/constructors) in chunk 0, logic functions in later chunks
 - For multi-file C projects: type definitions live in .h headers, not .c files — must resolve includes
 - Type contract prompt must enforce idiomatic Rust (no raw pointers, no C-style aliases, complete structs)
+
+## Interactive Spike Mode (alternative to pipeline, validated on miniz_zip.c 2026-04-11)
+
+**When to use:** C file where the autonomous pipeline has failed 3+ times, OR target is >2500 LOC with multi-layer wrappers/legacy API baggage. For <1000 LOC leaf functions, pipeline still wins on cost per attempt.
+
+**What it is:** Claude Code as the interactive director, human as the operator, Noricum primitives available as MCP tools but not as a hardcoded sequence. Writes Rust bottom-up function-by-function with an oracle harness for immediate diff validation.
+
+**Phase 0 is sacred** (pre-clock, ~2-3 hours, not counted in 8-hour spike budget):
+1. `cargo new` outside the cargo workspace (or with explicit `[workspace]` in Cargo.toml to break inheritance)
+2. Copy C sources + headers into the spike dir
+3. `build.rs` with `cc-rs` compiling C into a static lib
+4. Thin C wrapper (`wrapper.c` + `wrapper.h`) exposing opaque handles over the target functions
+5. Pure-C smoke test compiled with `gcc` — must return 0 before any Rust is written
+6. Deterministic fixture generator (Python `zipfile` or equivalent), script + output both committed
+7. Rust-side differential test that extracts via the C wrapper and snapshots `(name, size, crc32, first_bytes)`
+8. Phase 0 is green when `cargo test -- oracle_selftest` passes. Hour 0 starts here.
+
+**Architectural seed strategy** (critical for avoiding C's accidental complexity):
+- Before writing Rust, clone an existing idiomatic Rust crate for the problem domain to a tempdir
+- Read its `src/types.rs` and `src/spec.rs` for 30 minutes
+- Steal the type architecture wholesale (especially trait bound patterns — this is where the pipeline fails with `Box<dyn Read + Write + Seek>`)
+- C source stays as byte-level ABI ground truth, NOT as architectural template
+
+Validated seeds:
+- ZIP containers → `zip-rs/zip2` (github.com/zip-rs/zip2)
+- HTTP parsers → `hyper`
+- SQLite adapters → `rusqlite`
+
+**Algorithm delegation:** don't translate well-solved subsystems. Delegate to existing crates:
+- Deflate/inflate → `flate2` (saves ~2200 LOC on miniz_zip alone)
+- CRC32 → `crc32fast`
+- AES → `aes` + `ctr` from RustCrypto
+- SHA → `sha1` / `sha2`
+
+The differential test asserts on extracted content + metadata, NOT on raw archive bytes. This scopes the migration to "structure and ABI" while keeping the algorithm work in battle-tested crates.
+
+**Bottom-up function-by-function discipline:**
+- Each function commits only after its diff test passes
+- No batch commits, no "implement five then test"
+- Failed function after 3 repairs: mark blocked, move on
+- Hour-3 gate: if the simplest non-empty fixture fails, abort and reassess
+- Hour-8 hard exit regardless of state
+
+**Reference commit history:** `feat/interactive-spike` branch of this repo. 5 commits from `cf4a07f` (Phase 0 oracle) through `454e560` (writer path complete). miniz_zip.c → 1157 LOC Rust, 28 tests, 0 unsafe, 19 min elapsed.
+
+## MCP Tool Limitations (learned 2026-04-11)
+
+**DO NOT use `mcp__noricum__migrate_function` as a drop-in translator.** When called via the MCP server, it only runs the first stage of the pipeline state machine (`Pending → Extracted`) and returns `rust_source: ""` with `state: "Extracted"`. The full translation pipeline (Characterized → C2RustDone → Analyzed → Refined → Validated) does not execute from the MCP interface — only from the CLI or orchestrator.
+
+**Workaround:** Interactive agents doing C-to-Rust work should write Rust directly using their own reasoning + architectural references (zip-rs, hyper, etc.), and use `mcp__noricum__check_compilation` and `mcp__noricum__diff_test` MCP tools only for verification. The "translate via MCP" pattern the design doc assumed does not work as-is.
+
+**Unverified:** whether other pipeline stages (analyze_function, behavioral_review, etc.) have the same limitation or actually produce output via MCP. Check before relying on any of them.
+
+## Binary Size Expectations (C → Rust honest numbers)
+
+The miniz_zip interactive spike produced empirical size data for a minimal CLI (open hello.zip + extract one entry), equivalent functionality both sides, release + stripped:
+
+| Variant | Bytes | Ratio vs C-Os |
+|---|---:|---:|
+| C -O2 -s (no AES) | 92,376 | 1.28x |
+| C -Os -s | 71,896 | 1.00x |
+| Rust `--release` --strip | 457,016 | 6.36x |
+| Rust `release-min` (LTO+opt-z+abort+strip) | 353,400 | 4.92x |
+
+**Expect Rust to be 3-5x larger than C for small utilities.** Sources of overhead:
+- libstd baseline + panic unwinding + format! infrastructure: ~200 KB fixed cost
+- AES crypto crate family (aes, hmac, sha1, pbkdf2, constant_time_eq): ~80-100 KB when linked in
+- flate2 + miniz_oxide (Rust port of deflate): ~60-100 KB
+- Generic monomorphization of library code: variable, typically 20-40 KB
+
+**To minimize binary size in a Rust migration:**
+
+1. Add a `release-min` profile to `Cargo.toml`:
+```toml
+[profile.release-min]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"
+```
+This is ~23% smaller than `--release` for free, with no source changes.
+
+2. Feature-gate expensive optional subsystems (AES, compression beyond deflate, zip64-only code). Add `aes` as `optional = true` and gate the module with `#[cfg(feature = "aes")]`.
+
+3. For embedded or WASM targets, consider `#![no_std]` + `alloc`. This removes panic unwinding and most of libstd but requires refactoring `ZipError::Io(io::Error)` variants.
+
+**When binary size matters:** embedded, WASM, edge functions with cold-start constraints, CDN-distributed binaries with bandwidth costs. When it doesn't: desktop CLIs, server tools, libraries linked into larger binaries.
+
+**Flag in the blog post / design doc:** any claim that "Rust migration preserves performance characteristics" should be backed by an actual binary size measurement. The interactive-spike pattern bakes this in via the `release-min` profile and the /tmp/cbench vs `target/release/rbench` comparison.
+
+## Design Heuristic: "Can I Eliminate This Feature by Choosing a Different Rust Architecture?"
+
+Before translating any complexity source in a C library, audit it:
+- **Data-flow driven** (compression, CRC, actual algorithms): must port or delegate
+- **Architecture-driven** (branches that exist because of a particular C data flow choice): candidate for elimination by choosing a different Rust architecture
+- **Legacy baggage** (wrapper variants, 32-bit fallbacks, deprecated aliases): don't port unless needed
+
+The miniz_zip spike eliminated FOUR features this way: data descriptors (read from central dir instead of local header), `Box<dyn>` trait object indirection (use `ZipSource` enum), 32-bit fallback branches (use u64 everywhere), 8 writer init variants (collapsed to `ZipWriter::create(path)`). Net: ~700 LOC of C complexity became zero lines of Rust.
+
+See `memory/feedback_architectural_elimination.md` for the full pattern with examples and recognition rules.
