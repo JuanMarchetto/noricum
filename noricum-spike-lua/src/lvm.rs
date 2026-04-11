@@ -40,7 +40,7 @@ use crate::contract::{LClosureHandle, LuaError, LuaResult, LuaState, TValue};
 use crate::lobject::{raw_arith, to_number_ns, ArithOp};
 use crate::lopcodes::{
     get_opcode_raw, getarg_a, getarg_b, getarg_bx, getarg_c, getarg_k, getarg_sbx,
-    getarg_sj, OpCode,
+    getarg_sc, getarg_sj, OpCode,
 };
 
 // Raw u8 discriminants for the opcodes we dispatch on. Rust's
@@ -88,6 +88,20 @@ const OP_SETFIELD_U8: u8 = OpCode::OP_SETFIELD as u8;
 const OP_CALL_U8: u8 = OpCode::OP_CALL as u8;
 const OP_FORLOOP_U8: u8 = OpCode::OP_FORLOOP as u8;
 const OP_FORPREP_U8: u8 = OpCode::OP_FORPREP as u8;
+
+const OP_ADDI_U8: u8 = OpCode::OP_ADDI as u8;
+const OP_ADDK_U8: u8 = OpCode::OP_ADDK as u8;
+const OP_SUBK_U8: u8 = OpCode::OP_SUBK as u8;
+const OP_MULK_U8: u8 = OpCode::OP_MULK as u8;
+const OP_MODK_U8: u8 = OpCode::OP_MODK as u8;
+const OP_POWK_U8: u8 = OpCode::OP_POWK as u8;
+const OP_DIVK_U8: u8 = OpCode::OP_DIVK as u8;
+const OP_IDIVK_U8: u8 = OpCode::OP_IDIVK as u8;
+const OP_BANDK_U8: u8 = OpCode::OP_BANDK as u8;
+const OP_BORK_U8: u8 = OpCode::OP_BORK as u8;
+const OP_BXORK_U8: u8 = OpCode::OP_BXORK as u8;
+const OP_SHLI_U8: u8 = OpCode::OP_SHLI as u8;
+const OP_SHRI_U8: u8 = OpCode::OP_SHRI as u8;
 
 impl LuaState {
     /// Run the bytecode interpreter for the top call frame until
@@ -515,6 +529,24 @@ impl LuaState {
                 OP_BXOR_U8 => self.exec_arith_binary(base, instruction, ArithOp::BXor)?,
                 OP_SHL_U8 => self.exec_arith_binary(base, instruction, ArithOp::Shl)?,
                 OP_SHR_U8 => self.exec_arith_binary(base, instruction, ArithOp::Shr)?,
+                // K-variants: R(A) := R(B) op K[C]. K[C] is a
+                // constant from the proto's constant pool.
+                OP_ADDK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::Add)?,
+                OP_SUBK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::Sub)?,
+                OP_MULK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::Mul)?,
+                OP_MODK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::Mod)?,
+                OP_POWK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::Pow)?,
+                OP_DIVK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::Div)?,
+                OP_IDIVK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::IDiv)?,
+                OP_BANDK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::BAnd)?,
+                OP_BORK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::BOr)?,
+                OP_BXORK_U8 => self.exec_arith_k(func_slot, base, instruction, ArithOp::BXor)?,
+                // I-variants: R(A) := R(B) op sC (small signed
+                // immediate). Only ADDI, SHLI, and SHRI exist
+                // in Lua 5.4's opcode set.
+                OP_ADDI_U8 => self.exec_arith_i(base, instruction, ArithOp::Add)?,
+                OP_SHLI_U8 => self.exec_arith_i(base, instruction, ArithOp::Shl)?,
+                OP_SHRI_U8 => self.exec_arith_i(base, instruction, ArithOp::Shr)?,
                 // Unary arithmetic — R(A) := OP R(B).
                 OP_UNM_U8 => self.exec_arith_unary(base, instruction, ArithOp::Unm)?,
                 OP_BNOT_U8 => self.exec_arith_unary(base, instruction, ArithOp::BNot)?,
@@ -621,6 +653,56 @@ impl LuaState {
                 // until the real path lands.
                 Err(LuaError::Runtime(TValue::Nil))
             }
+        }
+    }
+
+    /// K-variant arithmetic dispatcher — R(A) := R(B) op K[C].
+    /// Same shape as [`LuaState::exec_arith_binary`] but the
+    /// right operand comes from the constant pool.
+    fn exec_arith_k(
+        &mut self,
+        func_slot: u32,
+        base: u32,
+        instruction: u32,
+        op: ArithOp,
+    ) -> LuaResult<()> {
+        let a = getarg_a(instruction) as u32;
+        let b = getarg_b(instruction) as u32;
+        let c = getarg_c(instruction) as usize;
+        let rb = self.current_thread().stack[(base + b) as usize];
+        let rc = self.constant_at(func_slot, c);
+        let result = raw_arith(op, &rb, &rc)?;
+        match result {
+            Some(v) => {
+                self.current_thread_mut().stack[(base + a) as usize] = v;
+                Ok(())
+            }
+            None => Err(LuaError::Runtime(TValue::Nil)),
+        }
+    }
+
+    /// I-variant arithmetic dispatcher — R(A) := R(B) op sC
+    /// (where sC is a small signed immediate encoded in the
+    /// C field). Only OP_ADDI, OP_SHLI, and OP_SHRI use this
+    /// path in Lua 5.4.
+    fn exec_arith_i(
+        &mut self,
+        base: u32,
+        instruction: u32,
+        op: ArithOp,
+    ) -> LuaResult<()> {
+        let a = getarg_a(instruction) as u32;
+        let b = getarg_b(instruction) as u32;
+        let sc = getarg_sc(instruction) as i64;
+        let rb = self.current_thread().stack[(base + b) as usize];
+        let immediate = TValue::Integer(sc);
+        let result = raw_arith(op, &rb, &immediate)?;
+        match result {
+            Some(v) => {
+                self.current_thread_mut().stack[(base + a) as usize] = v;
+                Ok(())
+            }
+            None => Err(LuaError::Runtime(TValue::Nil)),
         }
     }
 
@@ -1574,6 +1656,79 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    // ---- Stage 5.10 K / I variants of arithmetic -----------------
+
+    fn addi(a: u32, b: u32, sc: i32) -> u32 {
+        use crate::lopcodes::OFFSET_sC;
+        create_abck(OpCode::OP_ADDI, a, b, (sc + OFFSET_sC) as u32, false)
+    }
+
+    fn addk(a: u32, b: u32, c: u32) -> u32 {
+        create_abck(OpCode::OP_ADDK, a, b, c, false)
+    }
+
+    #[test]
+    fn op_addi_adds_small_signed_immediate_to_register() {
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![loadi(0, 10), addi(1, 0, 32), return1(1)],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn op_addi_handles_negative_immediate() {
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![loadi(0, 50), addi(1, 0, -8), return1(1)],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn op_addk_adds_constant_pool_value() {
+        // Constant K[0] = 100; R(0) = -1; R(1) = R(0) + K[0]; return R(1)
+        let mut state = LuaState::new(0);
+        push_closure_with_constants(
+            &mut state,
+            vec![loadi(0, -1), addk(1, 0, 0), return1(1)],
+            vec![TValue::Integer(100)],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(99));
+    }
+
+    #[test]
+    fn op_shli_shifts_left_by_immediate() {
+        // 1 << 3 = 8
+        use crate::lopcodes::OFFSET_sC;
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 1),
+                create_abck(
+                    OpCode::OP_SHLI,
+                    1,
+                    0,
+                    (3 + OFFSET_sC) as u32,
+                    false,
+                ),
+                return1(1),
+            ],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(8));
     }
 
     #[test]
