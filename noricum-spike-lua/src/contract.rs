@@ -526,6 +526,12 @@ pub struct CallFrame {
     pub n_results: i16,
     /// Packed status/callstatus bits. Named after C's `CallInfo::callstatus`.
     pub call_status: u16,
+    /// Varargs captured at function entry by `OP_VARARGPREP`.
+    /// Stored out-of-band (not on the main register stack) so
+    /// we don't have to shuffle `func` / `base` mid-execution
+    /// like C Lua does — a strictly simpler representation that
+    /// matches the observable bytecode semantics.
+    pub varargs: Vec<TValue>,
 }
 
 /// A Lua coroutine. Each Lua execution — including the main thread — lives

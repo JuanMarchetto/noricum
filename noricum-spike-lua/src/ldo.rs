@@ -66,6 +66,7 @@ impl LuaState {
             saved_pc: 0,
             n_results,
             call_status: 0,
+            varargs: Vec::new(),
         };
         let thread = self.current_thread_mut();
         thread.frames.push(frame);

@@ -120,6 +120,9 @@ const OP_SETUPVAL_U8: u8 = OpCode::OP_SETUPVAL as u8;
 const OP_CONCAT_U8: u8 = OpCode::OP_CONCAT as u8;
 const OP_LEN_U8: u8 = OpCode::OP_LEN as u8;
 
+const OP_VARARG_U8: u8 = OpCode::OP_VARARG as u8;
+const OP_VARARGPREP_U8: u8 = OpCode::OP_VARARGPREP as u8;
+
 /// Maximum depth of metamethod chain walks for `__index` /
 /// `__newindex`. Matches `MAXTAGLOOP` in `lvm.c`.
 const MAX_TAG_LOOP: u32 = 2000;
@@ -728,6 +731,21 @@ impl LuaState {
                     self.finish_vm_return(func_slot, base, a, n_to_return, n_expected);
                     return Ok(());
                 }
+                OP_VARARGPREP_U8 => {
+                    // Relocate the function + fixed params above
+                    // any extras passed on the current frame. A is
+                    // the number of declared fixed parameters.
+                    let n_fixed = getarg_a(instruction) as u32;
+                    self.adjust_varargs(func_slot, n_fixed);
+                }
+                OP_VARARG_U8 => {
+                    // R(A), R(A+1), ..., R(A+C-2) := vararg.
+                    // If C == 0, copy all available extras.
+                    let a = getarg_a(instruction) as u32;
+                    let c = getarg_c(instruction) as u32;
+                    let wanted = if c == 0 { None } else { Some(c - 1) };
+                    self.get_varargs(base + a, wanted);
+                }
                 _ => {
                     panic!(
                         "lvm: unimplemented opcode {} at pc {}",
@@ -877,6 +895,75 @@ impl LuaState {
             // Unary metamethods (__unm, __bnot) also receive two
             // operand slots in C Lua — the operand is duplicated.
             None => self.try_binary_metamethod(op, rb, rb, base + a),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Vararg handling — OP_VARARGPREP / OP_VARARG.
+    //
+    // `adjust_varargs` mirrors `luaT_adjustvarargs` in ltm.c: at
+    // function entry, it copies `func` and the fixed params above
+    // the currently-passed arguments so that any extras live just
+    // below the new function slot. The CallFrame's `func` and
+    // `top` fields are bumped in place so the rest of execute()
+    // sees the new base without any per-opcode overhead.
+    //
+    // `get_varargs` mirrors `luaT_getvarargs`: it reads extras
+    // from `frame.func - n_extra_args .. frame.func` and lands
+    // them starting at `dest_slot`, padding with nil when the
+    // caller asks for more than are available.
+    // ------------------------------------------------------------------
+
+    /// VARARGPREP handler. Extracts any extras passed above
+    /// the declared fixed parameters into `frame.varargs`,
+    /// then trims `top` down to `func + 1 + n_fixed` so the
+    /// register window starts cleanly at the first fixed param.
+    pub(crate) fn adjust_varargs(&mut self, func_slot: u32, n_fixed: u32) {
+        let thread = self.current_thread_mut();
+        let actual = thread.top.saturating_sub(func_slot + 1);
+        let n_extra = actual.saturating_sub(n_fixed);
+        let mut captured = Vec::with_capacity(n_extra as usize);
+        for i in 0..n_extra {
+            let v = thread.stack[(func_slot + 1 + n_fixed + i) as usize];
+            captured.push(v);
+            thread.stack[(func_slot + 1 + n_fixed + i) as usize] = TValue::Nil;
+        }
+        thread.top = func_slot + 1 + n_fixed;
+        thread
+            .frames
+            .last_mut()
+            .expect("adjust_varargs: no frame")
+            .varargs = captured;
+    }
+
+    /// Copy varargs into `dest_slot..`. `wanted == None` (i.e.
+    /// `OP_VARARG C == 0`) copies all available extras and
+    /// bumps `top` accordingly; otherwise `wanted` extras are
+    /// copied with nil padding and `top` is not touched.
+    pub(crate) fn get_varargs(&mut self, dest_slot: u32, wanted: Option<u32>) {
+        let extras = {
+            let frame = self
+                .current_call_frame()
+                .expect("get_varargs: no frame");
+            frame.varargs.clone()
+        };
+        let n_extra = extras.len() as u32;
+        let n = wanted.unwrap_or(n_extra);
+        let thread = self.current_thread_mut();
+        if dest_slot + n > thread.stack.len() as u32 {
+            let needed = (dest_slot + n).saturating_sub(thread.top);
+            thread.grow_stack(needed);
+        }
+        for i in 0..n {
+            let v = if i < n_extra {
+                extras[i as usize]
+            } else {
+                TValue::Nil
+            };
+            thread.stack[(dest_slot + i) as usize] = v;
+        }
+        if wanted.is_none() {
+            thread.top = dest_slot + n_extra;
         }
     }
 
@@ -1461,30 +1548,52 @@ impl LuaState {
     /// Called by [`LuaState::call_value`] when the callable is a
     /// Lua closure. Sets up the register window, pushes a call
     /// frame, and delegates to [`LuaState::execute`].
+    ///
+    /// Matches C Lua's `luaD_precall`:
+    ///
+    /// * `narg` = arguments actually passed
+    ///   (`thread.top - func_slot - 1`).
+    /// * If `narg < num_params`, missing fixed params are nil
+    ///   padded by bumping `top` up.
+    /// * The register window above `top` up to
+    ///   `func + 1 + max_stack_size` is nil-filled in the
+    ///   backing `stack` Vec so every register read sees a
+    ///   defined value — but `top` stays at
+    ///   `func + 1 + max(narg, num_params)` so OP_VARARGPREP
+    ///   can see the extras.
     pub(crate) fn invoke_lua_closure(
         &mut self,
         func_slot: u32,
         closure: LClosureHandle,
         n_results: i16,
     ) -> LuaResult<()> {
-        // Compute the top of the register window. The proto
-        // records `max_stack_size` as the number of registers
-        // it needs; we nil-pad so every instruction that reads
-        // a register sees a defined value.
         let proto_handle = self.global.heap.lclosure(closure).proto;
-        let max_stack = self.global.heap.proto(proto_handle).max_stack_size as u32;
+        let (max_stack, num_params) = {
+            let p = self.global.heap.proto(proto_handle);
+            (p.max_stack_size as u32, p.num_params as u32)
+        };
         let base = func_slot + 1;
         let frame_top = base + max_stack;
-        // Grow the backing storage and nil-pad the new slots.
+        // Grow backing storage to the full register window so
+        // any register read above `top` sees nil and doesn't
+        // trip a bounds check.
         {
             let thread = self.current_thread_mut();
-            if frame_top > thread.top {
-                thread.grow_stack(frame_top - thread.top);
-                for i in thread.top..frame_top {
-                    thread.stack[i as usize] = TValue::Nil;
-                }
-                thread.top = frame_top;
+            let current_top = thread.top;
+            if frame_top > thread.stack.len() as u32 {
+                thread.grow_stack(frame_top - current_top);
             }
+            // Nil-pad missing fixed params, bumping top.
+            let args_top = current_top.max(base + num_params);
+            for i in current_top..args_top {
+                thread.stack[i as usize] = TValue::Nil;
+            }
+            // Fill the rest of the register window with nil in
+            // the backing storage (without bumping top).
+            for i in args_top..frame_top {
+                thread.stack[i as usize] = TValue::Nil;
+            }
+            thread.top = args_top;
         }
         self.push_call_frame(func_slot, frame_top, n_results);
         self.execute()
@@ -3339,6 +3448,107 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    // ---- Stage 5.16 varargs ----------------------------------------
+
+    /// Helper to build a vararg proto. `num_params` is the
+    /// number of fixed parameters.
+    fn push_vararg_closure(
+        state: &mut LuaState,
+        code: Vec<u32>,
+        num_params: u8,
+        max_stack: u8,
+    ) {
+        let proto = Proto {
+            num_params,
+            is_vararg: true,
+            max_stack_size: max_stack,
+            code,
+            ..Proto::default()
+        };
+        let proto_handle = state.global.heap.alloc_proto(proto);
+        let closure = LClosure {
+            proto: proto_handle,
+            upvalues: vec![],
+        };
+        let closure_handle = state.global.heap.alloc_lclosure(closure);
+        state
+            .current_thread_mut()
+            .push(TValue::LuaClosure(closure_handle));
+    }
+
+    #[test]
+    fn vararg_returns_all_extras_when_requested() {
+        // function f(a, ...) return ... end  -- three extras
+        // Call with f(1, 2, 3, 4) → returns 2, 3, 4
+        let mut state = LuaState::new(0);
+        push_vararg_closure(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_VARARGPREP, 1, 0, 0, false),
+                // VARARG R(1), C=0 (all available)
+                create_abck(OpCode::OP_VARARG, 1, 0, 0, false),
+                // RETURN R(1), B=0 (all the way to top)
+                create_abck(OpCode::OP_RETURN, 1, 0, 0, false),
+            ],
+            1, // num_params
+            8, // max_stack
+        );
+        // Push arguments: 1, 2, 3, 4
+        state.current_thread_mut().push(TValue::Integer(1));
+        state.current_thread_mut().push(TValue::Integer(2));
+        state.current_thread_mut().push(TValue::Integer(3));
+        state.current_thread_mut().push(TValue::Integer(4));
+        // Expect 3 results (2, 3, 4).
+        state.call_value(0, 4, 3).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(2));
+        assert_eq!(state.to_integer_x(2), Some(3));
+        assert_eq!(state.to_integer_x(3), Some(4));
+    }
+
+    #[test]
+    fn vararg_returns_nil_when_no_extras() {
+        // function f(a, ...) return ... end  -- zero extras
+        // Call with f(42). Return count = 1, extras = none → nil.
+        let mut state = LuaState::new(0);
+        push_vararg_closure(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_VARARGPREP, 1, 0, 0, false),
+                // VARARG R(1), C=2 (want 1 value)
+                create_abck(OpCode::OP_VARARG, 1, 0, 2, false),
+                // RETURN1 R(1)
+                create_abck(OpCode::OP_RETURN1, 1, 0, 0, false),
+            ],
+            1,
+            4,
+        );
+        state.current_thread_mut().push(TValue::Integer(42));
+        state.call_value(0, 1, 1).unwrap();
+        assert!(state.is_nil(1));
+    }
+
+    #[test]
+    fn vararg_fixed_param_still_accessible_after_prep() {
+        // function f(a, ...) return a end
+        // Call with f(99, 7, 8). Fixed param is still R(0).
+        let mut state = LuaState::new(0);
+        push_vararg_closure(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_VARARGPREP, 1, 0, 0, false),
+                // RETURN1 R(0) — the first fixed param.
+                create_abck(OpCode::OP_RETURN1, 0, 0, 0, false),
+            ],
+            1,
+            4,
+        );
+        state.current_thread_mut().push(TValue::Integer(99));
+        state.current_thread_mut().push(TValue::Integer(7));
+        state.current_thread_mut().push(TValue::Integer(8));
+        state.call_value(0, 3, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(99));
     }
 
     #[test]
