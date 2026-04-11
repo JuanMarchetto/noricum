@@ -18,6 +18,8 @@
 //! Plan + status: `docs/lua-migration/plan.md`.
 //! Locked decisions: persistent memory `project_lua_full_port.md`.
 
+pub mod contract;
+
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
 pub type SpikeHandle = *mut c_void;
