@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "noricum-spike-miniz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "spike"
+path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+
+[dev-dependencies]
