@@ -453,6 +453,79 @@ impl LuaState {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 4.2.3 — push functions. These are the write side of the
+// scalar API: every `lua_push*` entry point that takes a C value and
+// puts it on the Lua stack. Composite constructors (`push_cclosure`
+// with upvalues, `push_fstring` with format args) are deferred until
+// the format parser and the C closure builder land.
+// ---------------------------------------------------------------------------
+
+impl LuaState {
+    /// Matches `lua_pushnil`.
+    pub fn push_nil(&mut self) {
+        self.current_thread_mut().push(TValue::Nil);
+    }
+
+    /// Matches `lua_pushboolean`.
+    pub fn push_boolean(&mut self, b: bool) {
+        let v = if b { TValue::True } else { TValue::False };
+        self.current_thread_mut().push(v);
+    }
+
+    /// Matches `lua_pushinteger`.
+    pub fn push_integer(&mut self, i: LuaInteger) {
+        self.current_thread_mut().push(TValue::Integer(i));
+    }
+
+    /// Matches `lua_pushnumber`.
+    pub fn push_number(&mut self, n: LuaNumber) {
+        self.current_thread_mut().push(TValue::Number(n));
+    }
+
+    /// Matches `lua_pushlstring`. The bytes are copied into the
+    /// string arena and interned when short; long strings are
+    /// allocated fresh. The stack slot gets the matching
+    /// [`TValue::ShortString`] / [`TValue::LongString`] variant.
+    ///
+    /// Returns the [`crate::contract::StringHandle`] of the
+    /// newly-created (or existing, for short strings) entry so
+    /// callers that need to reference it without going back
+    /// through the stack can.
+    pub fn push_lstring(&mut self, bytes: &[u8]) -> crate::contract::StringHandle {
+        let seed = self.global.hash_seed;
+        let handle = self.global.new_string(bytes, seed);
+        let value = if bytes.len() <= crate::lstring::LUAI_MAXSHORTLEN {
+            TValue::ShortString(handle)
+        } else {
+            TValue::LongString(handle)
+        };
+        self.current_thread_mut().push(value);
+        handle
+    }
+
+    /// Convenience wrapper over [`LuaState::push_lstring`] that
+    /// accepts a `&str`. Mirrors C's `lua_pushstring` which takes
+    /// a null-terminated `const char *`.
+    pub fn push_string(&mut self, s: &str) -> crate::contract::StringHandle {
+        self.push_lstring(s.as_bytes())
+    }
+
+    /// Matches `lua_pushlightuserdata`. Stores the raw pointer
+    /// verbatim; the GC ignores it.
+    pub fn push_light_userdata(&mut self, p: *mut std::os::raw::c_void) {
+        self.current_thread_mut().push(TValue::LightUserData(p));
+    }
+
+    /// Matches `lua_pushcfunction` (the no-upvalue C function
+    /// case — the "light" C function variant in our split).
+    /// The closure variant with captured values lives in
+    /// Stage 4.2.5 because it needs to read values off the stack.
+    pub fn push_light_cfunction(&mut self, f: crate::contract::RawCFunction) {
+        self.current_thread_mut().push(TValue::LightCFunction(f));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -825,5 +898,107 @@ mod tests {
         });
         state.current_thread_mut().push(TValue::Table(t));
         assert_eq!(state.raw_len(1), 3);
+    }
+
+    // ---- 4.2.3 push functions -------------------------------------
+
+    #[test]
+    fn push_nil_increments_top_and_stores_nil() {
+        let mut state = LuaState::new(0);
+        state.push_nil();
+        assert_eq!(state.get_top(), 1);
+        assert!(state.is_nil(1));
+    }
+
+    #[test]
+    fn push_boolean_true_and_false_store_variant() {
+        let mut state = LuaState::new(0);
+        state.push_boolean(true);
+        state.push_boolean(false);
+        assert!(state.to_boolean(1));
+        assert!(!state.to_boolean(2));
+    }
+
+    #[test]
+    fn push_integer_then_read_back_as_integer_and_number() {
+        let mut state = LuaState::new(0);
+        state.push_integer(42);
+        assert_eq!(state.to_integer_x(1), Some(42));
+        assert_eq!(state.to_number_x(1), Some(42.0));
+        assert!(state.is_integer(1));
+    }
+
+    #[test]
+    fn push_number_then_read_back_as_number() {
+        let mut state = LuaState::new(0);
+        state.push_number(3.25);
+        assert_eq!(state.to_number_x(1), Some(3.25));
+        assert!(!state.is_integer(1));
+    }
+
+    #[test]
+    fn push_lstring_short_creates_short_variant_and_returns_handle() {
+        let mut state = LuaState::new(0);
+        let handle = state.push_lstring(b"hello");
+        assert_eq!(state.get_top(), 1);
+        assert!(state.is_string(1));
+        assert_eq!(state.to_lstring(1), Some(b"hello".as_slice()));
+        // Returned handle matches the pushed stack slot.
+        let t = state.current_thread();
+        match t.stack[0] {
+            TValue::ShortString(h) => assert_eq!(h, handle),
+            other => panic!("expected ShortString, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn push_lstring_long_creates_long_variant() {
+        let mut state = LuaState::new(0);
+        let long_bytes = vec![b'a'; crate::lstring::LUAI_MAXSHORTLEN + 10];
+        state.push_lstring(&long_bytes);
+        let t = state.current_thread();
+        assert!(matches!(t.stack[0], TValue::LongString(_)));
+    }
+
+    #[test]
+    fn push_lstring_interns_short_strings_on_repeat() {
+        // Two pushes of the same short byte slice should share
+        // the underlying StringHandle (that's what the intern
+        // cache is for).
+        let mut state = LuaState::new(0);
+        let h1 = state.push_lstring(b"foo");
+        let h2 = state.push_lstring(b"foo");
+        assert_eq!(h1, h2, "short strings must intern");
+    }
+
+    #[test]
+    fn push_string_delegates_to_push_lstring() {
+        let mut state = LuaState::new(0);
+        state.push_string("world");
+        assert_eq!(state.to_lstring(1), Some(b"world".as_slice()));
+    }
+
+    #[test]
+    fn push_light_userdata_stores_raw_pointer() {
+        let mut state = LuaState::new(0);
+        let ptr: *mut std::os::raw::c_void = 0xDEAD_BEEF as *mut _;
+        state.push_light_userdata(ptr);
+        let v = state.current_thread().stack[0];
+        match v {
+            TValue::LightUserData(p) => assert_eq!(p as usize, 0xDEAD_BEEF),
+            other => panic!("expected LightUserData, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn multiple_pushes_stack_in_order() {
+        let mut state = LuaState::new(0);
+        state.push_integer(10);
+        state.push_string("mid");
+        state.push_boolean(true);
+        assert_eq!(state.get_top(), 3);
+        assert_eq!(state.to_integer_x(1), Some(10));
+        assert_eq!(state.to_lstring(2), Some(b"mid".as_slice()));
+        assert!(state.to_boolean(3));
     }
 }
