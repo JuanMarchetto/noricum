@@ -304,3 +304,75 @@ int wr_lobject_utf8esc(unsigned char* buff, unsigned int x) {
     /* Caller must pass a buffer of at least UTF8BUFFSZ (8) bytes. */
     return luaO_utf8esc((char*) buff, (l_uint32) x);
 }
+
+/*
+ * luaO_rawarith oracle. Constructs two TValues from (tag, int, float)
+ * operand encodings, invokes luaO_rawarith under lua_pcall to catch
+ * the luaV_idiv / luaV_mod / luaV_shiftl divide-by-zero longjmp, and
+ * decodes the result back into the out-params.
+ */
+
+typedef struct {
+    int op;
+    int t1;
+    long long i1;
+    double f1;
+    int t2;
+    long long i2;
+    double f2;
+
+    int rc;          /* 1 = ok, 0 = not numeric (metamethod fallback) */
+    int out_tag;     /* 0 = int, 1 = float */
+    long long out_i;
+    double out_f;
+} wr_arith_probe_t;
+
+static int wr_arith_probe_body(lua_State* L) {
+    wr_arith_probe_t* p = (wr_arith_probe_t*) lua_touserdata(L, 1);
+    TValue v1, v2, res;
+    /* setivalue / setfltvalue are brace-enclosed macros, so they need
+     * explicit { } around the if/else branches to parse. */
+    if (p->t1 == 0) { setivalue(&v1, (lua_Integer) p->i1); }
+    else            { setfltvalue(&v1, (lua_Number) p->f1); }
+    if (p->t2 == 0) { setivalue(&v2, (lua_Integer) p->i2); }
+    else            { setfltvalue(&v2, (lua_Number) p->f2); }
+    int ok = luaO_rawarith(L, p->op, &v1, &v2, &res);
+    p->rc = ok;
+    if (ok) {
+        if (ttisinteger(&res)) {
+            p->out_tag = 0;
+            p->out_i = (long long) ivalue(&res);
+        } else {
+            p->out_tag = 1;
+            p->out_f = (double) fltvalue(&res);
+        }
+    }
+    return 0;
+}
+
+int wr_lobject_rawarith(int op,
+                        int t1, long long i1, double f1,
+                        int t2, long long i2, double f2,
+                        int* out_tag, long long* out_int, double* out_float) {
+    if (!out_tag || !out_int || !out_float) return -2;
+    lua_State* L = luaL_newstate();
+    if (!L) return -2;
+    wr_arith_probe_t probe;
+    probe.op = op;
+    probe.t1 = t1; probe.i1 = i1; probe.f1 = f1;
+    probe.t2 = t2; probe.i2 = i2; probe.f2 = f2;
+    probe.rc = 0;
+    probe.out_tag = -1;
+    probe.out_i = 0;
+    probe.out_f = 0.0;
+    lua_pushcfunction(L, wr_arith_probe_body);
+    lua_pushlightuserdata(L, &probe);
+    int pcall_rc = lua_pcall(L, 1, 0, 0);
+    lua_close(L);
+    if (pcall_rc != LUA_OK) return -1;  /* runtime error (div by zero) */
+    if (!probe.rc) return 0;            /* metamethod fallback */
+    *out_tag = probe.out_tag;
+    *out_int = probe.out_i;
+    *out_float = probe.out_f;
+    return 1;
+}

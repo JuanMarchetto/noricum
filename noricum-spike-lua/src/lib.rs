@@ -110,6 +110,23 @@ unsafe extern "C" {
     pub fn wr_lobject_codeparam(p: c_uint) -> c_uint;
     pub fn wr_lobject_applyparam(p: c_uint, x: i64) -> i64;
     pub fn wr_lobject_utf8esc(buff: *mut u8, x: c_uint) -> c_int;
+
+    /// `luaO_rawarith` oracle. See `wrapper.h` for the return-code
+    /// contract (1 = ok, 0 = metamethod fallback, -1 = runtime error,
+    /// -2 = init failed).
+    #[allow(clippy::too_many_arguments)]
+    pub fn wr_lobject_rawarith(
+        op: c_int,
+        t1: c_int,
+        i1: i64,
+        f1: f64,
+        t2: c_int,
+        i2: i64,
+        f2: f64,
+        out_tag: *mut c_int,
+        out_int: *mut i64,
+        out_float: *mut f64,
+    ) -> c_int;
 }
 
 // TODO: add `pub mod contract;` once the Rust-side type architecture is

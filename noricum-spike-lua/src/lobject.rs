@@ -1,23 +1,26 @@
-//! Lua's `lobject` — value utility functions and numeric helpers.
+//! Lua's `lobject` — value utility functions, numeric helpers, and
+//! raw arithmetic over `TValue`.
 //!
-//! This module hosts the Stage 2 port of the pure, stateless helpers
-//! from `lobject.c`. The heavy lifting — TValue-aware arithmetic
-//! (`luaO_arith`/`luaO_rawarith`), number-to-string conversion with
-//! the `%.14g` roundtrip, `luaO_pushvfstring` and friends — lives in
+//! Ported progressively in Stage 2:
+//!
+//! * Commit 1 — stateless helpers: [`ceillog2`], [`hexavalue`],
+//!   [`code_param`]/[`apply_param`], [`utf8esc`].
+//! * Commit 2 — TValue-aware raw arithmetic: [`ArithOp`],
+//!   [`to_integer_ns`], [`to_number_ns`], [`raw_arith`]. Metamethod
+//!   fallback (`luaO_arith` proper) is deferred to Stage 5 when
+//!   `luaT_trybinTM` exists.
+//!
+//! Number-to-string conversion with the `%.14g` roundtrip,
+//! `luaO_pushvfstring`, and string parsing (`luaO_str2num`) come in
 //! later commits once `LuaString` and the state machinery exist.
 //!
-//! Ported in the first lobject commit:
-//!
-//! * [`ceillog2`] — `ceil(log2(x))` via a 256-byte lookup table.
-//! * [`hexavalue`] — ASCII hex digit → numeric value (0..=15).
-//! * [`code_param`] / [`apply_param`] — Lua's "float byte" encoding
-//!   used by GC tuning knobs and some opcodes.
-//! * [`utf8esc`] — UTF-8 encode a codepoint (0..=0x7FFFFFFF) into an
-//!   8-byte buffer, written backwards.
-//!
-//! Ground truth: `lobject.c`, `lobject.h`, `llimits.h`.
+//! Ground truth: `lobject.c`, `lobject.h`, `llimits.h`, `lvm.c` (for
+//! the arithmetic helpers `luaV_idiv` / `luaV_mod` / `luaV_shiftl` and
+//! the float-to-integer conversion `luaV_flttointeger`).
 
 #![allow(dead_code)]
+
+use crate::contract::{LuaError, LuaInteger, LuaNumber, LuaResult, TValue};
 
 // ---------------------------------------------------------------------------
 // ceillog2
@@ -229,6 +232,271 @@ pub fn utf8esc(buff: &mut [u8; UTF8_BUFF_SZ], x: u32) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Raw arithmetic — commit 2.
+// ---------------------------------------------------------------------------
+
+/// Lua arithmetic operators. Discriminants match the `LUA_OPADD..LUA_OPBNOT`
+/// constants in `lua.h` so the opcode identifier can be passed across
+/// the FFI boundary unchanged.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    Add = 0,
+    Sub = 1,
+    Mul = 2,
+    Mod = 3,
+    Pow = 4,
+    Div = 5,
+    IDiv = 6,
+    BAnd = 7,
+    BOr = 8,
+    BXor = 9,
+    Shl = 10,
+    Shr = 11,
+    Unm = 12,
+    BNot = 13,
+}
+
+impl ArithOp {
+    /// Decode a raw opcode byte into an `ArithOp`, returning `None`
+    /// for invalid opcodes.
+    pub const fn from_raw(op: u8) -> Option<ArithOp> {
+        match op {
+            0 => Some(ArithOp::Add),
+            1 => Some(ArithOp::Sub),
+            2 => Some(ArithOp::Mul),
+            3 => Some(ArithOp::Mod),
+            4 => Some(ArithOp::Pow),
+            5 => Some(ArithOp::Div),
+            6 => Some(ArithOp::IDiv),
+            7 => Some(ArithOp::BAnd),
+            8 => Some(ArithOp::BOr),
+            9 => Some(ArithOp::BXor),
+            10 => Some(ArithOp::Shl),
+            11 => Some(ArithOp::Shr),
+            12 => Some(ArithOp::Unm),
+            13 => Some(ArithOp::BNot),
+            _ => None,
+        }
+    }
+}
+
+/// Convert a `TValue` to `LuaInteger` without string coercion and
+/// without float truncation: a float must be exactly integral and in
+/// `[i64::MIN, 2^63)` to convert successfully.
+///
+/// Matches `luaV_tointegerns` with the default mode
+/// `LUA_FLOORN2I == F2Ieq` — which in Lua 5.4 is the "reject
+/// non-integral floats" mode, not a floor-then-round mode. Strings
+/// are never coerced (the `ns` suffix = "no string").
+pub fn to_integer_ns(v: &TValue) -> Option<LuaInteger> {
+    match v {
+        TValue::Integer(i) => Some(*i),
+        TValue::Number(n) => number_to_integer_exact(*n),
+        _ => None,
+    }
+}
+
+/// Convert a `TValue` to `LuaNumber` without string coercion. Integers
+/// are promoted to `f64`.
+pub fn to_number_ns(v: &TValue) -> Option<LuaNumber> {
+    match v {
+        TValue::Integer(i) => Some(*i as f64),
+        TValue::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// Convert a float to an integer requiring an exactly-integral value
+/// and the `[i64::MIN, 2^63)` range. Matches `luaV_flttointeger` with
+/// `F2Ieq` + `lua_numbertointeger` in `llimits.h`.
+///
+/// Note: `-(i64::MIN as f64)` is `2^63`, which is exactly representable
+/// in `f64`, so the range check is clean.
+fn number_to_integer_exact(n: f64) -> Option<LuaInteger> {
+    if !n.is_finite() {
+        return None;
+    }
+    if n != n.floor() {
+        return None;
+    }
+    let min_f = i64::MIN as f64;
+    let one_past_max = -min_f; // exactly 2^63
+    if n >= min_f && n < one_past_max {
+        Some(n as i64)
+    } else {
+        None
+    }
+}
+
+/// Perform a raw arithmetic operation without metamethod fallback.
+///
+/// Port of `luaO_rawarith` in `lobject.c`. Return codes:
+///
+/// * `Ok(Some(result))` — the op succeeded.
+/// * `Ok(None)` — one or both operands could not be converted to a
+///   number of the required kind (matches `return 0` in C, which tells
+///   the caller to try the matching `__add` / `__sub` / etc. metamethod
+///   instead).
+/// * `Err(LuaError::Runtime(..))` — the op raised a runtime error, for
+///   instance integer division by zero. The error object is currently
+///   a `TValue::Nil` placeholder because string interning lands in a
+///   later Stage 2 commit; once it does, the message ("attempt to
+///   divide by zero", etc.) will move into the `Runtime` variant.
+///
+/// For unary operations (`Unm`, `BNot`), callers pass the same value
+/// twice — the C code does the same and the shift/bitwise logic
+/// ignores `p2`'s numeric value but still requires it to convert.
+pub fn raw_arith(op: ArithOp, p1: &TValue, p2: &TValue) -> LuaResult<Option<TValue>> {
+    use ArithOp::*;
+
+    match op {
+        // Integer-only operations.
+        BAnd | BOr | BXor | Shl | Shr | BNot => {
+            let Some(i1) = to_integer_ns(p1) else { return Ok(None) };
+            let Some(i2) = to_integer_ns(p2) else { return Ok(None) };
+            int_arith(op, i1, i2).map(|i| Some(TValue::Integer(i)))
+        }
+
+        // Float-only operations.
+        Div | Pow => {
+            let Some(n1) = to_number_ns(p1) else { return Ok(None) };
+            let Some(n2) = to_number_ns(p2) else { return Ok(None) };
+            Ok(Some(TValue::Number(num_arith(op, n1, n2))))
+        }
+
+        // Promotional operations: if both operands are integers, stay
+        // in integer domain; otherwise coerce both to float.
+        Add | Sub | Mul | Mod | IDiv | Unm => {
+            if let (TValue::Integer(i1), TValue::Integer(i2)) = (p1, p2) {
+                return int_arith(op, *i1, *i2).map(|i| Some(TValue::Integer(i)));
+            }
+            let Some(n1) = to_number_ns(p1) else { return Ok(None) };
+            let Some(n2) = to_number_ns(p2) else { return Ok(None) };
+            Ok(Some(TValue::Number(num_arith(op, n1, n2))))
+        }
+    }
+}
+
+/// Integer branch of `intarith` in `lobject.c`. All additive ops use
+/// wrapping arithmetic (matching Lua's `intop` macro, which casts
+/// through unsigned); `Mod`/`IDiv` apply floor-division correction;
+/// `Shl`/`Shr` use logical shifts with out-of-range semantics matching
+/// `luaV_shiftl`.
+fn int_arith(op: ArithOp, v1: LuaInteger, v2: LuaInteger) -> LuaResult<LuaInteger> {
+    use ArithOp::*;
+    match op {
+        Add => Ok(v1.wrapping_add(v2)),
+        Sub => Ok(v1.wrapping_sub(v2)),
+        Mul => Ok(v1.wrapping_mul(v2)),
+        Mod => int_mod(v1, v2),
+        IDiv => int_idiv(v1, v2),
+        BAnd => Ok(v1 & v2),
+        BOr => Ok(v1 | v2),
+        BXor => Ok(v1 ^ v2),
+        Shl => Ok(int_shiftl(v1, v2)),
+        Shr => Ok(int_shiftl(v1, v2.wrapping_neg())),
+        Unm => Ok(v1.wrapping_neg()),
+        BNot => Ok(!v1),
+        Div | Pow => unreachable!("float-only op dispatched to int_arith"),
+    }
+}
+
+/// Float branch of `numarith` in `lobject.c`. Uses the Lua-defined
+/// modulo adjustment (`luai_nummod`) and the `b == 2 -> a*a` shortcut
+/// for `Pow` (`luai_numpow`). All other ops are direct `f64` operators.
+fn num_arith(op: ArithOp, a: LuaNumber, b: LuaNumber) -> LuaNumber {
+    use ArithOp::*;
+    match op {
+        Add => a + b,
+        Sub => a - b,
+        Mul => a * b,
+        Div => a / b,
+        Pow => {
+            if b == 2.0 {
+                a * a
+            } else {
+                a.powf(b)
+            }
+        }
+        IDiv => (a / b).floor(),
+        Mod => num_mod(a, b),
+        Unm => -a,
+        BAnd | BOr | BXor | Shl | Shr | BNot => {
+            unreachable!("int-only op dispatched to num_arith")
+        }
+    }
+}
+
+/// Floor-based integer division. Matches `luaV_idiv` in `lvm.c`:
+///
+/// * Raises on `n == 0`.
+/// * Returns `-m` (wrapping) when `n == -1` to avoid the
+///   `i64::MIN / -1` overflow.
+/// * Otherwise performs C's truncating division and adjusts toward
+///   negative infinity when the signs differ and the remainder is
+///   non-zero.
+fn int_idiv(m: LuaInteger, n: LuaInteger) -> LuaResult<LuaInteger> {
+    if n == 0 {
+        return Err(LuaError::Runtime(TValue::Nil));
+    }
+    if n == -1 {
+        return Ok(m.wrapping_neg());
+    }
+    let q = m / n;
+    if (m ^ n) < 0 && m % n != 0 {
+        Ok(q - 1)
+    } else {
+        Ok(q)
+    }
+}
+
+/// Floor-based integer modulo. Matches `luaV_mod` in `lvm.c`.
+fn int_mod(m: LuaInteger, n: LuaInteger) -> LuaResult<LuaInteger> {
+    if n == 0 {
+        return Err(LuaError::Runtime(TValue::Nil));
+    }
+    if n == -1 {
+        return Ok(0);
+    }
+    let r = m % n;
+    if r != 0 && (r ^ n) < 0 {
+        Ok(r + n)
+    } else {
+        Ok(r)
+    }
+}
+
+/// Logical shift-left. Port of `luaV_shiftl` in `lvm.c`. Negative `y`
+/// is a shift-right; `|y| >= 64` collapses to zero; otherwise the shift
+/// is logical (operates on the `u64` bit pattern).
+fn int_shiftl(x: LuaInteger, y: LuaInteger) -> LuaInteger {
+    const NBITS: i64 = 64;
+    if y >= 0 {
+        if y >= NBITS {
+            0
+        } else {
+            ((x as u64) << (y as u32)) as i64
+        }
+    } else if y <= -NBITS {
+        0
+    } else {
+        ((x as u64) >> ((-y) as u32)) as i64
+    }
+}
+
+/// Port of `luai_nummod`: `fmod(a, b)` adjusted to follow Lua's
+/// floor-division semantics, matching the C macro in `llimits.h`.
+fn num_mod(a: LuaNumber, b: LuaNumber) -> LuaNumber {
+    let m = a % b;
+    if (m > 0.0 && b < 0.0) || (m < 0.0 && b > 0.0) {
+        m + b
+    } else {
+        m
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -323,5 +591,122 @@ mod tests {
         let n = utf8esc(&mut buff, 0x1F600);
         assert_eq!(n, 4);
         assert_eq!(&buff[UTF8_BUFF_SZ - 4..], &[0xF0, 0x9F, 0x98, 0x80]);
+    }
+
+    // -- raw_arith invariants --------------------------------------------
+
+    #[test]
+    fn integer_add_stays_integer() {
+        let r = raw_arith(ArithOp::Add, &TValue::Integer(5), &TValue::Integer(3)).unwrap();
+        assert!(matches!(r, Some(TValue::Integer(8))));
+    }
+
+    #[test]
+    fn mixed_int_float_add_promotes_to_float() {
+        let r = raw_arith(ArithOp::Add, &TValue::Integer(5), &TValue::Number(2.5)).unwrap();
+        assert!(matches!(r, Some(TValue::Number(n)) if n == 7.5));
+    }
+
+    #[test]
+    fn div_always_produces_float() {
+        let r = raw_arith(ArithOp::Div, &TValue::Integer(10), &TValue::Integer(4)).unwrap();
+        assert!(matches!(r, Some(TValue::Number(n)) if n == 2.5));
+    }
+
+    #[test]
+    fn idiv_of_negatives_is_floor() {
+        // -5 // 3 = -2 (floor of -5/3 = -1.67)
+        let r = raw_arith(ArithOp::IDiv, &TValue::Integer(-5), &TValue::Integer(3)).unwrap();
+        assert!(matches!(r, Some(TValue::Integer(-2))));
+    }
+
+    #[test]
+    fn mod_of_negatives_follows_floor_division() {
+        // -5 % 3 = 1 (not -2 like C)
+        let r = raw_arith(ArithOp::Mod, &TValue::Integer(-5), &TValue::Integer(3)).unwrap();
+        assert!(matches!(r, Some(TValue::Integer(1))));
+    }
+
+    #[test]
+    fn idiv_by_zero_is_runtime_error() {
+        let r = raw_arith(ArithOp::IDiv, &TValue::Integer(7), &TValue::Integer(0));
+        assert!(matches!(r, Err(LuaError::Runtime(_))));
+    }
+
+    #[test]
+    fn idiv_int_min_by_minus_one_does_not_overflow() {
+        let r = raw_arith(
+            ArithOp::IDiv,
+            &TValue::Integer(i64::MIN),
+            &TValue::Integer(-1),
+        )
+        .unwrap();
+        // wrapping_neg(i64::MIN) == i64::MIN
+        assert!(matches!(r, Some(TValue::Integer(i)) if i == i64::MIN));
+    }
+
+    #[test]
+    fn shift_by_huge_amount_yields_zero() {
+        let r = raw_arith(ArithOp::Shl, &TValue::Integer(1), &TValue::Integer(64)).unwrap();
+        assert!(matches!(r, Some(TValue::Integer(0))));
+        let r = raw_arith(ArithOp::Shr, &TValue::Integer(1), &TValue::Integer(64)).unwrap();
+        assert!(matches!(r, Some(TValue::Integer(0))));
+    }
+
+    #[test]
+    fn shift_is_logical_not_arithmetic() {
+        // -1 >> 1 should be a large positive number (u64 shift), not -1.
+        let r = raw_arith(ArithOp::Shr, &TValue::Integer(-1), &TValue::Integer(1)).unwrap();
+        assert!(matches!(r, Some(TValue::Integer(i)) if i == (i64::MAX)));
+    }
+
+    #[test]
+    fn pow_uses_square_shortcut_for_exponent_two() {
+        let r = raw_arith(ArithOp::Pow, &TValue::Number(3.0), &TValue::Number(2.0)).unwrap();
+        assert!(matches!(r, Some(TValue::Number(n)) if n == 9.0));
+    }
+
+    #[test]
+    fn band_on_float_with_integral_value_succeeds() {
+        let r = raw_arith(ArithOp::BAnd, &TValue::Number(12.0), &TValue::Number(10.0)).unwrap();
+        assert!(matches!(r, Some(TValue::Integer(8))));
+    }
+
+    #[test]
+    fn band_on_non_integral_float_fails_softly() {
+        let r = raw_arith(ArithOp::BAnd, &TValue::Number(1.5), &TValue::Integer(3)).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn string_operands_fail_to_convert() {
+        // TValue::Nil stands in for any non-number value here. Real
+        // string operands will trigger the same path once lstring
+        // lands in a later Stage 2 commit.
+        let r = raw_arith(ArithOp::Add, &TValue::Nil, &TValue::Integer(1)).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn number_to_integer_exact_rejects_fraction() {
+        assert_eq!(number_to_integer_exact(1.5), None);
+        assert_eq!(number_to_integer_exact(-0.1), None);
+    }
+
+    #[test]
+    fn number_to_integer_exact_rejects_nan_and_inf() {
+        assert_eq!(number_to_integer_exact(f64::NAN), None);
+        assert_eq!(number_to_integer_exact(f64::INFINITY), None);
+        assert_eq!(number_to_integer_exact(f64::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn number_to_integer_exact_boundary_values() {
+        assert_eq!(number_to_integer_exact(i64::MIN as f64), Some(i64::MIN));
+        // 2^63 is exactly representable but out of range.
+        assert_eq!(number_to_integer_exact(-(i64::MIN as f64)), None);
+        // One below: 2^63 - 2^11 (next representable f64 below 2^63).
+        let just_under = (-(i64::MIN as f64)) - (1u64 << 11) as f64;
+        assert!(number_to_integer_exact(just_under).is_some());
     }
 }

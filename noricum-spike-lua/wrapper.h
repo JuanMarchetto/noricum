@@ -128,6 +128,25 @@ long long    wr_lobject_applyparam(unsigned int p, long long x);
  * luaO_utf8esc: the encoded bytes occupy buff[8 - n .. 8]. */
 int wr_lobject_utf8esc(unsigned char* buff, unsigned int x);
 
+/* Invoke luaO_rawarith through an ephemeral state under lua_pcall.
+ *
+ * Operands are encoded as (tag, int_value, float_value) pairs where
+ * tag == 0 means "use int_value" and tag == 1 means "use float_value".
+ *
+ * Return codes:
+ *   1 -> arith succeeded; *out_tag / *out_int / *out_float hold the
+ *        result, with *out_tag == 0 for an integer result and 1 for
+ *        a float result.
+ *   0 -> operands could not be converted (luaO_rawarith returned 0;
+ *        caller should try a metamethod).
+ *  -1 -> runtime error (div-by-zero raised via luaG_runerror).
+ *  -2 -> ephemeral state failed to initialize.
+ */
+int wr_lobject_rawarith(int op,
+                        int t1, long long i1, double f1,
+                        int t2, long long i2, double f2,
+                        int* out_tag, long long* out_int, double* out_float);
+
 #ifdef __cplusplus
 }
 #endif
