@@ -520,6 +520,12 @@ pub struct Thread {
     pub frames: Vec<CallFrame>,
     /// Open upvalue list. Each `UpValHandle` points to a slot in `stack`.
     pub open_upvals: Vec<UpValHandle>,
+    /// Error the currently-executing C function wants to raise.
+    /// Set by [`LuaState::raise_error_value`] from inside a C
+    /// function, checked by `invoke_c_function` immediately after
+    /// the function returns. Replaces C Lua's longjmp-based
+    /// `lua_error` with our Result-threading equivalent.
+    pub pending_error: Option<LuaError>,
 }
 
 /// Thread-local wrapper so [`Thread`] can `#[derive(Default)]`. Defaults

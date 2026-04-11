@@ -183,6 +183,7 @@ mod tests {
             top: 0,
             frames: Vec::new(),
             open_upvals: Vec::new(),
+            pending_error: None,
         }
     }
 

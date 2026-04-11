@@ -65,6 +65,7 @@ impl LuaState {
             top: 0,
             frames: Vec::new(),
             open_upvals: Vec::new(),
+            pending_error: None,
         });
         global.main_thread = Some(main_handle);
 

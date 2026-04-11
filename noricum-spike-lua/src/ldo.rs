@@ -41,7 +41,7 @@
 
 #![allow(dead_code)]
 
-use crate::contract::{CallFrame, LuaError, LuaResult, LuaState, TValue};
+use crate::contract::{CallFrame, LuaError, LuaResult, LuaState, ThreadStatus, TValue};
 
 impl LuaState {
     /// Push a new call frame onto the current thread's frame
@@ -167,6 +167,13 @@ impl LuaState {
     /// the caller's frame. Shared path for light C functions
     /// and C closures (which differ only in where the function
     /// pointer lives).
+    ///
+    /// If the callee sets [`crate::contract::Thread::pending_error`]
+    /// via [`LuaState::raise_error_value`], the frame is popped
+    /// and the error is returned as `Err(LuaError::..)` without
+    /// going through the normal result-transfer path. That's the
+    /// Result-threading equivalent of C Lua's longjmp out of
+    /// `lua_error`; [`LuaState::pcall`] catches it.
     fn invoke_c_function(
         &mut self,
         func_slot: u32,
@@ -190,8 +197,75 @@ impl LuaState {
         );
         let n_returned = n_returned as u32;
 
+        // If the callee raised an error, abort the normal
+        // result-transfer and propagate. Popping the frame
+        // restores the caller's frame as "current" so pcall
+        // can correctly reset the stack.
+        if let Some(err) = self.current_thread_mut().pending_error.take() {
+            let _ = self.pop_call_frame();
+            return Err(err);
+        }
+
         self.finish_c_call(func_slot, n_returned, n_results);
         Ok(())
+    }
+
+    // --- Stage 5.3 — protected calls ------------------------------
+
+    /// Raise a Lua-visible error with `value` as the error
+    /// object. Called from inside an extern "C" function body —
+    /// the equivalent of C Lua's `lua_error(L)` where the
+    /// error object has already been pushed. In our
+    /// Result-threading model we stash the error on the
+    /// current thread and let [`LuaState::invoke_c_function`]
+    /// pick it up after the callee returns.
+    ///
+    /// The caller's C function should return 0 (or any value —
+    /// the return count is ignored once the error flag is set)
+    /// immediately after calling this.
+    pub fn raise_error_value(&mut self, value: TValue) {
+        self.current_thread_mut().pending_error = Some(LuaError::Runtime(value));
+    }
+
+    /// Protected variant of [`LuaState::call_value`]. Catches
+    /// [`LuaError`] from the called function, pops the stack
+    /// down to `func_slot`, pushes the error value, and returns
+    /// the matching [`ThreadStatus`]. On success the return
+    /// value is [`ThreadStatus::Ok`] and the stack holds the
+    /// call's results at `func_slot..func_slot + n_results`
+    /// (or as many as the callee produced when `n_results == -1`).
+    ///
+    /// Matches `lua_pcall` — minus message-handler support
+    /// (Lua's `msgh` argument), which needs the Stage 5.4 VM
+    /// to invoke a Lua function on the error object.
+    pub fn pcall(
+        &mut self,
+        func_slot: u32,
+        n_args: u32,
+        n_results: i16,
+    ) -> ThreadStatus {
+        match self.call_value(func_slot, n_args, n_results) {
+            Ok(()) => ThreadStatus::Ok,
+            Err(err) => {
+                let status = err.matching_status();
+                let err_value = match err {
+                    LuaError::Runtime(v) => v,
+                    // Non-runtime errors don't carry a value
+                    // payload yet. Leave the slot as nil; Stage
+                    // 5.4 will upgrade the other variants with
+                    // formatted message strings.
+                    _ => TValue::Nil,
+                };
+                // Reset the stack back to the call site and
+                // push the error object where the caller
+                // expects to find it.
+                let thread = self.current_thread_mut();
+                thread.top = func_slot;
+                thread.pending_error = None;
+                thread.push(err_value);
+                status
+            }
+        }
     }
 
     /// Shift the `n_returned` values now sitting at the top of
@@ -253,7 +327,7 @@ impl LuaState {
 
 #[cfg(test)]
 mod tests {
-    use crate::contract::{LuaError, LuaState, RawCFunction, TValue};
+    use crate::contract::{LuaError, LuaState, RawCFunction, ThreadStatus, TValue};
 
     #[test]
     fn fresh_state_has_no_active_call_frame() {
@@ -422,6 +496,101 @@ mod tests {
         state.push_light_cfunction(c_return_zero as RawCFunction);
         let depth_before = state.call_depth();
         state.call_value(0, 0, 0).unwrap();
+        assert_eq!(state.call_depth(), depth_before);
+    }
+
+    // ---- Stage 5.3 protected calls --------------------------------
+
+    /// Test helper — raises an error via the pending_error side
+    /// channel and returns 0. Simulates a C function calling
+    /// the future lua_error.
+    unsafe extern "C" fn c_raise_runtime_error(
+        state: *mut LuaState,
+    ) -> std::os::raw::c_int {
+        let state = unsafe { &mut *state };
+        state.raise_error_value(TValue::Integer(999));
+        0
+    }
+
+    /// Test helper — adds two integers, same as c_sum_two.
+    /// Duplicated for the pcall test so the name makes sense
+    /// in that context.
+    unsafe extern "C" fn c_pcall_sum(
+        state: *mut LuaState,
+    ) -> std::os::raw::c_int {
+        let state = unsafe { &mut *state };
+        let a = state.to_integer_x(1).unwrap_or(0);
+        let b = state.to_integer_x(2).unwrap_or(0);
+        state.set_top(0);
+        state.push_integer(a + b);
+        1
+    }
+
+    #[test]
+    fn pcall_returns_ok_when_c_function_succeeds() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_pcall_sum as RawCFunction);
+        state.push_integer(3);
+        state.push_integer(4);
+        let status = state.pcall(0, 2, 1);
+        assert_eq!(status, ThreadStatus::Ok);
+        assert_eq!(state.to_integer_x(1), Some(7));
+        assert_eq!(state.get_top(), 1);
+    }
+
+    #[test]
+    fn pcall_catches_pending_error_and_returns_runtime_error_status() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_raise_runtime_error as RawCFunction);
+        let status = state.pcall(0, 0, 0);
+        assert_eq!(status, ThreadStatus::RuntimeError);
+    }
+
+    #[test]
+    fn pcall_leaves_error_value_at_func_slot() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_raise_runtime_error as RawCFunction);
+        state.pcall(0, 0, 0);
+        // After pcall, the stack has the error value at slot 1
+        // (where the function used to be).
+        assert_eq!(state.get_top(), 1);
+        assert_eq!(state.to_integer_x(1), Some(999));
+    }
+
+    #[test]
+    fn pcall_clears_pending_error_after_catching() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_raise_runtime_error as RawCFunction);
+        state.pcall(0, 0, 0);
+        // The pending_error field must be cleared so a
+        // subsequent pcall doesn't see stale state.
+        assert!(state.current_thread().pending_error.is_none());
+    }
+
+    #[test]
+    fn pcall_on_non_callable_returns_runtime_error_status() {
+        let mut state = LuaState::new(0);
+        state.push_nil();
+        let status = state.pcall(0, 0, 0);
+        assert_eq!(status, ThreadStatus::RuntimeError);
+    }
+
+    #[test]
+    fn raise_error_value_sets_pending_error() {
+        let mut state = LuaState::new(0);
+        state.raise_error_value(TValue::Integer(42));
+        assert!(matches!(
+            state.current_thread().pending_error,
+            Some(LuaError::Runtime(TValue::Integer(42)))
+        ));
+    }
+
+    #[test]
+    fn pcall_pops_frame_even_on_error_path() {
+        let mut state = LuaState::new(0);
+        state.push_light_cfunction(c_raise_runtime_error as RawCFunction);
+        let depth_before = state.call_depth();
+        state.pcall(0, 0, 0);
         assert_eq!(state.call_depth(), depth_before);
     }
 }
