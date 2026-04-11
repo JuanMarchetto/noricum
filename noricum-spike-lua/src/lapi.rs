@@ -732,12 +732,206 @@ impl LuaState {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 4.2.5 — GC control + misc. Wraps the collector driver from
+// commit 7 of Stage 3 under `lua_gc`-style entry points, plus the
+// handful of utility calls that don't fit cleanly into the earlier
+// sub-commits: `raw_equal`, `len`, `concat`, `next_key`.
+// ---------------------------------------------------------------------------
+
+/// Subcommands accepted by [`LuaState::gc`], mirroring the
+/// `LUA_GC*` constants in `lua.h`. Stage 4.2.5 implements the
+/// subset that maps cleanly onto the Stage 3 v1 incremental
+/// collector; generational and step-mul tuning live in Stage 3 v2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcOp {
+    /// `LUA_GCCOLLECT` — run a full cycle to completion.
+    Collect,
+    /// `LUA_GCSTEP` — advance the state machine one step.
+    Step,
+    /// `LUA_GCCOUNT` — approximate live object count (not kilobytes).
+    Count,
+    /// `LUA_GCSTOP` — stop the incremental collector. Stage 3 v1
+    /// doesn't have a stop flag yet, so this is a recorded no-op
+    /// until Stage 3 v2 wires up the gate.
+    Stop,
+    /// `LUA_GCRESTART` — resume after a `Stop`. Paired no-op.
+    Restart,
+}
+
+impl LuaState {
+    /// Dispatch to a [`GcOp`] subcommand. Matches `lua_gc`'s fan-out
+    /// pattern but with a typed enum instead of integer codes. The
+    /// return value is command-specific: `Collect`, `Step`, `Stop`,
+    /// and `Restart` return `0`; `Count` returns the live object
+    /// count.
+    pub fn gc(&mut self, op: GcOp) -> i64 {
+        match op {
+            GcOp::Collect => {
+                self.global.full_gc();
+                0
+            }
+            GcOp::Step => {
+                let _ = self.global.gc_step();
+                0
+            }
+            GcOp::Count => self.gc_live_count() as i64,
+            GcOp::Stop | GcOp::Restart => 0,
+        }
+    }
+
+    /// Count of live (non-freed) objects across every arena.
+    /// Placeholder for C's kilobyte-granularity `LUA_GCCOUNT`.
+    pub fn gc_live_count(&self) -> u64 {
+        let heap = &self.global.heap;
+        let total = live_count(&heap.strings)
+            + live_count(&heap.tables)
+            + live_count(&heap.protos)
+            + live_count(&heap.lclosures)
+            + live_count(&heap.cclosures)
+            + live_count(&heap.upvals)
+            + live_count(&heap.threads)
+            + live_count(&heap.userdata);
+        total as u64
+    }
+
+    /// Raw equality — bit-pattern equality on the two values,
+    /// with no `__eq` metamethod dispatch. Matches `lua_rawequal`.
+    /// Out-of-range indices are never equal (C returns 0 for those).
+    pub fn raw_equal(&self, idx1: i32, idx2: i32) -> bool {
+        match (self.value_at(idx1), self.value_at(idx2)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Push the length of the value at `idx` onto the stack.
+    /// Matches `lua_len` with the `__len` metamethod disabled —
+    /// the metamethod path needs Stage 5's dispatch infra.
+    pub fn len(&mut self, idx: i32) {
+        let n = self.raw_len(idx);
+        self.push_integer(n as LuaInteger);
+    }
+
+    /// Pop the top `n` values, concatenate them into a single
+    /// string, push the result. Strings and numbers are both
+    /// accepted; anything else panics. Matches `lua_concat` in
+    /// spirit — without the number-format precision guarantee
+    /// that C's `lua_Number2str` / `LUAI_NUMFMT` provide.
+    ///
+    /// `n == 0` is a no-op that pushes the empty string (C Lua's
+    /// behavior).
+    pub fn concat(&mut self, n: u32) {
+        if n == 0 {
+            self.push_string("");
+            return;
+        }
+        if n == 1 {
+            // Single argument: leave in place. C's lua_concat does
+            // the same — no copy, no-op for n=1.
+            return;
+        }
+        let top = self.current_thread().top;
+        assert!(
+            top >= n,
+            "lapi: concat({}) underflows the stack (top={})",
+            n,
+            top
+        );
+        let start = top - n;
+        let mut buffer: Vec<u8> = Vec::new();
+        for i in start..top {
+            let v = self.current_thread().stack[i as usize];
+            match v {
+                TValue::ShortString(h) | TValue::LongString(h) => {
+                    buffer.extend_from_slice(&self.global.heap.string(h).bytes);
+                }
+                TValue::Integer(i) => {
+                    buffer.extend_from_slice(i.to_string().as_bytes());
+                }
+                TValue::Number(f) => {
+                    buffer.extend_from_slice(format!("{f}").as_bytes());
+                }
+                other => panic!(
+                    "lapi: concat: slot {} holds {} (expected string or number)",
+                    i,
+                    other.type_name()
+                ),
+            }
+        }
+        // Pop the n inputs and push the concatenation.
+        self.current_thread_mut().set_top(start);
+        let _ = self.push_lstring(&buffer);
+    }
+
+    /// Table iteration step — pops the current key from the top of
+    /// the stack, pushes the next `(key, value)` pair, and returns
+    /// `true`. Returns `false` and pops the key when the traversal
+    /// is exhausted. Matches `lua_next`.
+    pub fn next_key(&mut self, idx: i32) -> bool {
+        let table = self.require_table(idx, "next_key");
+        let current = self
+            .current_thread_mut()
+            .pop()
+            .expect("lapi: next_key stack underflow");
+        let current_key = if matches!(current, TValue::Nil) {
+            None
+        } else {
+            crate::ltable::table_key_from_tvalue(current)
+        };
+        match self.global.heap.table_next(table, current_key) {
+            Some((key, value)) => {
+                let Some(key_tvalue) = tvalue_from_table_key(key) else {
+                    return false;
+                };
+                self.current_thread_mut().push(key_tvalue);
+                self.current_thread_mut().push(value);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Helper for [`LuaState::gc_live_count`] — number of `Some`
+/// entries in a slot Vec.
+fn live_count<T>(slots: &[Option<T>]) -> usize {
+    slots.iter().filter(|s| s.is_some()).count()
+}
+
+/// Round-trip a [`crate::contract::TableKey`] back into a
+/// [`TValue`]. The `LightCFunction` variant stores a `usize` that
+/// can't be safely cast back to a function pointer from safe
+/// Rust, so that one branch returns `None` — the caller (currently
+/// just [`LuaState::next_key`]) signals "end of traversal" in that
+/// case, which is a safe lie for Stage 4.
+fn tvalue_from_table_key(k: crate::contract::TableKey) -> Option<TValue> {
+    use crate::contract::TableKey;
+    Some(match k {
+        TableKey::False => TValue::False,
+        TableKey::True => TValue::True,
+        TableKey::Integer(i) => TValue::Integer(i),
+        TableKey::Number(bits) => TValue::Number(f64::from_bits(bits)),
+        TableKey::LightUserData(p) => {
+            TValue::LightUserData(p as *mut std::os::raw::c_void)
+        }
+        TableKey::ShortString(h) => TValue::ShortString(h),
+        TableKey::LongString(h) => TValue::LongString(h),
+        TableKey::Table(h) => TValue::Table(h),
+        TableKey::LuaClosure(h) => TValue::LuaClosure(h),
+        TableKey::LightCFunction(_) => return None,
+        TableKey::CClosure(h) => TValue::CClosure(h),
+        TableKey::UserData(h) => TValue::UserData(h),
+        TableKey::Thread(h) => TValue::Thread(h),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::LUA_TNONE;
+    use super::{GcOp, LUA_TNONE};
     use crate::contract::{
         LuaState, TValue, LUA_TBOOLEAN, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE,
     };
@@ -1296,6 +1490,126 @@ mod tests {
         state.push_nil();
         state.set_metatable(1);
         assert!(!state.get_metatable(1));
+    }
+
+    // ---- 4.2.5 GC control + misc ---------------------------------
+
+    #[test]
+    fn gc_collect_runs_full_cycle_and_returns_to_pause() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        state.gc(GcOp::Collect);
+        assert_eq!(state.global.gc_state, crate::lgc::GcState::Pause);
+    }
+
+    #[test]
+    fn gc_step_advances_state_machine_one_step() {
+        let mut state = LuaState::new(0);
+        // Start collection — takes us to Propagate via gc_step.
+        state.gc(GcOp::Step);
+        assert_eq!(state.global.gc_state, crate::lgc::GcState::Propagate);
+    }
+
+    #[test]
+    fn gc_live_count_reports_allocated_objects() {
+        let mut state = LuaState::new(0);
+        let baseline = state.gc_live_count();
+        state.new_table();
+        state.new_table();
+        assert_eq!(state.gc_live_count(), baseline + 2);
+    }
+
+    #[test]
+    fn raw_equal_compares_values_by_bit_pattern() {
+        let mut state = LuaState::new(0);
+        state.push_integer(42);
+        state.push_integer(42);
+        state.push_integer(43);
+        assert!(state.raw_equal(1, 2));
+        assert!(!state.raw_equal(1, 3));
+    }
+
+    #[test]
+    fn raw_equal_interned_strings_compare_equal_by_handle() {
+        let mut state = LuaState::new(0);
+        state.push_string("foo");
+        state.push_string("foo");
+        // Short-string interning means both slots hold the same handle.
+        assert!(state.raw_equal(1, 2));
+    }
+
+    #[test]
+    fn len_pushes_raw_length_of_string_value() {
+        let mut state = LuaState::new(0);
+        state.push_string("hello");
+        state.len(1);
+        assert_eq!(state.to_integer_x(-1), Some(5));
+    }
+
+    #[test]
+    fn len_pushes_raw_length_of_table_border() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        state.push_integer(10);
+        state.raw_set_i(1, 1);
+        state.push_integer(20);
+        state.raw_set_i(1, 2);
+        state.len(1);
+        assert_eq!(state.to_integer_x(-1), Some(2));
+    }
+
+    #[test]
+    fn concat_joins_strings_in_order_and_pops_inputs() {
+        let mut state = LuaState::new(0);
+        state.push_string("hello ");
+        state.push_string("world");
+        state.concat(2);
+        // Only the result is left.
+        assert_eq!(state.get_top(), 1);
+        assert_eq!(state.to_lstring(-1), Some(b"hello world".as_slice()));
+    }
+
+    #[test]
+    fn concat_accepts_integer_operands_via_display() {
+        let mut state = LuaState::new(0);
+        state.push_string("answer=");
+        state.push_integer(42);
+        state.concat(2);
+        assert_eq!(state.to_lstring(-1), Some(b"answer=42".as_slice()));
+    }
+
+    #[test]
+    fn concat_with_n_equal_to_one_is_noop() {
+        let mut state = LuaState::new(0);
+        state.push_string("alone");
+        state.concat(1);
+        assert_eq!(state.get_top(), 1);
+        assert_eq!(state.to_lstring(-1), Some(b"alone".as_slice()));
+    }
+
+    #[test]
+    fn next_key_iterates_array_part_then_returns_false_at_end() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        state.push_integer(10);
+        state.raw_set_i(1, 1);
+        state.push_integer(20);
+        state.raw_set_i(1, 2);
+
+        // Start iteration with nil as the current key.
+        state.push_nil();
+        assert!(state.next_key(1));
+        // Stack: [table, key, value] — verify and pop value.
+        assert_eq!(state.to_integer_x(-2), Some(1)); // first key
+        assert_eq!(state.to_integer_x(-1), Some(10));
+        state.set_top(-2); // drop value, keep key as next cursor
+
+        assert!(state.next_key(1));
+        assert_eq!(state.to_integer_x(-2), Some(2));
+        assert_eq!(state.to_integer_x(-1), Some(20));
+        state.set_top(-2);
+
+        assert!(!state.next_key(1));
     }
 
     #[test]
