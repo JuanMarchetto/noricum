@@ -526,6 +526,212 @@ impl LuaState {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 4.2.4 — table get/set via the stack. These are the wrappers
+// over ltable's raw table methods that pop keys/values from the stack,
+// dispatch through the arena, and push results back.
+//
+// Metamethod-invoking variants (lua_gettable, lua_settable, which
+// trigger __index / __newindex) are deferred until Stage 5 ships the
+// VM and the metamethod dispatch machinery. What lands here is the
+// "raw" family plus table creation and metatable install/query.
+// ---------------------------------------------------------------------------
+
+impl LuaState {
+    /// Push a fresh, empty table onto the stack. `narr` and `nrec`
+    /// are hints for the initial array and hash capacities
+    /// respectively — C's `lua_createtable` uses them to pre-size
+    /// the arena bookkeeping and avoid early rehashes. Matches
+    /// `lua_createtable`.
+    pub fn create_table(&mut self, narr: usize, nrec: usize) {
+        let t = crate::contract::Table {
+            array: Vec::with_capacity(narr),
+            hash: std::collections::HashMap::with_capacity(nrec),
+            metatable: None,
+            meta_cache_flags: 0,
+        };
+        let handle = self.global.heap.alloc_table(t);
+        self.current_thread_mut().push(TValue::Table(handle));
+    }
+
+    /// Convenience: `create_table(0, 0)`. Matches `lua_newtable`.
+    pub fn new_table(&mut self) {
+        self.create_table(0, 0);
+    }
+
+    /// Pop the key off the top, look it up in the table at `idx`,
+    /// and push the result (or nil for missing). Bypasses
+    /// metamethods — this is `lua_rawget`, not `lua_gettable`.
+    pub fn raw_get(&mut self, idx: i32) -> i32 {
+        let table = self.require_table(idx, "raw_get");
+        let key = self
+            .current_thread_mut()
+            .pop()
+            .expect("lapi: raw_get stack underflow");
+        let value = self
+            .global
+            .heap
+            .table_get(table, key)
+            .unwrap_or(TValue::Nil);
+        self.current_thread_mut().push(value);
+        self.type_at(-1)
+    }
+
+    /// Look up `key` (integer) in the table at `idx` and push the
+    /// result. Bypasses metamethods. Matches `lua_rawgeti`.
+    pub fn raw_get_i(&mut self, idx: i32, key: LuaInteger) -> i32 {
+        let table = self.require_table(idx, "raw_get_i");
+        let value = self
+            .global
+            .heap
+            .table_get_int(table, key)
+            .unwrap_or(TValue::Nil);
+        self.current_thread_mut().push(value);
+        self.type_at(-1)
+    }
+
+    /// Look up short-string `key` in the table at `idx` and push
+    /// the result. Creates the string in the intern table if it
+    /// doesn't already live there. Matches `lua_getfield` with
+    /// the raw-access semantics forced.
+    pub fn raw_get_field(&mut self, idx: i32, key: &str) -> i32 {
+        let table = self.require_table(idx, "raw_get_field");
+        let seed = self.global.hash_seed;
+        let key_handle = self.global.new_string(key.as_bytes(), seed);
+        let value = self
+            .global
+            .heap
+            .table_get_shortstr(table, key_handle)
+            .unwrap_or(TValue::Nil);
+        self.current_thread_mut().push(value);
+        self.type_at(-1)
+    }
+
+    /// Pop value-then-key from the top and raw-set the table at
+    /// `idx`. Fires the write barrier via [`GlobalState::table_set`].
+    /// Matches `lua_rawset`.
+    pub fn raw_set(&mut self, idx: i32) {
+        let table = self.require_table(idx, "raw_set");
+        // Stack layout: [..., key, value]. Pop value, then key.
+        let value = self
+            .current_thread_mut()
+            .pop()
+            .expect("lapi: raw_set stack underflow (value)");
+        let key = self
+            .current_thread_mut()
+            .pop()
+            .expect("lapi: raw_set stack underflow (key)");
+        self.global.table_set(table, key, value);
+    }
+
+    /// Pop the value off the top, raw-set `table[key] = value`
+    /// where `key` is an integer. Matches `lua_rawseti`.
+    pub fn raw_set_i(&mut self, idx: i32, key: LuaInteger) {
+        let table = self.require_table(idx, "raw_set_i");
+        let value = self
+            .current_thread_mut()
+            .pop()
+            .expect("lapi: raw_set_i stack underflow");
+        self.global.table_set_int(table, key, value);
+    }
+
+    /// Pop the value off the top, raw-set `table[key] = value`
+    /// where `key` is a string literal. Matches `lua_setfield`
+    /// with metamethods bypassed (the metamethod-aware variant
+    /// lands with Stage 5).
+    pub fn raw_set_field(&mut self, idx: i32, key: &str) {
+        let table = self.require_table(idx, "raw_set_field");
+        let value = self
+            .current_thread_mut()
+            .pop()
+            .expect("lapi: raw_set_field stack underflow");
+        let seed = self.global.hash_seed;
+        let key_handle = self.global.new_string(key.as_bytes(), seed);
+        self.global
+            .table_set_shortstr(table, key_handle, value);
+    }
+
+    /// If the value at `idx` has a metatable, push it onto the
+    /// stack and return `true`; otherwise return `false` and
+    /// leave the stack unchanged. Matches `lua_getmetatable`.
+    pub fn get_metatable(&mut self, idx: i32) -> bool {
+        let Some(v) = self.value_at(idx) else {
+            return false;
+        };
+        let mt = match v {
+            TValue::Table(h) => self.global.heap.table(h).metatable,
+            TValue::UserData(h) => self.global.heap.userdata_get(h).metatable,
+            _ => None,
+        };
+        match mt {
+            Some(mt_handle) => {
+                self.current_thread_mut().push(TValue::Table(mt_handle));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Pop the metatable from the top of the stack (must be a
+    /// table or nil) and install it on the value at `idx`
+    /// (a table or a userdata). Matches `lua_setmetatable`.
+    /// Fires the forward write barrier on (parent, mt) so the
+    /// GC invariant is preserved.
+    pub fn set_metatable(&mut self, idx: i32) -> bool {
+        let target = match self.value_at(idx) {
+            Some(v @ (TValue::Table(_) | TValue::UserData(_))) => v,
+            _ => return false,
+        };
+        let top_value = self
+            .current_thread_mut()
+            .pop()
+            .expect("lapi: set_metatable stack underflow");
+        let new_mt = match top_value {
+            TValue::Nil => None,
+            TValue::Table(h) => Some(h),
+            _ => panic!("lapi: set_metatable expects table or nil"),
+        };
+        match target {
+            TValue::Table(h) => {
+                self.global.heap.table_mut(h).metatable = new_mt;
+                if let Some(mt) = new_mt {
+                    self.global.barrier_forward(
+                        crate::lgc::AnyHandle::Table(h),
+                        crate::lgc::AnyHandle::Table(mt),
+                    );
+                }
+                true
+            }
+            TValue::UserData(h) => {
+                self.global.heap.userdata_mut(h).metatable = new_mt;
+                if let Some(mt) = new_mt {
+                    self.global.barrier_forward(
+                        crate::lgc::AnyHandle::UserData(h),
+                        crate::lgc::AnyHandle::Table(mt),
+                    );
+                }
+                true
+            }
+            _ => unreachable!("target was already checked to be a table or userdata"),
+        }
+    }
+
+    /// Read the table handle at `idx`, panicking with a
+    /// diagnostic that names `ctx` if the slot is missing or
+    /// not a table. Centralizes the error wording for the
+    /// raw get/set family.
+    fn require_table(&self, idx: i32, ctx: &str) -> crate::contract::TableHandle {
+        match self.value_at(idx) {
+            Some(TValue::Table(h)) => h,
+            Some(other) => panic!(
+                "lapi: {ctx}: value at idx {idx} is {} (expected table)",
+                other.type_name()
+            ),
+            None => panic!("lapi: {ctx}: idx {idx} out of range"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1000,5 +1206,131 @@ mod tests {
         assert_eq!(state.to_integer_x(1), Some(10));
         assert_eq!(state.to_lstring(2), Some(b"mid".as_slice()));
         assert!(state.to_boolean(3));
+    }
+
+    // ---- 4.2.4 table get/set via stack ----------------------------
+
+    #[test]
+    fn new_table_pushes_empty_table() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        assert_eq!(state.get_top(), 1);
+        assert!(state.is_table(1));
+        assert_eq!(state.raw_len(1), 0);
+    }
+
+    #[test]
+    fn raw_set_i_then_raw_get_i_round_trips_integer_value() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        // Push value to set, then raw_set_i consumes it.
+        state.push_integer(99);
+        state.raw_set_i(1, 1); // t[1] = 99
+        // Read it back.
+        state.raw_get_i(1, 1);
+        assert_eq!(state.to_integer_x(-1), Some(99));
+    }
+
+    #[test]
+    fn raw_set_field_then_raw_get_field_round_trips_string_key() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        state.push_string("world");
+        state.raw_set_field(1, "greeting"); // t.greeting = "world"
+        state.raw_get_field(1, "greeting");
+        assert_eq!(state.to_lstring(-1), Some(b"world".as_slice()));
+    }
+
+    #[test]
+    fn raw_get_missing_key_pushes_nil() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        state.raw_get_i(1, 42);
+        assert!(state.is_nil(-1));
+        assert_eq!(state.type_at(-1), LUA_TNIL as i32);
+    }
+
+    #[test]
+    fn raw_set_then_raw_get_with_generic_key() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        // Stack layout: [table, key, value]
+        state.push_string("key");
+        state.push_integer(7);
+        state.raw_set(1); // pops key+value, stores in table
+        // Look it up.
+        state.push_string("key");
+        state.raw_get(1);
+        assert_eq!(state.to_integer_x(-1), Some(7));
+    }
+
+    #[test]
+    fn get_metatable_returns_false_when_absent() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        assert!(!state.get_metatable(1));
+        // Stack is unchanged — still just the original table.
+        assert_eq!(state.get_top(), 1);
+    }
+
+    #[test]
+    fn set_metatable_then_get_metatable_round_trips() {
+        let mut state = LuaState::new(0);
+        state.new_table(); // slot 1: target table
+        state.new_table(); // slot 2: metatable (on top)
+        assert!(state.set_metatable(1));
+        // After set_metatable, top = 1 (metatable was popped).
+        assert_eq!(state.get_top(), 1);
+        // Now get the metatable back.
+        assert!(state.get_metatable(1));
+        assert!(state.is_table(-1));
+    }
+
+    #[test]
+    fn set_metatable_with_nil_clears_existing_metatable() {
+        let mut state = LuaState::new(0);
+        state.new_table();
+        state.new_table();
+        state.set_metatable(1);
+        // Now clear it.
+        state.push_nil();
+        state.set_metatable(1);
+        assert!(!state.get_metatable(1));
+    }
+
+    #[test]
+    fn raw_set_fires_forward_barrier_during_propagate() {
+        // Put GC in propagate with a black target table and a
+        // white value to store. raw_set should call barrier_forward
+        // and mark the value GRAY.
+        let mut state = LuaState::new(0);
+        state.new_table();
+        let target = match state.current_thread().stack[0] {
+            TValue::Table(h) => h,
+            _ => unreachable!(),
+        };
+        state.push_string("x");
+        let value_handle = match state.current_thread().stack[1] {
+            TValue::ShortString(h) => h,
+            _ => unreachable!(),
+        };
+        // Put the state into Propagate with the target black.
+        state.global.heap.marks_tables[target.slot as usize] =
+            crate::lgc::BLACK;
+        state.global.heap.marks_strings[value_handle.slot as usize] =
+            crate::lgc::WHITE;
+        state.global.gc_state = crate::lgc::GcState::Propagate;
+        // Stack is [table, "x"]. Push the key so we can raw_set.
+        state.push_integer(1); // key
+        state.push_string("x"); // value on top
+        // Re-stamp the value's mark since intern gave us the same handle.
+        state.global.heap.marks_strings[value_handle.slot as usize] =
+            crate::lgc::WHITE;
+        state.raw_set(1);
+        assert_eq!(
+            state.global.heap.marks_strings[value_handle.slot as usize],
+            crate::lgc::GRAY,
+            "barrier must mark the stored string gray"
+        );
     }
 }
