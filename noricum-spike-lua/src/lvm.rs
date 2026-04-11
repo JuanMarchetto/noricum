@@ -110,6 +110,9 @@ const OP_CLOSURE_U8: u8 = OpCode::OP_CLOSURE as u8;
 const OP_GETUPVAL_U8: u8 = OpCode::OP_GETUPVAL as u8;
 const OP_SETUPVAL_U8: u8 = OpCode::OP_SETUPVAL as u8;
 
+const OP_CONCAT_U8: u8 = OpCode::OP_CONCAT as u8;
+const OP_LEN_U8: u8 = OpCode::OP_LEN as u8;
+
 impl LuaState {
     /// Run the bytecode interpreter for the top call frame until
     /// it returns. Expects the frame's callable slot to hold a
@@ -379,6 +382,69 @@ impl LuaState {
                         _ => return Err(LuaError::Runtime(TValue::Nil)),
                     };
                     self.global.table_set(table_handle, key, rc);
+                }
+                OP_LEN_U8 => {
+                    // R(A) := #R(B) — length operator.
+                    // Strings, tables, userdata; metamethod
+                    // __len fallback deferred.
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    let rb = self.current_thread().stack[(base + b) as usize];
+                    let len_value = match rb {
+                        TValue::ShortString(h) | TValue::LongString(h) => {
+                            TValue::Integer(
+                                self.global.heap.string(h).bytes.len() as i64,
+                            )
+                        }
+                        TValue::Table(h) => {
+                            TValue::Integer(self.global.heap.table_len(h) as i64)
+                        }
+                        TValue::UserData(h) => TValue::Integer(
+                            self.global.heap.userdata_get(h).data.len() as i64,
+                        ),
+                        _ => return Err(LuaError::Runtime(TValue::Nil)),
+                    };
+                    self.current_thread_mut().stack[(base + a) as usize] = len_value;
+                }
+                OP_CONCAT_U8 => {
+                    // R(A) := R(A) .. R(A+1) .. ... .. R(A+B-1).
+                    // B is the total number of operands to
+                    // concatenate. Integers and floats coerce
+                    // to their Display representation. Non
+                    // string/number operands trigger a runtime
+                    // error placeholder until __concat is wired.
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    if b < 2 {
+                        // N < 2 is degenerate; nothing to do.
+                        continue;
+                    }
+                    let mut buffer: Vec<u8> = Vec::new();
+                    for i in 0..b {
+                        let v = self.current_thread().stack[(base + a + i) as usize];
+                        match v {
+                            TValue::ShortString(h) | TValue::LongString(h) => {
+                                buffer.extend_from_slice(
+                                    &self.global.heap.string(h).bytes,
+                                );
+                            }
+                            TValue::Integer(n) => {
+                                buffer.extend_from_slice(n.to_string().as_bytes());
+                            }
+                            TValue::Number(f) => {
+                                buffer.extend_from_slice(format!("{f}").as_bytes());
+                            }
+                            _ => return Err(LuaError::Runtime(TValue::Nil)),
+                        }
+                    }
+                    let seed = self.global.hash_seed;
+                    let handle = self.global.new_string(&buffer, seed);
+                    let result = if buffer.len() <= crate::lstring::LUAI_MAXSHORTLEN {
+                        TValue::ShortString(handle)
+                    } else {
+                        TValue::LongString(handle)
+                    };
+                    self.current_thread_mut().stack[(base + a) as usize] = result;
                 }
                 OP_CLOSURE_U8 => {
                     // R(A) := closure(K[Bx]) — create a new
@@ -1833,6 +1899,92 @@ mod tests {
             .push(TValue::LuaClosure(outer_closure));
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(13));
+    }
+
+    // ---- Stage 5.12 CONCAT + LEN ----------------------------------
+
+    #[test]
+    fn op_concat_joins_strings_from_consecutive_registers() {
+        // R(0) = "hello ", R(1) = "world"
+        // CONCAT R(0), 2  -> R(0) = "hello world"
+        let mut state = LuaState::new(0);
+        let hello = TValue::ShortString(state.global.new_string(b"hello ", 0));
+        let world = TValue::ShortString(state.global.new_string(b"world", 0));
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadk(1, 1),
+                create_abck(OpCode::OP_CONCAT, 0, 2, 0, false),
+                return1(0),
+            ],
+            vec![hello, world],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_lstring(1), Some(b"hello world".as_slice()));
+    }
+
+    #[test]
+    fn op_concat_accepts_integer_operands_via_display() {
+        // R(0) = "answer=", R(1) = 42
+        let mut state = LuaState::new(0);
+        let prefix = TValue::ShortString(state.global.new_string(b"answer=", 0));
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadi(1, 42),
+                create_abck(OpCode::OP_CONCAT, 0, 2, 0, false),
+                return1(0),
+            ],
+            vec![prefix],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_lstring(1), Some(b"answer=42".as_slice()));
+    }
+
+    #[test]
+    fn op_len_on_string_returns_byte_length() {
+        let mut state = LuaState::new(0);
+        let s = TValue::ShortString(state.global.new_string(b"12345", 0));
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_LEN, 1, 0, 0, false),
+                return1(1),
+            ],
+            vec![s],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(5));
+    }
+
+    #[test]
+    fn op_len_on_table_returns_border() {
+        // t = {}; t[1] = 10; t[2] = 20; t[3] = 30; return #t
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_NEWTABLE, 0, 0, 0, false),
+                extraarg(),
+                loadi(1, 10),
+                create_abck(OpCode::OP_SETI, 0, 1, 1, false),
+                loadi(1, 20),
+                create_abck(OpCode::OP_SETI, 0, 2, 1, false),
+                loadi(1, 30),
+                create_abck(OpCode::OP_SETI, 0, 3, 1, false),
+                create_abck(OpCode::OP_LEN, 2, 0, 0, false),
+                return1(2),
+            ],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(3));
     }
 
     #[test]
