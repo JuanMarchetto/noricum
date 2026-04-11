@@ -916,6 +916,201 @@ fn extension_test_aes256_decrypt_full() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Real-world fuzzing pass: read every .zip file in a directory pointed to by
+/// the `SPIKE_REAL_ARCHIVES` env var, walk it through both the C oracle and
+/// the Rust reader, and assert that the entry-by-entry view agrees (name,
+/// size, crc32). Also byte-compares the first 1024 bytes of each entry.
+///
+/// This test is `#[ignore]`d by default so the default `cargo test` run
+/// stays hermetic. To actually run the fuzzing pass:
+///
+/// ```sh
+/// SPIKE_REAL_ARCHIVES=/tmp/real-world-zips cargo test --test differential_zip real_world -- --ignored --nocapture
+/// ```
+///
+/// Any divergence between the oracle and the Rust reader is a failure the
+/// spike cares about — it means there's a format feature the reader does
+/// not yet handle.
+#[test]
+#[ignore = "requires SPIKE_REAL_ARCHIVES env var pointing to a directory of .zip files"]
+fn real_world_diff_test() {
+    let dir = match std::env::var("SPIKE_REAL_ARCHIVES") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => {
+            eprintln!("SPIKE_REAL_ARCHIVES not set, skipping real-world fuzzing");
+            return;
+        }
+    };
+
+    // Accept any ZIP-format container: .zip, .jar (Java), .war/.ear (Java EE),
+    // .apk (Android), .docx/.xlsx/.pptx (Office), .epub (e-books), .kmz (KML).
+    const ZIP_EXTS: &[&str] = &[
+        "zip", "jar", "war", "ear", "apk", "docx", "xlsx", "pptx", "epub", "kmz",
+    ];
+    let mut archives: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read_dir({}): {e}", dir.display()))
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|s| s.to_str())
+                .map(|ext| {
+                    ZIP_EXTS.iter().any(|z| z.eq_ignore_ascii_case(ext))
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    archives.sort();
+
+    assert!(
+        !archives.is_empty(),
+        "SPIKE_REAL_ARCHIVES is set but no .zip files found in {}",
+        dir.display()
+    );
+
+    println!("\nReal-world diff test: {} archives", archives.len());
+
+    let mut total_archives = 0usize;
+    let mut total_entries = 0usize;
+    let mut matched_archives = 0usize;
+    let mut oracle_only_failures: Vec<String> = Vec::new();
+    let mut rust_only_failures: Vec<(String, String)> = Vec::new();
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for archive in &archives {
+        let name = archive.file_name().unwrap().to_string_lossy().into_owned();
+        total_archives += 1;
+
+        let oracle = match snapshot_via_oracle(archive) {
+            Ok(s) => s,
+            Err(e) => {
+                oracle_only_failures.push(format!("{name}: oracle rejected ({e})"));
+                println!("  ORACLE-FAIL {name}  ({e})");
+                continue;
+            }
+        };
+
+        let mut rust_reader = match RustZipReader::open(archive) {
+            Ok(r) => r,
+            Err(e) => {
+                rust_only_failures.push((name.clone(), format!("{e:?}")));
+                println!("  RUST-OPEN-FAIL {name}  ({e:?})");
+                continue;
+            }
+        };
+
+        let rust_headers: Vec<_> = rust_reader.entries().to_vec();
+
+        if rust_headers.len() != oracle.entries.len() {
+            mismatches.push(format!(
+                "{name}: oracle={} entries, rust={} entries",
+                oracle.entries.len(),
+                rust_headers.len()
+            ));
+            println!(
+                "  DIFFER    {name}  oracle={} rust={} entries",
+                oracle.entries.len(),
+                rust_headers.len()
+            );
+            continue;
+        }
+
+        let mut archive_ok = true;
+        for (i, hdr) in rust_headers.iter().enumerate() {
+            let oracle_entry = &oracle.entries[i];
+            if hdr.file_name != oracle_entry.name {
+                mismatches.push(format!(
+                    "{name} entry {i}: name mismatch oracle={:?} rust={:?}",
+                    oracle_entry.name, hdr.file_name
+                ));
+                archive_ok = false;
+                break;
+            }
+            if hdr.uncompressed_size as usize != oracle_entry.size {
+                mismatches.push(format!(
+                    "{name}/{}: size oracle={} rust={}",
+                    hdr.file_name, oracle_entry.size, hdr.uncompressed_size
+                ));
+                archive_ok = false;
+                break;
+            }
+            if hdr.crc32 != oracle_entry.crc32 {
+                mismatches.push(format!(
+                    "{name}/{}: crc32 oracle={:08x} rust={:08x}",
+                    hdr.file_name, oracle_entry.crc32, hdr.crc32
+                ));
+                archive_ok = false;
+                break;
+            }
+
+            // Extract the full entry via Rust and first 64 bytes via oracle,
+            // byte-compare the overlap.
+            match rust_reader.extract_to_mem(i) {
+                Ok(body) => {
+                    let prefix = &body[..body.len().min(FIRST_BYTES_CAP)];
+                    if prefix != oracle_entry.first_bytes.as_slice() {
+                        mismatches.push(format!(
+                            "{name}/{}: first-bytes diverge",
+                            hdr.file_name
+                        ));
+                        archive_ok = false;
+                        break;
+                    }
+                    total_entries += 1;
+                }
+                Err(e) => {
+                    mismatches.push(format!(
+                        "{name}/{}: rust extract failed: {e:?}",
+                        hdr.file_name
+                    ));
+                    archive_ok = false;
+                    break;
+                }
+            }
+        }
+
+        if archive_ok {
+            matched_archives += 1;
+            println!(
+                "  MATCH     {name}  ({} entries)",
+                oracle.entries.len()
+            );
+        }
+    }
+
+    println!(
+        "\nSummary: {matched_archives} / {total_archives} archives matched, {total_entries} entries extracted"
+    );
+
+    if !oracle_only_failures.is_empty() {
+        println!("Oracle failures (C cannot open):");
+        for m in &oracle_only_failures {
+            println!("  - {m}");
+        }
+    }
+    if !rust_only_failures.is_empty() {
+        println!("Rust failures (Rust cannot open/parse):");
+        for (n, e) in &rust_only_failures {
+            println!("  - {n}: {e}");
+        }
+    }
+    if !mismatches.is_empty() {
+        println!("Mismatches:");
+        for m in &mismatches {
+            println!("  - {m}");
+        }
+    }
+
+    // Fail the test if Rust failed to open something the oracle handled, OR
+    // if anything matched on open but diverged on content.
+    assert!(
+        rust_only_failures.is_empty() && mismatches.is_empty(),
+        "real-world fuzzing had {} rust failures and {} mismatches",
+        rust_only_failures.len(),
+        mismatches.len()
+    );
+}
+
 /// Also verify the AES-128 and AES-192 paths with a smaller payload, to make
 /// sure all three strengths are exercised.
 #[test]
