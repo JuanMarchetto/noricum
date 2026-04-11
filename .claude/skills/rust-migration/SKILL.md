@@ -180,6 +180,111 @@ fn format_g(val: f64) -> String {
 }
 ```
 
+## Binary Format Container Migration (learned from miniz_zip.c interactive spike)
+
+**Pattern:** For C libraries that wrap a well-specified binary format (ZIP, PNG, ELF, gzip, tar) around an algorithm-heavy core (deflate, DCT, LZW), the migration splits into three parts:
+
+1. **Container layer** — parse/emit the format's headers, tables, and records. Translate this by hand using the format spec as ground truth.
+2. **Algorithm layer** — compression, hashing, encryption. Delegate to an existing Rust crate (`flate2`, `crc32fast`, `aes`, `sha1/2`).
+3. **Oracle differential test** — compile the C library, expose a thin wrapper, compare Rust output against it on a fixture corpus.
+
+```rust
+// ZIP central directory entry — byte layout from APPNOTE.TXT 4.3.12
+// Use u64 throughout for sizes/offsets to get zip64 compatibility for free
+#[derive(Clone, Debug)]
+pub struct CentralDirHeader {
+    pub version_made_by: u16,
+    pub version_needed: u16,
+    pub flags: u16,
+    pub compression_method: CompressionMethod,
+    pub crc32: u32,
+    pub compressed_size: u64,
+    pub uncompressed_size: u64,
+    pub local_header_offset: u64,
+    pub file_name: String,
+    pub extra_field: Vec<u8>,
+    pub comment: String,
+    // ... other fields per spec
+}
+
+// Parse little-endian bytes with helper functions, not derive-based serde
+fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([buf[offset], buf[offset+1], buf[offset+2], buf[offset+3]])
+}
+```
+
+**Rule:** Never derive the Rust contract from C struct layouts alone. C structs have accidental complexity (padding, prefix conventions, legacy fields) that pollutes the contract. Instead, clone an existing idiomatic Rust crate for the domain and steal its types.
+
+```rust
+// Source abstraction: concrete enum, not trait object
+// This replaces Box<dyn Read + Write + Seek> which is INVALID Rust
+// (trait objects can have at most one non-auto trait)
+pub enum ZipSource {
+    File(std::fs::File),
+    Mem(std::io::Cursor<Vec<u8>>),
+}
+
+impl Read for ZipSource { /* delegate to inner */ }
+impl Write for ZipSource { /* delegate to inner */ }
+impl Seek for ZipSource { /* delegate to inner */ }
+```
+
+**Algorithm delegation example (miniz_zip, 2200+ LOC saved):**
+
+```rust
+// Reader side
+use flate2::read::DeflateDecoder;
+let taken = (&mut source).take(compressed_size);
+let mut decoder = DeflateDecoder::new(taken);
+let mut out = Vec::with_capacity(uncompressed_size as usize);
+decoder.read_to_end(&mut out).map_err(|_| ZipError::DecompressionFailed)?;
+
+// Writer side
+use flate2::write::DeflateEncoder;
+use flate2::Compression;
+let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+encoder.write_all(data)?;
+let compressed = encoder.finish()?;
+```
+
+**The differential test scope trade-off:** delegating compression means the Rust writer won't produce byte-identical archives to the C library (flate2 and miniz-oxide make different tie-breaking choices in deflate). The diff test asserts on extracted content + metadata (filename, size, crc32, extracted bytes), NOT on raw archive bytes. This is explicitly by design and should be documented in the test and commit messages.
+
+**C oracle harness pattern (mandatory for this approach):**
+
+```rust
+// build.rs
+fn main() {
+    cc::Build::new()
+        .file("miniz.c").file("miniz_tdef.c").file("miniz_tinfl.c")
+        .file("miniz_zip.c").file("wrapper.c")
+        .include(".")
+        .compile("miniz_wrapper");
+}
+
+// wrapper.h — thin opaque-handle wrapper
+typedef void* zip_handle_t;
+zip_handle_t wr_reader_open(const char* filename);
+int          wr_reader_extract(zip_handle_t h, int idx, void* buf, size_t cap);
+// ... etc
+
+// lib.rs — Rust FFI declarations
+#[link(name = "miniz_wrapper", kind = "static")]
+unsafe extern "C" {
+    pub fn wr_reader_open(filename: *const c_char) -> ZipHandle;
+    // ...
+}
+```
+
+Result: C implementation available as ground truth via `unsafe extern` block, Rust implementation written separately against the same spec, both extract the same fixtures, byte-for-byte equality checked in tests.
+
+**Key invariants from the miniz_zip spike** (LOC savings tell the story):
+- C source: 4895 LOC (miniz_zip.c) + 2200 LOC (miniz_tdef.c + miniz_tinfl.c) + 646 LOC (miniz.c) = 7741 LOC total
+- Rust spike: 337 LOC contract + 453 LOC reader + 319 LOC writer + 48 LOC FFI = **1157 LOC (0.15x of the C)**
+- Savings breakdown: deflate/inflate → flate2 (saves ~2200 LOC), CRC32 → crc32fast (saves ~80 LOC), zlib-compat wrappers → not needed (saves ~400 LOC), heap/cfile/mem variants → single ZipSource enum (saves ~300 LOC), legacy 32-bit fallback paths → u64 throughout (saves ~200 LOC)
+- Test count: 28 tests, 0 unsafe in translated code (only FFI block is unsafe), 0 clippy warnings
+
+**Reference implementation:** `feat/interactive-spike` branch of noricum, commits `cf4a07f` through `454e560`. Read those 5 commits for the full pattern in action.
+
 ## Common Pitfalls (from production migrations)
 - `bool` vs `int`: C returns 0/1 as int; Rust `bool` prints `true/false` → keep as `i32`
 - Integer overflow: C wraps silently; Rust panics in debug → use `wrapping_add` etc.
