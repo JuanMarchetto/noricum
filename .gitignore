@@ -19,19 +19,8 @@ run*-report.html
 miniz_*-output.log
 miniz_*-report.html
 
-# Internal docs (plans, specs, marketing)
-docs/plans/
-docs/marketing/
-docs/superpowers/plans/
-docs/superpowers/specs/
-
-# Benchmark results and scripts
-results/
-scripts/
-
-# Review/cron logs
-reviews/behavioral/*.log
-reviews/reports/*.log
+# Local working notes (not tracked)
+docs/private/
 
 # Demo recordings
 /demo.cast
@@ -42,4 +31,6 @@ reviews/reports/*.log
 .noricum-artifacts/
 proptest-regressions/
 .worktrees/
-docs/index.html
+
+# Generated PDFs from blog markdown (regenerable from source)
+blog/*.pdf
