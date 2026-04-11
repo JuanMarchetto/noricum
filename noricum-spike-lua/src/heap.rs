@@ -20,17 +20,24 @@
 //! that are far more costly to debug in production than a single check
 //! per operation.
 //!
-//! # Generation counters (Stage 3 / commit 1 infrastructure)
+//! # Generation counters (Stage 3 / commits 1+2)
 //!
 //! Each arena has a parallel [`u32`] generation Vec. Every `alloc_*`
 //! stamps the caller's handle with the current generation for that
 //! slot. Every accessor asserts the handle's generation still matches.
-//! Stage 3 commit 2 adds the actual bump-on-free that gives this
-//! machinery teeth — in commit 1 the generation is always 0, so the
-//! check is deterministically a no-op and every Stage 2 test keeps
-//! passing through the widening refactor. The infrastructure ships
-//! first so the test surface stays stable; the behavior flip lands
-//! in a follow-up commit.
+//! Every `free_*` bumps the counter at the released slot (wrapping
+//! via [`u32::wrapping_add`], which panics in debug via a separate
+//! wrap-guard assert in Stage 3 commit 2). This means that after a
+//! `free_*` + `alloc_*` cycle at the same slot, the new handle has a
+//! different generation than the stale one, so any use of the stale
+//! handle panics with a clear "points to a reused slot" message
+//! instead of silently dereferencing the new occupant.
+//!
+//! This is the R1 resolution: manual arenas without generation
+//! counters would dereference reused slots as the new occupant.
+//! Commit 1 introduced the infrastructure (widened handles, parallel
+//! generation Vecs, validation code path always succeeding); commit 2
+//! wires the bump into `free_*` so the validation has teeth.
 //!
 //! # Handle reuse order
 //!
@@ -95,8 +102,9 @@ impl Heap {
     }
 
     /// Free the slot pointed to by `handle`. The slot index is pushed
-    /// onto the string free list for reuse. Stage 3 commit 2 will add
-    /// a generation bump here; for now the counter is untouched.
+    /// onto the string free list for reuse and the generation counter
+    /// at that slot is bumped so any later use of `handle` panics
+    /// with a generation-mismatch assertion.
     pub fn free_string(&mut self, handle: StringHandle) {
         let slot = handle.slot as usize;
         assert_eq!(
@@ -111,6 +119,7 @@ impl Heap {
         );
         self.strings[slot] = None;
         self.free_strings.push(handle.slot);
+        self.generations_strings[slot] = bump_generation(self.generations_strings[slot]);
     }
 
     // ------------------------------------------------------------------
@@ -168,6 +177,7 @@ impl Heap {
         );
         self.tables[slot] = None;
         self.free_tables.push(handle.slot);
+        self.generations_tables[slot] = bump_generation(self.generations_tables[slot]);
     }
 
     // ------------------------------------------------------------------
@@ -225,6 +235,7 @@ impl Heap {
         );
         self.protos[slot] = None;
         self.free_protos.push(handle.slot);
+        self.generations_protos[slot] = bump_generation(self.generations_protos[slot]);
     }
 
     // ------------------------------------------------------------------
@@ -282,6 +293,7 @@ impl Heap {
         );
         self.lclosures[slot] = None;
         self.free_lclosures.push(handle.slot);
+        self.generations_lclosures[slot] = bump_generation(self.generations_lclosures[slot]);
     }
 
     // ------------------------------------------------------------------
@@ -339,6 +351,7 @@ impl Heap {
         );
         self.cclosures[slot] = None;
         self.free_cclosures.push(handle.slot);
+        self.generations_cclosures[slot] = bump_generation(self.generations_cclosures[slot]);
     }
 
     // ------------------------------------------------------------------
@@ -396,6 +409,7 @@ impl Heap {
         );
         self.upvals[slot] = None;
         self.free_upvals.push(handle.slot);
+        self.generations_upvals[slot] = bump_generation(self.generations_upvals[slot]);
     }
 
     // ------------------------------------------------------------------
@@ -453,6 +467,7 @@ impl Heap {
         );
         self.threads[slot] = None;
         self.free_threads.push(handle.slot);
+        self.generations_threads[slot] = bump_generation(self.generations_threads[slot]);
     }
 
     // ------------------------------------------------------------------
@@ -510,7 +525,30 @@ impl Heap {
         );
         self.userdata[slot] = None;
         self.free_userdata.push(handle.slot);
+        self.generations_userdata[slot] = bump_generation(self.generations_userdata[slot]);
     }
+}
+
+/// Bump a generation counter, panicking if the 32-bit counter wraps.
+///
+/// Wrap is **risk R11** from the Stage 3 GC design doc: at
+/// approximately 4 billion frees of the same slot the counter
+/// overflows, and a subsequent alloc at the same slot would hand out
+/// a handle that collides with some long-dead stale handle — the
+/// exact ABA bug the counters exist to prevent.
+///
+/// For Stage 3 v1 we panic on wrap so the bug is loud if it ever
+/// happens in a long-running process. Stage 3 v2 (or later) can
+/// widen the counter to `u64` if profiling shows wrap is a real
+/// concern. Until then, 4B frees/slot is a comfortable ceiling —
+/// even a web service allocating 1000 short-lived strings/sec hits
+/// this after 46 days of uninterrupted runtime on a single slot,
+/// which is both unlikely and diagnosable when it happens.
+#[inline]
+fn bump_generation(current: u32) -> u32 {
+    current
+        .checked_add(1)
+        .expect("generation counter wrapped (R11): 2^32 frees of the same slot")
 }
 
 // ---------------------------------------------------------------------------
@@ -616,8 +654,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "StringHandle points to freed slot")]
+    #[should_panic(expected = "StringHandle points to a reused slot")]
     fn access_after_free_panics() {
+        // After commit 2, freeing a handle bumps the slot generation.
+        // Reading through the old handle now trips the generation
+        // check with the "reused slot" message before the old Option
+        // check would fire — a slightly different panic than at Stage
+        // 2, but the same guarantee (loud, deterministic).
         let mut heap = Heap::default();
         let h = heap.alloc_string(fresh_string(b"doomed"));
         heap.free_string(h);
@@ -625,11 +668,109 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "double free of StringHandle")]
+    #[should_panic(expected = "free_string on stale handle")]
     fn double_free_panics() {
+        // Double-free detection: at Stage 3 commit 2, free_string
+        // bumps the slot generation on the first call, so the second
+        // free through the same handle trips the generation-mismatch
+        // guard before ever reaching the double-free Option check.
+        // The bug class being guarded against is still "use of a
+        // handle after it was freed", which is the superset the
+        // generation check catches.
+        //
+        // The path-specific "double free of ..." message is still
+        // reachable if a caller somehow passes the same CURRENT handle
+        // twice without an intervening alloc — but that would require
+        // a shared-mutable state bug in the caller, not a stale
+        // handle bug, which the layer above heap is responsible for.
         let mut heap = Heap::default();
         let h = heap.alloc_string(fresh_string(b"ghost"));
         heap.free_string(h);
-        heap.free_string(h);
+        heap.free_string(h); // stale — generation guard fires
+    }
+
+    // ---- Stage 3 commit 2: stale-handle detection ----------------------
+
+    #[test]
+    #[should_panic(expected = "points to a reused slot")]
+    fn stale_handle_from_reused_slot_is_rejected() {
+        // Allocate, free, allocate the same slot — the old handle and
+        // the new handle share a slot index but differ by one in
+        // generation. Using the old handle must panic.
+        let mut heap = Heap::default();
+        let old = heap.alloc_string(fresh_string(b"first"));
+        assert_eq!(old.generation, 0);
+        heap.free_string(old);
+        let new = heap.alloc_string(fresh_string(b"second"));
+        assert_eq!(new.slot, old.slot, "expected LIFO slot reuse");
+        assert_eq!(new.generation, 1, "alloc must see the bumped generation");
+        let _ = heap.string(old);
+    }
+
+    #[test]
+    fn fresh_allocation_stamps_the_bumped_generation() {
+        // Pure positive check (no panic expected): after free+alloc,
+        // the new handle's generation is exactly one higher than the
+        // old handle's.
+        let mut heap = Heap::default();
+        let old = heap.alloc_string(fresh_string(b"a"));
+        heap.free_string(old);
+        let new = heap.alloc_string(fresh_string(b"b"));
+        assert_eq!(new.slot, 0);
+        assert_eq!(new.generation, old.generation + 1);
+        // The new handle reads correctly.
+        assert_eq!(heap.string(new).bytes, b"b");
+    }
+
+    #[test]
+    fn many_free_realloc_cycles_advance_generation_each_time() {
+        let mut heap = Heap::default();
+        for expected_gen in 0u32..20 {
+            let h = heap.alloc_string(fresh_string(b"x"));
+            assert_eq!(h.slot, 0);
+            assert_eq!(
+                h.generation, expected_gen,
+                "expected generation {expected_gen}, got {}",
+                h.generation
+            );
+            heap.free_string(h);
+        }
+    }
+
+    #[test]
+    fn each_arena_has_independent_generation_counters() {
+        // Free+realloc a string, then free+realloc a table. The
+        // string's bump shouldn't affect the table's generation (and
+        // vice versa).
+        let mut heap = Heap::default();
+        let s1 = heap.alloc_string(fresh_string(b"s"));
+        let t1 = heap.alloc_table(Table::default());
+        heap.free_string(s1);
+        let s2 = heap.alloc_string(fresh_string(b"s2"));
+        assert_eq!(s2.generation, 1);
+        // Table generation untouched.
+        assert_eq!(t1.generation, 0);
+        let t1_readback = heap.table(t1);
+        assert!(t1_readback.array.is_empty());
+        // Now churn the table.
+        heap.free_table(t1);
+        let t2 = heap.alloc_table(Table::default());
+        assert_eq!(t2.generation, 1);
+        // String generation untouched by the table churn.
+        assert_eq!(s2.generation, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "free_string on stale handle")]
+    fn freeing_a_stale_handle_panics_on_the_second_free() {
+        // Construct the "free a handle whose slot has since been
+        // reused" scenario directly. First free is fine; allocation
+        // recycles the slot with a bumped generation; second free
+        // through the stale handle hits the generation check.
+        let mut heap = Heap::default();
+        let old = heap.alloc_string(fresh_string(b"first"));
+        heap.free_string(old);
+        let _new = heap.alloc_string(fresh_string(b"second"));
+        heap.free_string(old); // panic: stale
     }
 }
