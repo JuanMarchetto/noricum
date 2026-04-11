@@ -7,40 +7,79 @@
 //! Stage 3 v1 is **incremental mark-sweep only**. Generational mode,
 //! weak tables, and finalizers are Stage 3 v2 (separate session).
 //!
-//! ## This commit (Stage 3 / 3)
+//! ## What's implemented now
 //!
-//! Lands the state machine vocabulary and a **skeleton dispatcher**:
-//!
+//! Commit 3 (skeleton):
 //! * [`GcState`] — 5-state machine (collapsed from C's 9)
 //! * [`HeapKind`] — per-arena cursor for the sweep phase
-//! * [`AnyHandle`] — unified enum used by gray lists (replaces C's
-//!   intrusive `GCObject*` linked list)
+//! * [`AnyHandle`] — unified enum used by gray lists
 //! * [`SweepCursor`] — `(kind, slot)` position of the incremental sweep
 //! * [`GcStepResult`] — what a single [`GlobalState::gc_step`] returns
-//! * [`GlobalState::gc_step`] — advances the state machine with stubs
-//!   at every phase; no real marking or sweeping yet
+//! * [`GlobalState::gc_step`] — dispatcher scaffold
 //!
-//! Commits 4–7 fill in the real work behind `Propagate`, `Atomic`,
-//! `Sweep`, and the write barriers. The skeleton here exists so that
-//! the next commits can grow the phases one at a time with a pipeline
-//! already in place.
+//! Commit 4a (storage retrofit):
+//! * Parallel `marks_*: Vec<u8>` per arena on `Heap`, initialized to
+//!   `WHITE = 0` at every `alloc_*` site. Written in commit 4a, read
+//!   for the first time below.
+//!
+//! Commit 4b (mark phase, this file):
+//! * `WHITE` / `GRAY` / `BLACK` color constants.
+//! * Mark-byte helpers dispatched through [`AnyHandle::kind`].
+//! * [`GlobalState::start_collection`] — clears all marks to white
+//!   and enqueues the root set (main thread, registry, tmnames,
+//!   every interned string in the cache).
+//! * [`GlobalState::propagate_one`] — pop a gray handle, paint it
+//!   black, enqueue its children. Called by `gc_step` in the
+//!   `Propagate` state.
+//! * Per-kind child walkers (`mark_table_children`, etc.) that
+//!   traverse every Lua-visible reference from a heap object.
+//! * Strings are leaves — no children to walk.
+//!
+//! Still stubbed until commits 5-7:
+//! * `Atomic` phase — in 4b just transitions to `Sweep`. No
+//!   weak-table drain, no `grayagain` handling.
+//! * `Sweep` phase — in 4b still walks the cursor through every
+//!   arena without freeing anything.
+//! * Write barriers — come with commit 6.
+//! * `gc_debt` / `full_gc` — come with commit 7.
+//!
+//! ## Scope notes on the root set (Stage 3 v1)
+//!
+//! The string interning cache (`GlobalState::string_intern`) is
+//! treated as a **strong root** here. In C Lua 5.4 it's effectively
+//! weak — dead interned strings are cleared during sweep. Since
+//! Stage 3 v1 has no weak tables yet, making it strong is
+//! over-conservative (interned strings never collect) but
+//! correct (no premature freeing). Stage 3 v2 will add the "clear
+//! during sweep" semantics when weak-table support lands.
 //!
 //! ## Divergence from `stage-3-gc-design.md` (§9 open questions)
 //!
-//! * **`AnyHandle` location.** Design note left this open. This commit
-//!   parks it in `lgc.rs` — keeps `contract.rs` free of GC concerns,
-//!   at the cost of `contract.rs` having to `use crate::lgc::*` for
-//!   the four new `GlobalState` fields. Worth the cleaner separation.
-//! * **`GcState::End`.** Kept as a distinct state. Collapsing it into
-//!   the `Sweep → Pause` transition saves one step per cycle but
-//!   costs the "post-sweep cleanup" hook that commit 7 will wire up
-//!   (shrink pass, debt reset). Easier to keep it and remove later
-//!   than the other way around.
+//! * **`AnyHandle` location.** Parked in `lgc.rs` rather than
+//!   `contract.rs` to keep the type contract free of GC concerns.
+//! * **`GcState::End`.** Kept as a distinct state. Commit 7 will
+//!   wire post-sweep cleanup into it.
+//! * **Mark-byte encoding.** Uses plain `u8` constants rather than a
+//!   `GcColor` enum. The tri-color state machine is simple enough
+//!   that an enum's only payoff would be exhaustiveness checking in
+//!   the mark-byte `match`, which we don't have today because the
+//!   byte is read as a numeric comparison (`== WHITE`).
 
 use crate::contract::{
-    CClosureHandle, GlobalState, LClosureHandle, ProtoHandle,
-    StringHandle, TableHandle, ThreadHandle, UpValHandle, UserDataHandle,
+    CClosureHandle, GlobalState, LClosureHandle, ProtoHandle, StringHandle, TValue, TableHandle,
+    TableKey, ThreadHandle, UpValHandle, UpValState, UserDataHandle,
 };
+
+// ---------------------------------------------------------------------------
+// Color constants — plain `u8` values stored in the per-kind mark Vecs
+// on `Heap`. Tri-color invariant: a BLACK object never points to a
+// WHITE one (enforced at propagate time by `mark_object` + child
+// walkers, and by the write barriers in commit 6).
+// ---------------------------------------------------------------------------
+
+pub const WHITE: u8 = 0;
+pub const GRAY: u8 = 1;
+pub const BLACK: u8 = 2;
 
 // ---------------------------------------------------------------------------
 // GcState — 5-state machine. Matches stage-3-gc-design.md §4.1.
@@ -153,6 +192,20 @@ impl AnyHandle {
             AnyHandle::UserData(_) => HeapKind::UserData,
         }
     }
+
+    /// Slot index inside the matching arena's slot Vec. Constant-time.
+    pub const fn slot(self) -> u32 {
+        match self {
+            AnyHandle::String(h) => h.slot,
+            AnyHandle::Table(h) => h.slot,
+            AnyHandle::Proto(h) => h.slot,
+            AnyHandle::LClosure(h) => h.slot,
+            AnyHandle::CClosure(h) => h.slot,
+            AnyHandle::UpVal(h) => h.slot,
+            AnyHandle::Thread(h) => h.slot,
+            AnyHandle::UserData(h) => h.slot,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,51 +237,91 @@ pub enum GcStepResult {
 }
 
 // ---------------------------------------------------------------------------
-// gc_step — the dispatcher.
+// TValue / TableKey → AnyHandle conversion.
+// ---------------------------------------------------------------------------
+
+/// Extract the collectable handle from a tagged Lua value, or
+/// `None` for leaf values (nil, bools, numbers, light userdata,
+/// light C function pointer). Used by the child walkers to avoid
+/// re-matching `TValue` at every call site.
+const fn any_handle_from_tvalue(v: TValue) -> Option<AnyHandle> {
+    match v {
+        TValue::ShortString(h) | TValue::LongString(h) => Some(AnyHandle::String(h)),
+        TValue::Table(h) => Some(AnyHandle::Table(h)),
+        TValue::LuaClosure(h) => Some(AnyHandle::LClosure(h)),
+        TValue::CClosure(h) => Some(AnyHandle::CClosure(h)),
+        TValue::UserData(h) => Some(AnyHandle::UserData(h)),
+        TValue::Thread(h) => Some(AnyHandle::Thread(h)),
+        TValue::Nil
+        | TValue::False
+        | TValue::True
+        | TValue::Integer(_)
+        | TValue::Number(_)
+        | TValue::LightUserData(_)
+        | TValue::LightCFunction(_) => None,
+    }
+}
+
+/// Same conversion for table keys. The variants that can hold a
+/// collectable handle are a strict subset of [`TValue`]'s; the rest
+/// (bool, integer, number-bitpattern, light userdata as usize,
+/// light C function as usize) are leaves.
+const fn any_handle_from_key(k: TableKey) -> Option<AnyHandle> {
+    match k {
+        TableKey::ShortString(h) | TableKey::LongString(h) => Some(AnyHandle::String(h)),
+        TableKey::Table(h) => Some(AnyHandle::Table(h)),
+        TableKey::LuaClosure(h) => Some(AnyHandle::LClosure(h)),
+        TableKey::CClosure(h) => Some(AnyHandle::CClosure(h)),
+        TableKey::UserData(h) => Some(AnyHandle::UserData(h)),
+        TableKey::Thread(h) => Some(AnyHandle::Thread(h)),
+        TableKey::False
+        | TableKey::True
+        | TableKey::Integer(_)
+        | TableKey::Number(_)
+        | TableKey::LightUserData(_)
+        | TableKey::LightCFunction(_) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mark phase helpers and the main dispatcher.
 // ---------------------------------------------------------------------------
 
 impl GlobalState {
     /// Advance the GC one incremental step.
     ///
-    /// **Skeleton (Stage 3 / commit 3).** Every phase has a stub that
-    /// advances the state machine with empty data: no root
-    /// enumeration, no marking, no freeing. A full cycle from
-    /// `Pause → Propagate → Atomic → Sweep → End → Pause` completes
-    /// in exactly 12 step calls (1 pause, 1 propagate, 1 atomic, 8
-    /// sweep steps — one per [`HeapKind`] — and 1 end). Commits 4–7
-    /// fill in the real work and the step count becomes bounded by
-    /// `GC_SWEEP_MAX` and the gray list length instead.
+    /// Post commit 4b: `Pause` and `Propagate` do real work — clearing
+    /// marks, enqueuing roots, walking the gray list with child
+    /// traversal. `Atomic`, `Sweep`, and `End` are still skeleton
+    /// stubs (commits 5–7).
     pub fn gc_step(&mut self) -> GcStepResult {
         match self.gc_state {
             GcState::Pause => {
-                self.gc_start_cycle();
+                self.start_collection();
                 GcStepResult::Progressed(1)
             }
             GcState::Propagate => {
-                // Skeleton: the gray list is never populated because
-                // there's no root enumeration yet. When commit 4
-                // lands this branch will pop one handle per call and
-                // traverse its children. Until then, an empty gray
-                // list means "propagation done, advance to atomic".
-                if self.gc_gray.is_empty() {
+                if self.propagate_one() {
+                    // Made progress; remain in Propagate.
+                    GcStepResult::Progressed(1)
+                } else {
+                    // Gray list drained → advance to the atomic phase.
                     self.gc_state = GcState::Atomic;
+                    GcStepResult::Progressed(1)
                 }
-                GcStepResult::Progressed(1)
             }
             GcState::Atomic => {
-                // Skeleton: no atomic work (no grayagain drain, no
-                // weak-table cleanup, no white flip — commits 4+5
-                // add those). Position the sweep cursor at the first
-                // arena and advance.
+                // Skeleton: no atomic work yet. Commit 5 drains
+                // `grayagain`, commit 6 flips the current-white bit,
+                // Stage 3 v2 handles weak tables.
                 self.gc_sweep_cursor = SweepCursor::default();
                 self.gc_state = GcState::Sweep;
                 GcStepResult::Progressed(1)
             }
             GcState::Sweep => {
-                // Skeleton: treat every arena as "already swept"
-                // (slot count is irrelevant because there are no
-                // mark bytes yet). Advance the cursor one arena per
-                // call; when we fall off the end, transition to End.
+                // Skeleton: advance the cursor one arena per call
+                // without freeing anything. Commit 5 replaces this
+                // with the real sweep loop.
                 match self.gc_sweep_cursor.kind.next() {
                     Some(next_kind) => {
                         self.gc_sweep_cursor = SweepCursor {
@@ -243,31 +336,355 @@ impl GlobalState {
                 GcStepResult::Progressed(1)
             }
             GcState::End => {
-                // Skeleton: no post-sweep cleanup yet. Commit 7 adds
-                // debt reset and (if we keep it) the shrink pass.
                 self.gc_state = GcState::Pause;
                 GcStepResult::FinishedCycle
             }
         }
     }
 
-    /// Start a new GC cycle: clear gray lists and move to `Propagate`.
-    /// Skeleton — commit 4 will also clear mark bytes and enqueue
-    /// the root set (main thread, registry, fixed/pinned handles).
-    fn gc_start_cycle(&mut self) {
+    /// Start a new GC cycle: reset all marks, clear gray lists,
+    /// enqueue every root, and transition to `Propagate`.
+    ///
+    /// Root set for Stage 3 v1:
+    /// * the main thread
+    /// * the registry table
+    /// * every interned metamethod-name string (`tm_names`)
+    /// * every interned string in the short-string cache
+    ///   (over-conservative pending weak-table support in v2)
+    fn start_collection(&mut self) {
+        self.reset_all_marks();
         self.gc_gray.clear();
         self.gc_grayagain.clear();
+
+        // Main thread.
+        if let Some(main) = self.main_thread {
+            self.enqueue_root(AnyHandle::Thread(main));
+        }
+        // Registry table.
+        if let Some(reg) = self.registry {
+            self.enqueue_root(AnyHandle::Table(reg));
+        }
+        // Interned metamethod names.
+        let tm_names: Vec<StringHandle> = self.tm_names.clone();
+        for name in tm_names {
+            self.enqueue_root(AnyHandle::String(name));
+        }
+        // Every short string that lives in the intern cache.
+        // Over-conservative: Stage 3 v2 will treat these as weak.
+        let interned: Vec<StringHandle> =
+            self.string_intern.values().flatten().copied().collect();
+        for s in interned {
+            self.enqueue_root(AnyHandle::String(s));
+        }
+
         self.gc_state = GcState::Propagate;
+    }
+
+    /// Pop one handle off the gray frontier, paint it black, and
+    /// enqueue every collectable it references. Returns `true` if
+    /// work was done, `false` if the gray list was already empty
+    /// (so `gc_step` can transition to the atomic phase).
+    fn propagate_one(&mut self) -> bool {
+        let Some(handle) = self.gc_gray.pop() else {
+            return false;
+        };
+        self.set_mark(handle, BLACK);
+        self.visit_children(handle);
+        true
+    }
+
+    /// Mark a single handle. If it's already gray or black, this is
+    /// a no-op — idempotent is load-bearing because child walkers
+    /// don't de-duplicate before calling.
+    fn mark_object(&mut self, handle: AnyHandle) {
+        if self.mark_of(handle) == WHITE {
+            self.set_mark(handle, GRAY);
+            self.gc_gray.push(handle);
+        }
+    }
+
+    /// Shorthand that also paints the root gray so an early query
+    /// sees a consistent state before propagate visits it.
+    fn enqueue_root(&mut self, handle: AnyHandle) {
+        self.mark_object(handle);
+    }
+
+    /// Current mark byte for `handle`. Panics on a stale handle
+    /// (out-of-bounds slot index) — the caller should have
+    /// enqueued a live handle.
+    fn mark_of(&self, handle: AnyHandle) -> u8 {
+        let slot = handle.slot() as usize;
+        match handle {
+            AnyHandle::String(_) => self.heap.marks_strings[slot],
+            AnyHandle::Table(_) => self.heap.marks_tables[slot],
+            AnyHandle::Proto(_) => self.heap.marks_protos[slot],
+            AnyHandle::LClosure(_) => self.heap.marks_lclosures[slot],
+            AnyHandle::CClosure(_) => self.heap.marks_cclosures[slot],
+            AnyHandle::UpVal(_) => self.heap.marks_upvals[slot],
+            AnyHandle::Thread(_) => self.heap.marks_threads[slot],
+            AnyHandle::UserData(_) => self.heap.marks_userdata[slot],
+        }
+    }
+
+    /// Write the mark byte for `handle`. Same panic semantics as
+    /// [`GlobalState::mark_of`].
+    fn set_mark(&mut self, handle: AnyHandle, color: u8) {
+        let slot = handle.slot() as usize;
+        match handle {
+            AnyHandle::String(_) => self.heap.marks_strings[slot] = color,
+            AnyHandle::Table(_) => self.heap.marks_tables[slot] = color,
+            AnyHandle::Proto(_) => self.heap.marks_protos[slot] = color,
+            AnyHandle::LClosure(_) => self.heap.marks_lclosures[slot] = color,
+            AnyHandle::CClosure(_) => self.heap.marks_cclosures[slot] = color,
+            AnyHandle::UpVal(_) => self.heap.marks_upvals[slot] = color,
+            AnyHandle::Thread(_) => self.heap.marks_threads[slot] = color,
+            AnyHandle::UserData(_) => self.heap.marks_userdata[slot] = color,
+        }
+    }
+
+    /// Paint every slot in every arena white. Called at the start
+    /// of each collection cycle. Uses `fill` rather than iterating
+    /// so the walk stays cache-friendly.
+    fn reset_all_marks(&mut self) {
+        self.heap.marks_strings.fill(WHITE);
+        self.heap.marks_tables.fill(WHITE);
+        self.heap.marks_protos.fill(WHITE);
+        self.heap.marks_lclosures.fill(WHITE);
+        self.heap.marks_cclosures.fill(WHITE);
+        self.heap.marks_upvals.fill(WHITE);
+        self.heap.marks_threads.fill(WHITE);
+        self.heap.marks_userdata.fill(WHITE);
+    }
+
+    /// Dispatch to the per-kind child walker. Called after
+    /// `set_mark(handle, BLACK)` in [`GlobalState::propagate_one`].
+    /// Strings are leaves so their branch is empty.
+    fn visit_children(&mut self, handle: AnyHandle) {
+        match handle {
+            AnyHandle::String(_) => {}
+            AnyHandle::Table(h) => self.mark_table_children(h),
+            AnyHandle::Proto(h) => self.mark_proto_children(h),
+            AnyHandle::LClosure(h) => self.mark_lclosure_children(h),
+            AnyHandle::CClosure(h) => self.mark_cclosure_children(h),
+            AnyHandle::UpVal(h) => self.mark_upval_children(h),
+            AnyHandle::Thread(h) => self.mark_thread_children(h),
+            AnyHandle::UserData(h) => self.mark_userdata_children(h),
+        }
+    }
+
+    // --- Per-kind child walkers ------------------------------------
+    //
+    // All walkers follow the same pattern:
+    //   1. Collect every child `AnyHandle` into a local `Vec`,
+    //      holding only an immutable borrow of `self.heap`.
+    //   2. Drop the borrow (the local scope ends).
+    //   3. Iterate the local Vec, calling `mark_object` on each.
+    //
+    // Step 2 is non-negotiable because `mark_object` takes
+    // `&mut self` to push onto `gc_gray` and update mark bytes,
+    // which conflicts with any live shared borrow of `self.heap`.
+    // "Collect first, mutate later" is cleaner than splitting the
+    // borrow manually and avoids lifetime gymnastics.
+
+    fn mark_table_children(&mut self, handle: TableHandle) {
+        let children: Vec<AnyHandle> = {
+            let t = self.heap.tables[handle.slot as usize]
+                .as_ref()
+                .expect("marking freed table");
+            let mut out =
+                Vec::with_capacity(t.array.len() + (t.hash.len() * 2) + 1);
+            for value in &t.array {
+                if let Some(c) = any_handle_from_tvalue(*value) {
+                    out.push(c);
+                }
+            }
+            for (key, value) in &t.hash {
+                if let Some(c) = any_handle_from_key(*key) {
+                    out.push(c);
+                }
+                if let Some(c) = any_handle_from_tvalue(*value) {
+                    out.push(c);
+                }
+            }
+            if let Some(mt) = t.metatable {
+                out.push(AnyHandle::Table(mt));
+            }
+            out
+        };
+        for child in children {
+            self.mark_object(child);
+        }
+    }
+
+    fn mark_proto_children(&mut self, handle: ProtoHandle) {
+        let children: Vec<AnyHandle> = {
+            let p = self.heap.protos[handle.slot as usize]
+                .as_ref()
+                .expect("marking freed proto");
+            let mut out = Vec::new();
+            for value in &p.constants {
+                if let Some(c) = any_handle_from_tvalue(*value) {
+                    out.push(c);
+                }
+            }
+            for inner in &p.inner_protos {
+                out.push(AnyHandle::Proto(*inner));
+            }
+            for upv in &p.upvalues {
+                if let Some(name) = upv.name {
+                    out.push(AnyHandle::String(name));
+                }
+            }
+            for lv in &p.local_vars {
+                if let Some(name) = lv.name {
+                    out.push(AnyHandle::String(name));
+                }
+            }
+            if let Some(src) = p.source {
+                out.push(AnyHandle::String(src));
+            }
+            out
+        };
+        for child in children {
+            self.mark_object(child);
+        }
+    }
+
+    fn mark_lclosure_children(&mut self, handle: LClosureHandle) {
+        let children: Vec<AnyHandle> = {
+            let l = self.heap.lclosures[handle.slot as usize]
+                .as_ref()
+                .expect("marking freed lclosure");
+            let mut out = Vec::with_capacity(l.upvalues.len() + 1);
+            out.push(AnyHandle::Proto(l.proto));
+            for uv in &l.upvalues {
+                out.push(AnyHandle::UpVal(*uv));
+            }
+            out
+        };
+        for child in children {
+            self.mark_object(child);
+        }
+    }
+
+    fn mark_cclosure_children(&mut self, handle: CClosureHandle) {
+        let children: Vec<AnyHandle> = {
+            let c = self.heap.cclosures[handle.slot as usize]
+                .as_ref()
+                .expect("marking freed cclosure");
+            let mut out = Vec::new();
+            for value in &c.upvalues {
+                if let Some(child) = any_handle_from_tvalue(*value) {
+                    out.push(child);
+                }
+            }
+            out
+        };
+        for child in children {
+            self.mark_object(child);
+        }
+    }
+
+    fn mark_upval_children(&mut self, handle: UpValHandle) {
+        let children: Vec<AnyHandle> = {
+            let u = self.heap.upvals[handle.slot as usize]
+                .as_ref()
+                .expect("marking freed upval");
+            let mut out = Vec::with_capacity(1);
+            match &u.state {
+                UpValState::Open { thread, .. } => {
+                    out.push(AnyHandle::Thread(*thread));
+                }
+                UpValState::Closed(value) => {
+                    if let Some(c) = any_handle_from_tvalue(*value) {
+                        out.push(c);
+                    }
+                }
+            }
+            out
+        };
+        for child in children {
+            self.mark_object(child);
+        }
+    }
+
+    fn mark_thread_children(&mut self, handle: ThreadHandle) {
+        let children: Vec<AnyHandle> = {
+            let t = self.heap.threads[handle.slot as usize]
+                .as_ref()
+                .expect("marking freed thread");
+            let mut out = Vec::with_capacity(t.stack.len() + t.open_upvals.len());
+            for value in &t.stack {
+                if let Some(c) = any_handle_from_tvalue(*value) {
+                    out.push(c);
+                }
+            }
+            for uv in &t.open_upvals {
+                out.push(AnyHandle::UpVal(*uv));
+            }
+            out
+        };
+        for child in children {
+            self.mark_object(child);
+        }
+    }
+
+    fn mark_userdata_children(&mut self, handle: UserDataHandle) {
+        let children: Vec<AnyHandle> = {
+            let u = self.heap.userdata[handle.slot as usize]
+                .as_ref()
+                .expect("marking freed userdata");
+            let mut out = Vec::with_capacity(u.user_values.len() + 1);
+            if let Some(mt) = u.metatable {
+                out.push(AnyHandle::Table(mt));
+            }
+            for value in &u.user_values {
+                if let Some(c) = any_handle_from_tvalue(*value) {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        for child in children {
+            self.mark_object(child);
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Tests — smoke-test the skeleton dispatcher without any real GC work.
+// Tests — smoke-test the skeleton + the new mark phase.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::{
+        LClosure, LuaString, Proto, Table, TableKey, Thread, UpVal, UpValState,
+    };
+
+    fn fresh_string(bytes: &[u8]) -> LuaString {
+        LuaString {
+            bytes: bytes.to_vec(),
+            hash: 0,
+            reserved: 0,
+            is_long: false,
+            hash_ready: false,
+        }
+    }
+
+    /// Drive the state machine from Pause all the way back to Pause.
+    /// Used by several tests that want to observe "everything
+    /// reachable is BLACK after a full cycle".
+    fn drive_full_cycle(g: &mut GlobalState) {
+        for _ in 0..1024 {
+            if matches!(g.gc_step(), GcStepResult::FinishedCycle) {
+                return;
+            }
+        }
+        panic!("gc cycle did not finish within 1024 steps");
+    }
+
+    // ---- skeleton tests from commit 3 (still required) -------------
 
     #[test]
     fn heap_kind_next_covers_every_arena_exactly_once() {
@@ -291,15 +708,11 @@ mod tests {
                 HeapKind::UserData,
             ]
         );
-        // Tail of the walk must be a true terminator, not a cycle.
         assert!(HeapKind::UserData.next().is_none());
     }
 
     #[test]
     fn any_handle_kind_round_trips_for_every_variant() {
-        // Every AnyHandle variant must report the matching HeapKind,
-        // otherwise the gray-list dispatch in commit 4 will mark the
-        // wrong arena.
         assert_eq!(AnyHandle::String(StringHandle::new(0, 0)).kind(), HeapKind::String);
         assert_eq!(AnyHandle::Table(TableHandle::new(0, 0)).kind(), HeapKind::Table);
         assert_eq!(AnyHandle::Proto(ProtoHandle::new(0, 0)).kind(), HeapKind::Proto);
@@ -322,10 +735,10 @@ mod tests {
     }
 
     #[test]
-    fn gc_step_skeleton_walks_every_state_and_returns_to_pause() {
-        // Drive the skeleton through one full cycle. The dispatcher
-        // must touch every phase and end back in Pause with a
-        // FinishedCycle result, inside a bounded number of calls.
+    fn empty_state_cycle_walks_every_state_and_returns_to_pause() {
+        // With no roots and no objects, start_collection enqueues
+        // nothing, propagate_one immediately returns false, and the
+        // rest of the cycle walks the skeleton sweep cursor.
         let mut g = GlobalState::default();
         let mut phases_seen: Vec<GcState> = vec![g.gc_state];
         let mut finished = false;
@@ -337,8 +750,8 @@ mod tests {
                 break;
             }
         }
-        assert!(finished, "skeleton cycle never finished within 64 steps");
-        assert_eq!(g.gc_state, GcState::Pause, "cycle must return to Pause");
+        assert!(finished, "empty cycle never finished within 64 steps");
+        assert_eq!(g.gc_state, GcState::Pause);
         for expected in [
             GcState::Pause,
             GcState::Propagate,
@@ -356,12 +769,9 @@ mod tests {
     }
 
     #[test]
-    fn sweep_phase_visits_every_heap_kind_before_transitioning_to_end() {
-        // Drive the state machine up to Sweep, then collect every
-        // HeapKind the cursor touches. Commit 5 will replace this
-        // "one step per arena" walk with "GC_SWEEP_MAX slots per step
-        // with overflow into the next arena", but the set of
-        // arenas visited must stay the same.
+    fn sweep_phase_skeleton_visits_every_heap_kind_before_transitioning_to_end() {
+        // Commit 4b leaves sweep as skeleton — still one step per
+        // arena. Commit 5 replaces this.
         let mut g = GlobalState::default();
         while g.gc_state != GcState::Sweep {
             g.gc_step();
@@ -384,9 +794,232 @@ mod tests {
                 HeapKind::UpVal,
                 HeapKind::Thread,
                 HeapKind::UserData,
-            ],
-            "sweep must visit every HeapKind in declared order"
+            ]
         );
         assert_eq!(g.gc_state, GcState::End);
+    }
+
+    // ---- commit 4b: mark-phase tests -------------------------------
+
+    #[test]
+    fn start_collection_resets_every_mark_to_white() {
+        // Poison a mark byte in each arena, then run start_collection
+        // (via the Pause → Propagate transition). Every byte must
+        // come back to WHITE regardless of which arena it's in.
+        let mut g = GlobalState::default();
+        let s = g.heap.alloc_string(fresh_string(b"x"));
+        let t = g.heap.alloc_table(Table::default());
+        g.heap.marks_strings[s.slot as usize] = BLACK;
+        g.heap.marks_tables[t.slot as usize] = GRAY;
+
+        // Drive through Pause so start_collection runs.
+        let _ = g.gc_step();
+        assert_eq!(g.gc_state, GcState::Propagate);
+
+        // Poisoned bytes must be white now. (Nothing in the root
+        // set references them, so they stay white through the rest
+        // of the cycle too — but we only assert the reset here.)
+        assert_eq!(g.heap.marks_strings[s.slot as usize], WHITE);
+        assert_eq!(g.heap.marks_tables[t.slot as usize], WHITE);
+    }
+
+    #[test]
+    fn start_collection_enqueues_main_thread_registry_and_tm_names() {
+        // Plant each root type and verify it lands in the gray
+        // frontier. `start_collection` runs `mark_object` on each
+        // root, which paints it GRAY and pushes it to gc_gray.
+        let mut g = GlobalState::default();
+
+        let thread_handle = g.heap.alloc_thread(Thread::default());
+        g.main_thread = Some(thread_handle);
+
+        let reg_handle = g.heap.alloc_table(Table::default());
+        g.registry = Some(reg_handle);
+
+        let name_a = g.heap.alloc_string(fresh_string(b"__index"));
+        let name_b = g.heap.alloc_string(fresh_string(b"__gc"));
+        g.tm_names = vec![name_a, name_b];
+
+        let _ = g.gc_step(); // Pause → Propagate (runs start_collection)
+
+        // Every root must have been painted GRAY and queued.
+        assert_eq!(g.heap.marks_threads[thread_handle.slot as usize], GRAY);
+        assert_eq!(g.heap.marks_tables[reg_handle.slot as usize], GRAY);
+        assert_eq!(g.heap.marks_strings[name_a.slot as usize], GRAY);
+        assert_eq!(g.heap.marks_strings[name_b.slot as usize], GRAY);
+
+        // And it should be a proper gray list, not empty.
+        assert!(!g.gc_gray.is_empty());
+        assert!(g.gc_gray.contains(&AnyHandle::Thread(thread_handle)));
+        assert!(g.gc_gray.contains(&AnyHandle::Table(reg_handle)));
+        assert!(g.gc_gray.contains(&AnyHandle::String(name_a)));
+        assert!(g.gc_gray.contains(&AnyHandle::String(name_b)));
+    }
+
+    #[test]
+    fn mark_phase_paints_reachable_table_black_through_registry() {
+        // Registry holds a table → run a full cycle → the table
+        // must end up BLACK. This is the simplest positive case.
+        let mut g = GlobalState::default();
+        let reg = g.heap.alloc_table(Table::default());
+        g.registry = Some(reg);
+        drive_full_cycle(&mut g);
+        assert_eq!(g.heap.marks_tables[reg.slot as usize], BLACK);
+    }
+
+    #[test]
+    fn mark_phase_follows_table_values_to_strings_transitively() {
+        // Registry → Table → String. After the cycle, the string
+        // reached via the table's hash map must be BLACK.
+        let mut g = GlobalState::default();
+        let msg = g.heap.alloc_string(fresh_string(b"hello"));
+        let mut tbl = Table::default();
+        tbl.hash
+            .insert(TableKey::Integer(1), TValue::ShortString(msg));
+        let reg = g.heap.alloc_table(tbl);
+        g.registry = Some(reg);
+        drive_full_cycle(&mut g);
+        assert_eq!(g.heap.marks_strings[msg.slot as usize], BLACK);
+        assert_eq!(g.heap.marks_tables[reg.slot as usize], BLACK);
+    }
+
+    #[test]
+    fn mark_phase_reaches_array_part_of_table() {
+        // Same as above but via the array part, not the hash part.
+        let mut g = GlobalState::default();
+        let arr_entry = g.heap.alloc_table(Table::default());
+        let mut reg_table = Table::default();
+        reg_table.array.push(TValue::Table(arr_entry));
+        let reg = g.heap.alloc_table(reg_table);
+        g.registry = Some(reg);
+        drive_full_cycle(&mut g);
+        assert_eq!(g.heap.marks_tables[arr_entry.slot as usize], BLACK);
+    }
+
+    #[test]
+    fn mark_phase_follows_lclosure_to_proto_and_upvalues() {
+        // main_thread stack holds an LClosure. The closure's Proto
+        // and every UpVal it captures must end up BLACK.
+        let mut g = GlobalState::default();
+        let proto = g.heap.alloc_proto(Proto::default());
+        let uv1 = g.heap.alloc_upval(UpVal {
+            state: UpValState::Closed(TValue::Integer(42)),
+        });
+        let uv2 = g.heap.alloc_upval(UpVal {
+            state: UpValState::Closed(TValue::Integer(7)),
+        });
+        let closure = g.heap.alloc_lclosure(LClosure {
+            proto,
+            upvalues: vec![uv1, uv2],
+        });
+        let mut main_thread = Thread::default();
+        main_thread.stack.push(TValue::LuaClosure(closure));
+        let th = g.heap.alloc_thread(main_thread);
+        g.main_thread = Some(th);
+
+        drive_full_cycle(&mut g);
+
+        assert_eq!(g.heap.marks_lclosures[closure.slot as usize], BLACK);
+        assert_eq!(g.heap.marks_protos[proto.slot as usize], BLACK);
+        assert_eq!(g.heap.marks_upvals[uv1.slot as usize], BLACK);
+        assert_eq!(g.heap.marks_upvals[uv2.slot as usize], BLACK);
+    }
+
+    #[test]
+    fn mark_phase_follows_proto_source_and_constants() {
+        // Proto references several strings: source filename plus
+        // constants. All must end up BLACK.
+        let mut g = GlobalState::default();
+        let src = g.heap.alloc_string(fresh_string(b"@main.lua"));
+        let konst = g.heap.alloc_string(fresh_string(b"answer"));
+        let p = Proto {
+            source: Some(src),
+            constants: vec![TValue::ShortString(konst)],
+            ..Proto::default()
+        };
+        let proto = g.heap.alloc_proto(p);
+
+        // Register the proto via the registry.
+        let mut reg_table = Table::default();
+        reg_table.array.push(TValue::Nil); // placeholder
+        let reg = g.heap.alloc_table(reg_table);
+        g.registry = Some(reg);
+        // Attach the proto through an LClosure sitting in the registry.
+        let closure = g.heap.alloc_lclosure(LClosure {
+            proto,
+            upvalues: vec![],
+        });
+        g.heap
+            .table_mut(reg)
+            .array
+            .push(TValue::LuaClosure(closure));
+
+        drive_full_cycle(&mut g);
+        assert_eq!(g.heap.marks_protos[proto.slot as usize], BLACK);
+        assert_eq!(g.heap.marks_strings[src.slot as usize], BLACK);
+        assert_eq!(g.heap.marks_strings[konst.slot as usize], BLACK);
+    }
+
+    #[test]
+    fn unreachable_object_stays_white_after_full_cycle() {
+        // Allocate a table that nothing references, then run the
+        // full cycle. The table's mark byte must still be WHITE.
+        // (Sweep doesn't free it yet — commit 5 — but the mark
+        // phase correctly refuses to visit it.)
+        let mut g = GlobalState::default();
+        let orphan = g.heap.alloc_table(Table::default());
+        // Also plant a reachable object via the registry so the
+        // cycle has non-empty work and the orphan's whiteness
+        // isn't an artifact of a totally empty GC pass.
+        let reg = g.heap.alloc_table(Table::default());
+        g.registry = Some(reg);
+        drive_full_cycle(&mut g);
+        assert_eq!(g.heap.marks_tables[reg.slot as usize], BLACK);
+        assert_eq!(g.heap.marks_tables[orphan.slot as usize], WHITE);
+    }
+
+    #[test]
+    fn mark_phase_terminates_on_self_referential_table() {
+        // A table whose hash part points back at itself. Without
+        // the is-already-marked short-circuit in `mark_object`,
+        // the propagate loop would infinite-loop pushing the table
+        // onto gc_gray forever. With the short-circuit, the cycle
+        // terminates and the table is BLACK.
+        let mut g = GlobalState::default();
+        let reg = g.heap.alloc_table(Table::default());
+        g.heap
+            .table_mut(reg)
+            .hash
+            .insert(TableKey::Integer(1), TValue::Table(reg));
+        g.registry = Some(reg);
+        drive_full_cycle(&mut g);
+        assert_eq!(g.heap.marks_tables[reg.slot as usize], BLACK);
+    }
+
+    #[test]
+    fn cycle_with_roots_drains_the_gray_list_before_atomic() {
+        // After propagate is done, `gc_gray` must be empty — every
+        // gray handle has been drained and painted black. Tests a
+        // real invariant of the mark phase.
+        let mut g = GlobalState::default();
+        let reg = g.heap.alloc_table(Table::default());
+        g.registry = Some(reg);
+        let name = g.heap.alloc_string(fresh_string(b"__index"));
+        g.tm_names = vec![name];
+
+        // Step until we're out of Propagate.
+        while g.gc_state != GcState::Atomic {
+            g.gc_step();
+            if g.gc_state == GcState::Pause {
+                panic!("never reached Atomic before wrapping back to Pause");
+            }
+        }
+        assert!(
+            g.gc_gray.is_empty(),
+            "gray list must be empty when Propagate ends"
+        );
+        // And the reachable objects must all be BLACK by now.
+        assert_eq!(g.heap.marks_tables[reg.slot as usize], BLACK);
+        assert_eq!(g.heap.marks_strings[name.slot as usize], BLACK);
     }
 }
