@@ -21,6 +21,7 @@
 pub mod contract;
 pub mod heap;
 pub mod lctype;
+pub mod lfunc;
 pub mod lmem;
 pub mod lobject;
 pub mod lopcodes;
