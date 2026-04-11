@@ -63,12 +63,14 @@ impl Heap {
     pub fn alloc_string(&mut self, value: LuaString) -> StringHandle {
         if let Some(slot) = self.free_strings.pop() {
             self.strings[slot as usize] = Some(value);
+            self.marks_strings[slot as usize] = 0;
             let generation = self.generations_strings[slot as usize];
             StringHandle::new(slot, generation)
         } else {
             let slot = self.strings.len() as u32;
             self.strings.push(Some(value));
             self.generations_strings.push(0);
+            self.marks_strings.push(0);
             StringHandle::new(slot, 0)
         }
     }
@@ -129,12 +131,14 @@ impl Heap {
     pub fn alloc_table(&mut self, value: Table) -> TableHandle {
         if let Some(slot) = self.free_tables.pop() {
             self.tables[slot as usize] = Some(value);
+            self.marks_tables[slot as usize] = 0;
             let generation = self.generations_tables[slot as usize];
             TableHandle::new(slot, generation)
         } else {
             let slot = self.tables.len() as u32;
             self.tables.push(Some(value));
             self.generations_tables.push(0);
+            self.marks_tables.push(0);
             TableHandle::new(slot, 0)
         }
     }
@@ -187,12 +191,14 @@ impl Heap {
     pub fn alloc_proto(&mut self, value: Proto) -> ProtoHandle {
         if let Some(slot) = self.free_protos.pop() {
             self.protos[slot as usize] = Some(value);
+            self.marks_protos[slot as usize] = 0;
             let generation = self.generations_protos[slot as usize];
             ProtoHandle::new(slot, generation)
         } else {
             let slot = self.protos.len() as u32;
             self.protos.push(Some(value));
             self.generations_protos.push(0);
+            self.marks_protos.push(0);
             ProtoHandle::new(slot, 0)
         }
     }
@@ -245,12 +251,14 @@ impl Heap {
     pub fn alloc_lclosure(&mut self, value: LClosure) -> LClosureHandle {
         if let Some(slot) = self.free_lclosures.pop() {
             self.lclosures[slot as usize] = Some(value);
+            self.marks_lclosures[slot as usize] = 0;
             let generation = self.generations_lclosures[slot as usize];
             LClosureHandle::new(slot, generation)
         } else {
             let slot = self.lclosures.len() as u32;
             self.lclosures.push(Some(value));
             self.generations_lclosures.push(0);
+            self.marks_lclosures.push(0);
             LClosureHandle::new(slot, 0)
         }
     }
@@ -303,12 +311,14 @@ impl Heap {
     pub fn alloc_cclosure(&mut self, value: CClosure) -> CClosureHandle {
         if let Some(slot) = self.free_cclosures.pop() {
             self.cclosures[slot as usize] = Some(value);
+            self.marks_cclosures[slot as usize] = 0;
             let generation = self.generations_cclosures[slot as usize];
             CClosureHandle::new(slot, generation)
         } else {
             let slot = self.cclosures.len() as u32;
             self.cclosures.push(Some(value));
             self.generations_cclosures.push(0);
+            self.marks_cclosures.push(0);
             CClosureHandle::new(slot, 0)
         }
     }
@@ -361,12 +371,14 @@ impl Heap {
     pub fn alloc_upval(&mut self, value: UpVal) -> UpValHandle {
         if let Some(slot) = self.free_upvals.pop() {
             self.upvals[slot as usize] = Some(value);
+            self.marks_upvals[slot as usize] = 0;
             let generation = self.generations_upvals[slot as usize];
             UpValHandle::new(slot, generation)
         } else {
             let slot = self.upvals.len() as u32;
             self.upvals.push(Some(value));
             self.generations_upvals.push(0);
+            self.marks_upvals.push(0);
             UpValHandle::new(slot, 0)
         }
     }
@@ -419,12 +431,14 @@ impl Heap {
     pub fn alloc_thread(&mut self, value: Thread) -> ThreadHandle {
         if let Some(slot) = self.free_threads.pop() {
             self.threads[slot as usize] = Some(value);
+            self.marks_threads[slot as usize] = 0;
             let generation = self.generations_threads[slot as usize];
             ThreadHandle::new(slot, generation)
         } else {
             let slot = self.threads.len() as u32;
             self.threads.push(Some(value));
             self.generations_threads.push(0);
+            self.marks_threads.push(0);
             ThreadHandle::new(slot, 0)
         }
     }
@@ -477,12 +491,14 @@ impl Heap {
     pub fn alloc_userdata(&mut self, value: UserData) -> UserDataHandle {
         if let Some(slot) = self.free_userdata.pop() {
             self.userdata[slot as usize] = Some(value);
+            self.marks_userdata[slot as usize] = 0;
             let generation = self.generations_userdata[slot as usize];
             UserDataHandle::new(slot, generation)
         } else {
             let slot = self.userdata.len() as u32;
             self.userdata.push(Some(value));
             self.generations_userdata.push(0);
+            self.marks_userdata.push(0);
             UserDataHandle::new(slot, 0)
         }
     }
@@ -772,5 +788,44 @@ mod tests {
         heap.free_string(old);
         let _new = heap.alloc_string(fresh_string(b"second"));
         heap.free_string(old); // panic: stale
+    }
+
+    // ---- Stage 3 commit 4a: mark byte storage retrofit ----------------
+
+    #[test]
+    fn marks_vec_grows_in_lockstep_with_slot_vec() {
+        // The mark vec is a parallel Vec<u8> alongside each slot Vec.
+        // Every alloc that pushes a new slot must also push a mark
+        // byte, otherwise commit 4b's mark-phase walker will index
+        // out of bounds or read a stale byte.
+        let mut heap = Heap::default();
+        assert_eq!(heap.marks_strings.len(), 0);
+        heap.alloc_string(fresh_string(b"a"));
+        assert_eq!(heap.marks_strings.len(), 1);
+        assert_eq!(heap.marks_strings, vec![0]);
+        heap.alloc_string(fresh_string(b"b"));
+        assert_eq!(heap.marks_strings.len(), 2);
+        assert_eq!(heap.marks_strings, vec![0, 0]);
+        // Other arenas are untouched.
+        assert!(heap.marks_tables.is_empty());
+    }
+
+    #[test]
+    fn reused_slot_resets_mark_byte_to_zero() {
+        // Free+alloc at the same slot must overwrite any stale mark
+        // byte left behind by a previous GC cycle. Without the
+        // overwrite, commit 4b could see a "black" byte on a newly
+        // allocated object and skip its children.
+        let mut heap = Heap::default();
+        let h = heap.alloc_string(fresh_string(b"x"));
+        // Poison the mark byte to simulate a "black" object.
+        heap.marks_strings[h.slot as usize] = 2;
+        heap.free_string(h);
+        let h2 = heap.alloc_string(fresh_string(b"y"));
+        assert_eq!(h2.slot, h.slot, "expected LIFO slot reuse");
+        assert_eq!(
+            heap.marks_strings[h2.slot as usize], 0,
+            "alloc on a recycled slot must reset the mark byte"
+        );
     }
 }

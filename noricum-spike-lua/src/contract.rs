@@ -585,6 +585,25 @@ pub struct Heap {
     pub generations_upvals: Vec<u32>,
     pub generations_threads: Vec<u32>,
     pub generations_userdata: Vec<u32>,
+
+    /// Per-slot mark bytes used by the GC. Indexed in parallel with
+    /// the matching slot Vec (`marks_strings[i]` corresponds to
+    /// `strings[i]`). Colors are plain `u8` values from `lgc`:
+    /// `WHITE = 0`, `GRAY = 1`, `BLACK = 2`.
+    ///
+    /// Stage 3 / commit 4a introduces the storage and initializes it
+    /// to `WHITE` at every alloc site. Commit 4b adds the mark-phase
+    /// walker that reads and writes these bytes. Until 4b lands,
+    /// nothing reads them — the retrofit here is deliberately
+    /// behavior-preserving so every existing test keeps passing.
+    pub marks_strings: Vec<u8>,
+    pub marks_tables: Vec<u8>,
+    pub marks_protos: Vec<u8>,
+    pub marks_lclosures: Vec<u8>,
+    pub marks_cclosures: Vec<u8>,
+    pub marks_upvals: Vec<u8>,
+    pub marks_threads: Vec<u8>,
+    pub marks_userdata: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
