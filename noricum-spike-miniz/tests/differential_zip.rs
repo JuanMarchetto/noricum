@@ -16,6 +16,7 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use spike::contract::ZipReader as RustZipReader;
 use spike::{
     wr_reader_close, wr_reader_extract, wr_reader_get_num_files, wr_reader_locate, wr_reader_open,
     wr_reader_stat,
@@ -202,6 +203,70 @@ fn hello_fixture_matches_expected_content() {
     assert_eq!(entry.size, 6);
     assert_eq!(entry.first_bytes, b"hello\n".to_vec());
     assert_eq!(entry.crc32, 0x363a3020, "CRC32 of 'hello\\n' is a known constant");
+}
+
+/// One entry's fields as seen from either the C oracle or the Rust reader.
+/// Only includes the fields that both sides currently produce (name,
+/// uncompressed size, CRC32). First-bytes comparison will come in when
+/// extract_to_mem lands on the Rust side.
+#[derive(Debug, PartialEq, Eq)]
+struct MinEntry {
+    name: String,
+    size: u64,
+    crc32: u32,
+}
+
+fn oracle_min_entries(path: &Path) -> Vec<MinEntry> {
+    let snap = snapshot_via_oracle(path).expect("oracle snapshot");
+    snap.entries
+        .into_iter()
+        .map(|e| MinEntry {
+            name: e.name,
+            size: e.size as u64,
+            crc32: e.crc32,
+        })
+        .collect()
+}
+
+fn rust_min_entries(path: &Path) -> Vec<MinEntry> {
+    let reader = RustZipReader::open(path).expect("rust reader open");
+    reader
+        .entries()
+        .iter()
+        .map(|e| MinEntry {
+            name: e.file_name.clone(),
+            size: e.uncompressed_size,
+            crc32: e.crc32,
+        })
+        .collect()
+}
+
+/// Hour-3 gate: the Rust reader must produce the same central-directory
+/// view as the C oracle on the canonical non-zip64 fixtures. Compares
+/// entry-by-entry (name, size, crc32). If this fails the methodology needs
+/// re-assessment before continuing.
+#[test]
+fn reader_diff_test_hello_zip() {
+    let path = fixtures_dir().join("hello.zip");
+    let oracle = oracle_min_entries(&path);
+    let rust = rust_min_entries(&path);
+    assert_eq!(rust, oracle, "hello.zip differential mismatch");
+}
+
+#[test]
+fn reader_diff_test_empty_zip() {
+    let path = fixtures_dir().join("empty.zip");
+    let oracle = oracle_min_entries(&path);
+    let rust = rust_min_entries(&path);
+    assert_eq!(rust, oracle, "empty.zip differential mismatch");
+}
+
+#[test]
+fn reader_diff_test_multi_small_zip() {
+    let path = fixtures_dir().join("multi_small.zip");
+    let oracle = oracle_min_entries(&path);
+    let rust = rust_min_entries(&path);
+    assert_eq!(rust, oracle, "multi_small.zip differential mismatch");
 }
 
 #[test]

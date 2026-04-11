@@ -8,6 +8,7 @@
 //! submodule under `contract`.
 
 pub mod contract;
+pub mod reader;
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 
