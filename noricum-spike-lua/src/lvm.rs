@@ -86,6 +86,8 @@ const OP_SETI_U8: u8 = OpCode::OP_SETI as u8;
 const OP_SETFIELD_U8: u8 = OpCode::OP_SETFIELD as u8;
 
 const OP_CALL_U8: u8 = OpCode::OP_CALL as u8;
+const OP_FORLOOP_U8: u8 = OpCode::OP_FORLOOP as u8;
+const OP_FORPREP_U8: u8 = OpCode::OP_FORPREP as u8;
 
 impl LuaState {
     /// Run the bytecode interpreter for the top call frame until
@@ -356,6 +358,103 @@ impl LuaState {
                         _ => return Err(LuaError::Runtime(TValue::Nil)),
                     };
                     self.global.table_set(table_handle, key, rc);
+                }
+                OP_FORPREP_U8 => {
+                    // Initialize a numeric for loop. R(A) =
+                    // initial, R(A+1) = limit, R(A+2) = step.
+                    // Stage 5.9 implements the integer-only
+                    // case; float loops fall through to the
+                    // unimplemented panic.
+                    let a = getarg_a(instruction) as u32;
+                    let bx = getarg_bx(instruction) as u32;
+                    let init = self.current_thread().stack[(base + a) as usize];
+                    let limit = self.current_thread().stack[(base + a + 1) as usize];
+                    let step = self.current_thread().stack[(base + a + 2) as usize];
+                    match (init, limit, step) {
+                        (
+                            TValue::Integer(init),
+                            TValue::Integer(limit),
+                            TValue::Integer(step),
+                        ) => {
+                            if step == 0 {
+                                return Err(LuaError::Runtime(TValue::Nil));
+                            }
+                            // Empty loop: (step > 0 && init > limit)
+                            // or (step < 0 && init < limit)
+                            let skip = (step > 0 && init > limit)
+                                || (step < 0 && init < limit);
+                            if skip {
+                                // Jump past the loop body and the
+                                // trailing FORLOOP instruction. C
+                                // Lua encodes this as "pc += Bx + 1"
+                                // because Bx is offset-to-FORLOOP
+                                // and we want to skip FORLOOP too.
+                                let frame_mut = self
+                                    .current_thread_mut()
+                                    .frames
+                                    .last_mut()
+                                    .expect("FORPREP: no frame");
+                                frame_mut.saved_pc += bx + 1;
+                            } else {
+                                // R(A+3) = R(A) — the visible loop
+                                // variable, separate from the
+                                // internal counter R(A).
+                                let thread = self.current_thread_mut();
+                                thread.stack[(base + a + 3) as usize] =
+                                    TValue::Integer(init);
+                            }
+                        }
+                        _ => {
+                            // Float loops not yet supported.
+                            return Err(LuaError::Runtime(TValue::Nil));
+                        }
+                    }
+                }
+                OP_FORLOOP_U8 => {
+                    // R(A) += R(A+2); if the loop still runs,
+                    // R(A+3) = R(A); pc -= Bx.
+                    let a = getarg_a(instruction) as u32;
+                    let bx = getarg_bx(instruction) as u32;
+                    let counter = self.current_thread().stack[(base + a) as usize];
+                    let limit = self.current_thread().stack[(base + a + 1) as usize];
+                    let step = self.current_thread().stack[(base + a + 2) as usize];
+                    match (counter, limit, step) {
+                        (
+                            TValue::Integer(counter),
+                            TValue::Integer(limit),
+                            TValue::Integer(step),
+                        ) => {
+                            let next = counter.wrapping_add(step);
+                            // Loop continues if next is still
+                            // within [limit] in the direction of
+                            // step.
+                            let still_running = if step > 0 {
+                                next <= limit
+                            } else {
+                                next >= limit
+                            };
+                            if still_running {
+                                let thread = self.current_thread_mut();
+                                thread.stack[(base + a) as usize] =
+                                    TValue::Integer(next);
+                                thread.stack[(base + a + 3) as usize] =
+                                    TValue::Integer(next);
+                                let frame_mut = thread
+                                    .frames
+                                    .last_mut()
+                                    .expect("FORLOOP: no frame");
+                                // Jump back: saved_pc -= Bx. pc
+                                // was already advanced past
+                                // FORLOOP, so this points at the
+                                // first instruction of the loop
+                                // body.
+                                frame_mut.saved_pc = frame_mut.saved_pc.wrapping_sub(bx);
+                            }
+                        }
+                        _ => {
+                            return Err(LuaError::Runtime(TValue::Nil));
+                        }
+                    }
                 }
                 OP_CALL_U8 => {
                     // Nested function call from inside bytecode.
@@ -1399,6 +1498,105 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(30));
+    }
+
+    // ---- Stage 5.9 numeric for loops ------------------------------
+
+    fn forprep(a: u32, bx: u32) -> u32 {
+        crate::lopcodes::create_abx(OpCode::OP_FORPREP, a, bx)
+    }
+
+    fn forloop(a: u32, bx: u32) -> u32 {
+        crate::lopcodes::create_abx(OpCode::OP_FORLOOP, a, bx)
+    }
+
+    #[test]
+    fn integer_for_loop_sums_one_to_ten() {
+        // local sum = 0; for i = 1, 10 do sum = sum + i end; return sum
+        // Register layout:
+        //   R(0) = sum
+        //   R(1) = loop counter (internal)
+        //   R(2) = loop limit (10)
+        //   R(3) = loop step (1)
+        //   R(4) = loop variable i (visible to body)
+        //
+        // PC layout:
+        //   0: LOADI R(0) 0      ; sum = 0
+        //   1: LOADI R(1) 1      ; init
+        //   2: LOADI R(2) 10     ; limit
+        //   3: LOADI R(3) 1      ; step
+        //   4: FORPREP R(1), body_len   ; jumps to PC 4+body_len+1 if loop empty
+        //   5: ADD R(0), R(0), R(4)     ; sum = sum + i   (body start)
+        //   6: FORLOOP R(1), body_len   ; jumps back to PC 5 (body start)
+        //   7: RETURN1 R(0)
+        let mut state = LuaState::new(0);
+        // body_len = 1 (one instruction between FORPREP and FORLOOP).
+        let body_len: u32 = 1;
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 0),
+                loadi(1, 1),
+                loadi(2, 10),
+                loadi(3, 1),
+                forprep(1, body_len),
+                arith_binary(OpCode::OP_ADD, 0, 0, 4),
+                forloop(1, body_len + 1),
+                return1(0),
+            ],
+            5,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        // 1 + 2 + ... + 10 = 55
+        assert_eq!(state.to_integer_x(1), Some(55));
+    }
+
+    #[test]
+    fn integer_for_loop_with_empty_range_skips_body_entirely() {
+        // for i = 10, 1, 1 do ... end — empty range, body never
+        // runs. FORPREP jumps past the body and FORLOOP.
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 42),      // sentinel before the loop
+                loadi(1, 10),      // init
+                loadi(2, 1),       // limit
+                loadi(3, 1),       // step (positive, so 10 > 1 = empty)
+                forprep(1, 2),     // body_len = 2
+                // Body that MUST not run.
+                loadi(0, 999),     // this would overwrite the sentinel
+                arith_binary(OpCode::OP_ADD, 0, 0, 4), // garbage
+                forloop(1, 3),
+                return1(0),
+            ],
+            5,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn integer_for_loop_with_negative_step_counts_down() {
+        // for i = 5, 1, -1 do sum = sum + i end; returns 15.
+        let mut state = LuaState::new(0);
+        let body_len: u32 = 1;
+        push_simple_closure(
+            &mut state,
+            vec![
+                loadi(0, 0),
+                loadi(1, 5),
+                loadi(2, 1),
+                loadi(3, -1),
+                forprep(1, body_len),
+                arith_binary(OpCode::OP_ADD, 0, 0, 4),
+                forloop(1, body_len + 1),
+                return1(0),
+            ],
+            5,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(15));
     }
 
     #[test]
