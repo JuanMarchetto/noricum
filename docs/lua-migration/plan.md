@@ -1,6 +1,6 @@
 # Lua 5.4 → Safe Rust: Full Port Plan
 
-**Status:** Phase 0 complete (oracle harness green). Hour 0 of Stage 1 in progress.
+**Status:** Stage 1 COMPLETE (foundation modules green). Stage 2 not yet started.
 **Branch:** `feat/interactive-spike-lua`
 **Scope:** Complete migration. No cuts. Drop-in ABI. See `docs/methodology/full-port-mode.md` for methodology and `memory/project_lua_full_port.md` for the seven lock-in decisions.
 **Started:** 2026-04-11
@@ -95,12 +95,12 @@ Updated at every session shutdown.
 
 | Stage | Module | C LOC | Rust LOC | Diff-tests | Status | Session completed |
 |---|---|---:|---:|---|---|---|
-| 0 | Phase 0 oracle harness | — | 70 | 1 (oracle_selftest) | ✅ GREEN | 2026-04-11 |
-| 1 | contract.rs seed | — | — | — | 🔄 IN PROGRESS | 2026-04-11 (this session) |
-| 1 | lctype | 64 | — | — | ⏳ PENDING | — |
-| 1 | lzio | 89 | — | — | ⏳ PENDING | — |
-| 1 | lopcodes | 140 | — | — | ⏳ PENDING | — |
-| 1 | lmem | 215 | — | — | ⏳ PENDING | — |
+| 0 | Phase 0 oracle harness | — | 70 | 1 (oracle_selftest) | ✅ GREEN | 2026-04-11 (S1) |
+| 1 | contract.rs seed | — | 604 | 6 unit | ✅ GREEN | 2026-04-11 (S2) |
+| 1 | lctype | 64 | 250 | 8 diff + 6 unit | ✅ GREEN | 2026-04-11 (S3) |
+| 1 | lopcodes | 140 | 435 | 10 diff + 10 unit | ✅ GREEN | 2026-04-11 (S3) |
+| 1 | lmem | 215 | 130 | 7 diff + 7 unit | ✅ GREEN | 2026-04-11 (S3) |
+| 1 | lzio | 89 | 295 | 13 diff + 7 unit | ✅ GREEN | 2026-04-11 (S3) |
 | 2 | lobject | 718 | — | — | ⏳ PENDING | — |
 | 2 | lstring | 353 | — | — | ⏳ PENDING | — |
 | 2 | lstate | 425 | — | — | ⏳ PENDING | — |
@@ -158,8 +158,12 @@ Chronological. Every architectural call gets an entry.
 - **2026-04-11 / 7 lock-ins:** ZERO / Result-threading / manual arena / CPS / drop-in / bytecode-compat / piccolo-inspiration-only. Operator call. See `memory/project_lua_full_port.md`.
 - **2026-04-11 / std allowed under ZERO:** Operator confirmed that `std` is acceptable; "ZERO" means `[dependencies]` empty, not `no_std`. Binary target ~2× C baseline.
 - **2026-04-11 / ltests.c excluded:** Lua's internal C test harness is replaced by our Rust test suite, not migrated. Saves 2,247 LOC of migration work for code that would be deleted after migration anyway.
+- **2026-04-11 / lmem growth-strategy precondition:** `grow_array_size` documents and enforces `limit >= MIN_SIZE_ARRAY` as a debug_assert precondition. C Lua's `luaM_growaux_` has the same invariant but releases it as a no-op `lua_assert`, so the divergence was silent in C release builds. Diff-test earned-its-keep moment.
+- **2026-04-11 / Mbuffer skipped in lzio:** Lua's `Mbuffer` (growable byte scratch buffer used by the lexer) is not ported — the Stage 6 lexer will use `Vec<u8>` directly. Every `Mbuffer` macro is a trivial `Vec` method.
+- **2026-04-11 / Opcode and OpMode keep C names:** `OpCode` variants preserve the `OP_MOVE` / `OP_LOADI` / etc. spelling, and `OpMode` variants keep `iABC` / `ivABC` / etc. despite the Rust camelCase convention. Rationale: these are on-wire format identifiers documented with those exact names in the Lua 5.4 spec. Renaming creates a permanent decoder ring between the Rust port and the C source for every reader. Gated with `#![allow(non_camel_case_types, non_upper_case_globals)]`.
 
 ## Session log
 
 - **Session 1 (2026-04-11, Phase 0):** Oracle harness complete. `wrapper.{c,h}`, `src/lib.rs` FFI layer, `fixtures/gen_fixtures.py` (6 fixtures), `tests/differential_lua.rs` (`oracle_selftest` green). Duration: ~30 min.
-- **Session 2 (2026-04-11, Hour 0 start):** Lock-in decisions taken, full-port methodology doc written, this plan doc created. Contract.rs work in progress.
+- **Session 2 (2026-04-11, Hour 0 / contract):** Lock-in decisions taken, full-port methodology doc written, plan doc created, `contract.rs` type architecture landed (604 LOC, 6 unit tests). Piccolo cloned to `/tmp/piccolo-ref` for inspiration reading only. 3 atomic commits on `feat/interactive-spike-lua`. Duration: ~45 min.
+- **Session 3 (2026-04-11, Stage 1 complete):** All four Stage 1 modules ported with oracle diff tests — lctype (250 LOC / 8 diff tests / byte-exact 257-entry table), lopcodes (435 LOC / 10 diff tests / byte-exact 85-opcode table + full decoder parity + `luaP_isOT`/`luaP_isIT` on every opcode), lmem growth strategy (130 LOC / 7 diff tests / real `luaM_growaux_` invoked via `lua_pcall`), lzio (295 LOC / 13 diff tests / read+get_addr+fill parity across chunk boundaries 1..=100). 4 atomic commits. Test count: 7 → 75. Duration: ~75 min.
