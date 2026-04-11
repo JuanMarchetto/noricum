@@ -648,6 +648,13 @@ pub struct GlobalState {
     /// Position of the incremental sweep across arenas. Replaces
     /// C's `g->sweepgc` `GCObject**`.
     pub gc_sweep_cursor: crate::lgc::SweepCursor,
+    /// Signed byte counter used by the incremental GC to decide
+    /// when to run a step. Positive values mean "debt is owed"
+    /// (allocations accumulated since the last step); when the
+    /// debt crosses [`crate::lgc::GC_DEBT_THRESHOLD`], the next
+    /// allocation triggers a `gc_step` and the counter is reset.
+    /// Matches `global_State::GCdebt` in `lstate.h`.
+    pub gc_debt: i64,
 }
 
 /// The public VM handle. At the drop-in ABI boundary this is passed

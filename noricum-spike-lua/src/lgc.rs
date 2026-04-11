@@ -87,6 +87,14 @@ pub const BLACK: u8 = 2;
 /// dominate a VM timeslice.
 pub const GC_SWEEP_MAX: u32 = 20;
 
+/// Debt threshold at which [`GlobalState::record_allocation`]
+/// triggers an incremental step. Stage 3 v1 uses a flat constant;
+/// commit 7 / v2 will wire up the step-mul / step-size tuning
+/// knobs from `gc_params` so the threshold adapts to the live
+/// heap size. The value (1024 bytes) is a placeholder chosen to
+/// keep unit tests deterministic and runnable.
+pub const GC_DEBT_THRESHOLD: i64 = 1024;
+
 // ---------------------------------------------------------------------------
 // GcState — 5-state machine. Matches stage-3-gc-design.md §4.1.
 // ---------------------------------------------------------------------------
@@ -884,6 +892,79 @@ impl GlobalState {
         self.set_mark(parent, GRAY);
         self.gc_grayagain.push(parent);
     }
+
+    // --- full_gc driver + allocation debt (commit 7) ---------------
+    //
+    // The incremental step driver runs gc_step in a loop until the
+    // cycle finishes. For Stage 3 v1 tests this is the primary
+    // driver since we don't yet have a VM running allocations on a
+    // main loop — drive_full_cycle (test helper) wraps this with a
+    // safety limit.
+    //
+    // The allocation-debt accounting layer lets callers (Stage 4
+    // ltable, Stage 5 VM, Stage 4 lauxlib) trigger an incremental
+    // step from inside their alloc paths without thinking about
+    // the state machine. Each call to `record_allocation` bumps
+    // `gc_debt` by the allocation's byte cost; once the debt
+    // crosses `GC_DEBT_THRESHOLD`, the next call runs one step and
+    // resets the debt.
+
+    /// Run the incremental collector to completion. Calls
+    /// [`GlobalState::gc_step`] in a tight loop until the cycle
+    /// finishes and the state machine returns to
+    /// [`GcState::Pause`]. Safe to call from anywhere except
+    /// inside another `full_gc` — the state machine is single-
+    /// threaded and re-entry would duplicate work.
+    pub fn full_gc(&mut self) {
+        loop {
+            if matches!(self.gc_step(), GcStepResult::FinishedCycle) {
+                return;
+            }
+        }
+    }
+
+    /// Record that `bytes` bytes have just been allocated. Bumps
+    /// [`GlobalState::gc_debt`]; when the debt crosses
+    /// [`GC_DEBT_THRESHOLD`] the collector runs one incremental
+    /// step and the debt resets.
+    ///
+    /// Stage 3 v1 uses a single-step trigger (one `gc_step` per
+    /// threshold crossing). Commit 7 / v2 will integrate the
+    /// full `stepmul`/`stepsize` logic from `gc_params` so the
+    /// step size scales with the live heap.
+    pub fn record_allocation(&mut self, bytes: usize) {
+        self.gc_debt = self.gc_debt.saturating_add(bytes as i64);
+        if self.gc_debt >= GC_DEBT_THRESHOLD {
+            self.gc_debt = 0;
+            let _ = self.gc_step();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Approximate object size estimator — used by allocation-debt callers
+// that don't have an exact byte count for the object they just created.
+// ---------------------------------------------------------------------------
+
+/// Rough byte cost of a freshly-allocated object in arena `kind`.
+/// Uses `mem::size_of` on the matching heap type, which covers the
+/// stack-side struct but ignores any heap allocations the type
+/// owns (e.g., a `Table`'s `Vec<TValue>` array part). That's
+/// intentional for Stage 3 v1: the estimator is meant to drive the
+/// collector's step cadence, not to be a true live-bytes
+/// accountant. Stage 3 v2 or later can add per-object precise
+/// accounting if the step cadence becomes a tuning concern.
+pub const fn approx_object_size(kind: HeapKind) -> usize {
+    match kind {
+        HeapKind::String => std::mem::size_of::<crate::contract::LuaString>(),
+        HeapKind::Table => std::mem::size_of::<crate::contract::Table>(),
+        HeapKind::Proto => std::mem::size_of::<crate::contract::Proto>(),
+        HeapKind::LClosure => std::mem::size_of::<crate::contract::LClosure>(),
+        HeapKind::CClosure => std::mem::size_of::<crate::contract::CClosure>(),
+        HeapKind::UpVal => std::mem::size_of::<crate::contract::UpVal>(),
+        HeapKind::Thread => std::mem::size_of::<crate::contract::Thread>(),
+        HeapKind::UserData => std::mem::size_of::<crate::contract::UserData>(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1472,6 +1553,93 @@ mod tests {
         assert_eq!(g.heap.marks_tables[gray_parent.slot as usize], GRAY);
         assert_eq!(g.heap.marks_tables[white_parent.slot as usize], WHITE);
         assert!(g.gc_grayagain.is_empty());
+    }
+
+    // ---- commit 5 continued: cross-cycle sweep behavior ------------
+
+    // ---- commit 7: full_gc driver + allocation debt ---------------
+
+    #[test]
+    fn full_gc_completes_a_cycle_in_one_call_and_returns_to_pause() {
+        // full_gc must drive the state machine from Pause back to
+        // Pause without the caller needing to manage gc_step.
+        let mut g = GlobalState::default();
+        let reg = g.heap.alloc_table(Table::default());
+        g.registry = Some(reg);
+        g.full_gc();
+        assert_eq!(g.gc_state, GcState::Pause);
+        assert_eq!(g.heap.marks_tables[reg.slot as usize], BLACK);
+    }
+
+    #[test]
+    fn full_gc_frees_unreachable_and_preserves_reachable() {
+        // End-to-end integration: unreachable object freed,
+        // reachable object preserved, cycle returns to Pause.
+        let mut g = GlobalState::default();
+        let ghost = g.heap.alloc_table(Table::default());
+        let alive = g.heap.alloc_table(Table::default());
+        g.registry = Some(alive);
+        g.full_gc();
+        assert!(
+            g.heap.tables[ghost.slot as usize].is_none(),
+            "ghost must be freed"
+        );
+        assert!(
+            g.heap.tables[alive.slot as usize].is_some(),
+            "alive must survive"
+        );
+        assert_eq!(g.gc_state, GcState::Pause);
+    }
+
+    #[test]
+    fn record_allocation_bumps_debt_without_triggering_below_threshold() {
+        let mut g = GlobalState::default();
+        // A single small allocation must not cross the threshold.
+        g.record_allocation(64);
+        assert_eq!(g.gc_debt, 64);
+        assert_eq!(g.gc_state, GcState::Pause, "no step triggered yet");
+        g.record_allocation(128);
+        assert_eq!(g.gc_debt, 192);
+        assert_eq!(g.gc_state, GcState::Pause);
+    }
+
+    #[test]
+    fn record_allocation_triggers_gc_step_at_threshold_and_resets_debt() {
+        // Drop a single huge allocation that crosses the
+        // threshold. record_allocation must reset the debt and
+        // run one gc_step. Since the state machine was in Pause,
+        // the step transitions into Propagate.
+        let mut g = GlobalState::default();
+        g.record_allocation((GC_DEBT_THRESHOLD + 1) as usize);
+        assert_eq!(g.gc_debt, 0, "debt must reset after triggering");
+        assert_eq!(
+            g.gc_state,
+            GcState::Propagate,
+            "Pause + step = Propagate"
+        );
+    }
+
+    #[test]
+    fn approx_object_size_is_non_zero_for_every_kind() {
+        // The size estimator must report a positive byte count
+        // for every arena kind, otherwise record_allocation based
+        // on it would never accumulate debt for that kind.
+        for kind in [
+            HeapKind::String,
+            HeapKind::Table,
+            HeapKind::Proto,
+            HeapKind::LClosure,
+            HeapKind::CClosure,
+            HeapKind::UpVal,
+            HeapKind::Thread,
+            HeapKind::UserData,
+        ] {
+            assert!(
+                approx_object_size(kind) > 0,
+                "approx_object_size({:?}) must be > 0",
+                kind
+            );
+        }
     }
 
     // ---- commit 5 continued: cross-cycle sweep behavior ------------
