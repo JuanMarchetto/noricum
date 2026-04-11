@@ -1,6 +1,6 @@
 # Lua 5.4 → Safe Rust: Full Port Plan
 
-**Status:** Stage 3 IN PROGRESS — 4 of 7 commits landed (handle widening + generation bump + lgc skeleton + mark phase with root enumeration; commit 4 split into 4a/4b per the refactor-vs-behavior discipline). R1 retired. 200 tests green.
+**Status:** Stage 3 v1 COMPLETE — all 7 commits landed (handle widening, generation bump, lgc skeleton, mark phase with root enumeration [split 4a/4b], sweep phase, write barriers, full_gc + allocation debt). R1 retired. 216 tests green. Stage 3 v2 (weak tables, finalizers, generational mode, dual-white) deferred until Stage 4/5 force it.
 **Branch:** `feat/interactive-spike-lua`
 **Scope:** Complete migration. No cuts. Drop-in ABI. See `docs/methodology/full-port-mode.md` for methodology and `memory/project_lua_full_port.md` for the seven lock-in decisions.
 **Started:** 2026-04-11
