@@ -16,6 +16,12 @@ cc = "1"
 [dependencies]
 flate2 = "1"
 crc32fast = "1"
+# AES-encrypted ZIP entries (WinZip AES-256 extension, APPNOTE.TXT 7.4)
+aes = "0.8"
+hmac = { version = "0.12", features = ["reset"] }
+sha1 = "0.10"
+pbkdf2 = "0.12"
+constant_time_eq = "0.3"
 
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2", "aes-crypto", "time"] }

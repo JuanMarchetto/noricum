@@ -852,56 +852,100 @@ fn crc32fast_hash(data: &[u8]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
-/// Generate an AES-256 encrypted archive via zip-rs and assert that the
-/// Rust reader either handles it or fails cleanly with UnsupportedEncryption.
-/// (Decryption implementation is a separate commit.)
+/// Generate an AES-256 encrypted archive via zip-rs and decrypt it with
+/// the Rust reader using the correct password. Verifies the full AES path:
+/// PBKDF2 key derivation, password verification, HMAC-SHA1 auth, AES-CTR
+/// decryption, and post-decryption deflate.
 #[test]
-fn extension_test_aes_via_zip_rs() {
+fn extension_test_aes256_decrypt_full() {
+    use zip::AesMode;
     use zip::CompressionMethod;
     use zip::write::{SimpleFileOptions, ZipWriter};
-    use zip::AesMode;
 
-    let path = tmp_archive("aes");
+    const PASSWORD: &str = "noricumspike";
+    const PAYLOAD: &[u8] = b"this payload is AES encrypted and then deflated\n";
+
+    let path = tmp_archive("aes256");
     {
         let file = std::fs::File::create(&path).expect("create aes fixture");
         let mut zw = ZipWriter::new(file);
         let opts = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
-            .with_aes_encryption(AesMode::Aes256, "noricumspike");
+            .with_aes_encryption(AesMode::Aes256, PASSWORD);
         zw.start_file("secret.txt", opts).unwrap();
-        zw.write_all(b"this payload is AES encrypted\n").unwrap();
+        zw.write_all(PAYLOAD).unwrap();
         zw.finish().unwrap();
     }
 
-    // C oracle: miniz does NOT support AES, so it will either fail to open
-    // or succeed to open but fail to extract. Don't assert on oracle behavior.
-    let _oracle_attempt = snapshot_via_oracle(&path);
-
-    // Rust reader: current commit does not support AES. We assert either
-    // a clean UnsupportedEncryption / UnsupportedMethod error OR successful
-    // extraction — the test will be updated once AES lands in the reader.
-    match RustZipReader::open(&path) {
-        Ok(mut reader) => {
-            match reader.extract_to_mem(0) {
-                Ok(body) => {
-                    // If AES support landed, the body matches.
-                    assert_eq!(body, b"this payload is AES encrypted\n");
-                }
-                Err(spike::contract::ZipError::UnsupportedMethod)
-                | Err(spike::contract::ZipError::UnsupportedEncryption)
-                | Err(spike::contract::ZipError::DecompressionFailed) => {
-                    // Expected failure mode before AES is implemented.
-                }
-                Err(other) => panic!("AES extract returned unexpected error: {other:?}"),
-            }
+    // Without a password the reader must refuse.
+    {
+        let mut reader = RustZipReader::open(&path).expect("open aes archive");
+        match reader.extract_to_mem(0) {
+            Err(spike::contract::ZipError::UnsupportedEncryption) => {}
+            other => panic!("expected UnsupportedEncryption without password, got {other:?}"),
         }
-        Err(spike::contract::ZipError::UnsupportedMethod)
-        | Err(spike::contract::ZipError::UnsupportedEncryption)
-        | Err(spike::contract::ZipError::UnsupportedFeature) => {
-            // Also acceptable: reader refuses to open AES archives.
-        }
-        Err(other) => panic!("AES open returned unexpected error: {other:?}"),
     }
 
+    // With the correct password the reader must produce the exact payload.
+    {
+        let mut reader = RustZipReader::open(&path).expect("open aes archive again");
+        let idx = reader.locate_file("secret.txt").expect("locate");
+        let body = reader
+            .extract_to_mem_with_password(idx, PASSWORD.as_bytes())
+            .expect("aes decrypt with password");
+        assert_eq!(body, PAYLOAD, "AES-256 decrypted payload must match");
+    }
+
+    // With a WRONG password the reader must fail on password verification.
+    {
+        let mut reader = RustZipReader::open(&path).expect("open aes archive 3");
+        let err = reader.extract_to_mem_with_password(0, b"wrong-password");
+        assert!(
+            matches!(
+                err,
+                Err(spike::contract::ZipError::InvalidParameter)
+                    | Err(spike::contract::ZipError::CrcCheckFailed)
+            ),
+            "wrong password must fail, got {err:?}"
+        );
+    }
+
+    // C oracle doesn't support AES — don't assert on oracle behavior.
+    let _ = snapshot_via_oracle(&path);
+
     let _ = std::fs::remove_file(&path);
+}
+
+/// Also verify the AES-128 and AES-192 paths with a smaller payload, to make
+/// sure all three strengths are exercised.
+#[test]
+fn extension_test_aes128_and_aes192_small_payload() {
+    use zip::AesMode;
+    use zip::CompressionMethod;
+    use zip::write::{SimpleFileOptions, ZipWriter};
+
+    for (mode, label) in [(AesMode::Aes128, "aes128"), (AesMode::Aes192, "aes192")] {
+        let path = tmp_archive(label);
+        const PASSWORD: &str = "pw";
+        let payload = format!("hello {label}\n").into_bytes();
+
+        {
+            let file = std::fs::File::create(&path).expect("create aes fixture");
+            let mut zw = ZipWriter::new(file);
+            let opts = SimpleFileOptions::default()
+                .compression_method(CompressionMethod::Stored)
+                .with_aes_encryption(mode, PASSWORD);
+            zw.start_file("m.txt", opts).unwrap();
+            zw.write_all(&payload).unwrap();
+            zw.finish().unwrap();
+        }
+
+        let mut reader = RustZipReader::open(&path).expect("open");
+        let body = reader
+            .extract_to_mem_with_password(0, PASSWORD.as_bytes())
+            .expect("extract");
+        assert_eq!(body, payload, "{label} payload");
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

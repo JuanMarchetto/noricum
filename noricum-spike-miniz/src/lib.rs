@@ -7,6 +7,7 @@
 //! trying to produce" spec). As each C function lands in Rust, it lives in a
 //! submodule under `contract`.
 
+pub mod aes;
 pub mod contract;
 pub mod reader;
 pub mod writer;

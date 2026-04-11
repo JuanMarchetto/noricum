@@ -47,7 +47,7 @@ pub const MAX_EOCD_COMMENT: usize = u16::MAX as usize;
 
 // ---- Little-endian read helpers ------------------------------------
 
-fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
+pub(crate) fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([buf[offset], buf[offset + 1]])
 }
 
@@ -230,8 +230,8 @@ fn apply_zip64_extra(
                 off += 8;
             }
             if *disk_number_start == u16::MAX && off + 4 <= end {
-                *disk_number_start = read_u16_le(extra, off) as u16;
-                // (ignore upper half of the u32)
+                *disk_number_start = read_u16_le(extra, off);
+                // (ignore upper half of the u32 disk number)
             }
             return;
         }
@@ -438,7 +438,30 @@ impl ZipReader {
     /// entry at `file_index` into a freshly allocated `Vec<u8>` whose
     /// length equals `uncompressed_size`. CRC32 is verified against the
     /// central directory record.
+    ///
+    /// Returns `UnsupportedEncryption` if the entry uses AES encryption.
+    /// Use `extract_to_mem_with_password` instead for those.
     pub fn extract_to_mem(&mut self, file_index: usize) -> ZipResult<Vec<u8>> {
+        self.extract_to_mem_inner(file_index, None)
+    }
+
+    /// Extract an AES-encrypted entry using the provided password. Non-AES
+    /// entries still work — the password is ignored when no AES extra is
+    /// present. This mirrors what `mz_zip_reader_extract_to_mem` would have
+    /// looked like if miniz had ever implemented AES (it did not).
+    pub fn extract_to_mem_with_password(
+        &mut self,
+        file_index: usize,
+        password: &[u8],
+    ) -> ZipResult<Vec<u8>> {
+        self.extract_to_mem_inner(file_index, Some(password))
+    }
+
+    fn extract_to_mem_inner(
+        &mut self,
+        file_index: usize,
+        password: Option<&[u8]>,
+    ) -> ZipResult<Vec<u8>> {
         // Clone the header fields we need before re-borrowing self.archive.source mutably.
         let entry = self
             .archive
@@ -450,27 +473,61 @@ impl ZipReader {
         let uncompressed_size = entry.uncompressed_size;
         let expected_crc32 = entry.crc32;
         let local_header_offset = entry.local_header_offset;
+        let extra_field = entry.extra_field.clone();
 
-        if uncompressed_size == 0 {
+        // Detect AES-encrypted entries: compression_method is the AES marker (99)
+        // and the extra field carries a header-id 0x9901 block.
+        let aes_info = if let CompressionMethod::Unsupported(wire) = method {
+            if wire == crate::aes::AES_COMPRESSION_METHOD {
+                crate::aes::find_aes_extra(&extra_field)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if aes_info.is_some() && password.is_none() {
+            return Err(ZipError::UnsupportedEncryption);
+        }
+
+        // Zero-byte entries are a fast path regardless of method or AES state.
+        if uncompressed_size == 0 && aes_info.is_none() {
             return Ok(Vec::new());
         }
 
         let data_start = find_data_start(&mut self.archive.source, local_header_offset)?;
         self.archive.source.seek(SeekFrom::Start(data_start))?;
 
-        let mut out = Vec::with_capacity(uncompressed_size as usize);
+        // Read the raw compressed (and possibly encrypted) bytes into memory.
+        let mut raw = vec![0u8; compressed_size as usize];
+        if compressed_size > 0 {
+            self.archive
+                .source
+                .read_exact(&mut raw)
+                .map_err(|_| ZipError::FileReadFailed)?;
+        }
 
-        match method {
+        // If AES, decrypt in-place; the plaintext is still compressed under
+        // the "real" method recorded in the AES extra field.
+        let (decompressed_input, effective_method) = if let Some(info) = aes_info {
+            let pw = password.ok_or(ZipError::UnsupportedEncryption)?;
+            let plaintext = crate::aes::decrypt(&raw, info, pw)?;
+            let real = CompressionMethod::from_wire(info.real_compression_method);
+            (plaintext, real)
+        } else {
+            (raw, method)
+        };
+
+        // Decompress according to the effective method.
+        let mut out = Vec::with_capacity(uncompressed_size as usize);
+        match effective_method {
             CompressionMethod::Stored => {
-                let mut taken = (&mut self.archive.source).take(compressed_size);
-                taken
-                    .read_to_end(&mut out)
-                    .map_err(|_| ZipError::FileReadFailed)?;
+                out.extend_from_slice(&decompressed_input);
             }
             CompressionMethod::Deflated => {
                 use flate2::read::DeflateDecoder;
-                let taken = (&mut self.archive.source).take(compressed_size);
-                let mut decoder = DeflateDecoder::new(taken);
+                let mut decoder = DeflateDecoder::new(decompressed_input.as_slice());
                 decoder
                     .read_to_end(&mut out)
                     .map_err(|_| ZipError::DecompressionFailed)?;
@@ -483,7 +540,10 @@ impl ZipReader {
         }
 
         let actual_crc32 = crc32fast::hash(&out);
-        if actual_crc32 != expected_crc32 {
+        // AE-2 (version 2) intentionally sets crc32 to 0 in the central
+        // directory because the HMAC already protects integrity. Only
+        // enforce the CRC match when the expected value is nonzero.
+        if expected_crc32 != 0 && actual_crc32 != expected_crc32 {
             return Err(ZipError::CrcCheckFailed);
         }
 
