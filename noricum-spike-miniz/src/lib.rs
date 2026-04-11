@@ -1,9 +1,13 @@
 //! Noricum interactive spike: miniz_zip.c migration via Claude Code as director.
 //!
-//! Phase 0 (this file) exposes the C miniz wrapper via `extern "C"` so the
-//! differential test harness can call miniz through Rust. Phase 1 (the actual
-//! spike) lives in subsequent files as the type contract and migrated functions
-//! land.
+//! `lib.rs` is the FFI layer — it exposes the C miniz wrapper via `extern "C"`
+//! so the differential test harness can call miniz through Rust.
+//!
+//! `contract` holds the Rust-native type contract (the "what the migration is
+//! trying to produce" spec). As each C function lands in Rust, it lives in a
+//! submodule under `contract`.
+
+pub mod contract;
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 
