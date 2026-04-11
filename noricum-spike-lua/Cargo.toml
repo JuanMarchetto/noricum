@@ -1,0 +1,31 @@
+[workspace]
+
+[package]
+name = "noricum-spike-lua"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "spike"
+path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+# Runtime deps go here. Default is Mode-1 FREE (delegate to crates).
+# For Mode-2 MATCHING or Mode-3 ZERO, keep this empty and vendor primitives.
+
+[dev-dependencies]
+# Optional: use an idiomatic Rust crate for fixture generation at test time.
+# See docs/methodology/architectural-seeds.md for the recommended crate
+# for your target's library category.
+
+[profile.release-min]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"
