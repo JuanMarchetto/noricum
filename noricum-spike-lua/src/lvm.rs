@@ -77,6 +77,14 @@ const OP_LE_U8: u8 = OpCode::OP_LE as u8;
 const OP_TEST_U8: u8 = OpCode::OP_TEST as u8;
 const OP_TESTSET_U8: u8 = OpCode::OP_TESTSET as u8;
 
+const OP_NEWTABLE_U8: u8 = OpCode::OP_NEWTABLE as u8;
+const OP_GETTABLE_U8: u8 = OpCode::OP_GETTABLE as u8;
+const OP_GETI_U8: u8 = OpCode::OP_GETI as u8;
+const OP_GETFIELD_U8: u8 = OpCode::OP_GETFIELD as u8;
+const OP_SETTABLE_U8: u8 = OpCode::OP_SETTABLE as u8;
+const OP_SETI_U8: u8 = OpCode::OP_SETI as u8;
+const OP_SETFIELD_U8: u8 = OpCode::OP_SETFIELD as u8;
+
 impl LuaState {
     /// Run the bytecode interpreter for the top call frame until
     /// it returns. Expects the frame's callable slot to hold a
@@ -229,6 +237,124 @@ impl LuaState {
                         self.current_thread_mut().stack[(base + a) as usize] = rb;
                     }
                 }
+                // --- Table opcodes ---------------------------------
+                OP_NEWTABLE_U8 => {
+                    // R(A) := {} — Stage 5.7 ignores the B/C
+                    // array/hash capacity hints and creates an
+                    // empty table. Stage 5 v2 can preallocate
+                    // from B and C (plus the following
+                    // OP_EXTRAARG that carries the large array
+                    // size) to avoid early rehashes on
+                    // constructors that know their size.
+                    let a = getarg_a(instruction) as u32;
+                    let handle = self
+                        .global
+                        .heap
+                        .alloc_table(crate::contract::Table::default());
+                    self.current_thread_mut().stack[(base + a) as usize] =
+                        TValue::Table(handle);
+                    // The OP_NEWTABLE opcode is followed by an
+                    // OP_EXTRAARG in Lua 5.4. Skip it so the
+                    // next iteration doesn't try to dispatch it.
+                    self.skip_next_instruction();
+                }
+                OP_GETTABLE_U8 => {
+                    // R(A) := R(B)[R(C)]
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    let c = getarg_c(instruction) as u32;
+                    let rb = self.current_thread().stack[(base + b) as usize];
+                    let rc = self.current_thread().stack[(base + c) as usize];
+                    let table_handle = match rb {
+                        TValue::Table(h) => h,
+                        _ => return Err(LuaError::Runtime(TValue::Nil)),
+                    };
+                    let value = self
+                        .global
+                        .heap
+                        .table_get(table_handle, rc)
+                        .unwrap_or(TValue::Nil);
+                    self.current_thread_mut().stack[(base + a) as usize] = value;
+                }
+                OP_GETI_U8 => {
+                    // R(A) := R(B)[C]  — C is a small integer
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    let c = getarg_c(instruction);
+                    let rb = self.current_thread().stack[(base + b) as usize];
+                    let table_handle = match rb {
+                        TValue::Table(h) => h,
+                        _ => return Err(LuaError::Runtime(TValue::Nil)),
+                    };
+                    let value = self
+                        .global
+                        .heap
+                        .table_get_int(table_handle, c as i64)
+                        .unwrap_or(TValue::Nil);
+                    self.current_thread_mut().stack[(base + a) as usize] = value;
+                }
+                OP_GETFIELD_U8 => {
+                    // R(A) := R(B)[K[C]]  — C indexes the constant pool
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    let c = getarg_c(instruction) as usize;
+                    let rb = self.current_thread().stack[(base + b) as usize];
+                    let table_handle = match rb {
+                        TValue::Table(h) => h,
+                        _ => return Err(LuaError::Runtime(TValue::Nil)),
+                    };
+                    let key = self.constant_at(func_slot, c);
+                    let value = self
+                        .global
+                        .heap
+                        .table_get(table_handle, key)
+                        .unwrap_or(TValue::Nil);
+                    self.current_thread_mut().stack[(base + a) as usize] = value;
+                }
+                OP_SETTABLE_U8 => {
+                    // R(A)[R(B)] := R/K(C)   (k flag selects K)
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    let c = getarg_c(instruction) as u32;
+                    let k = getarg_k(instruction);
+                    let ra = self.current_thread().stack[(base + a) as usize];
+                    let rb = self.current_thread().stack[(base + b) as usize];
+                    let rc = self.rk_value(func_slot, base, c, k);
+                    let table_handle = match ra {
+                        TValue::Table(h) => h,
+                        _ => return Err(LuaError::Runtime(TValue::Nil)),
+                    };
+                    self.global.table_set(table_handle, rb, rc);
+                }
+                OP_SETI_U8 => {
+                    // R(A)[B] := R/K(C)
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction);
+                    let c = getarg_c(instruction) as u32;
+                    let k = getarg_k(instruction);
+                    let ra = self.current_thread().stack[(base + a) as usize];
+                    let rc = self.rk_value(func_slot, base, c, k);
+                    let table_handle = match ra {
+                        TValue::Table(h) => h,
+                        _ => return Err(LuaError::Runtime(TValue::Nil)),
+                    };
+                    self.global.table_set_int(table_handle, b as i64, rc);
+                }
+                OP_SETFIELD_U8 => {
+                    // R(A)[K[B]] := R/K(C)
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as usize;
+                    let c = getarg_c(instruction) as u32;
+                    let k = getarg_k(instruction);
+                    let ra = self.current_thread().stack[(base + a) as usize];
+                    let key = self.constant_at(func_slot, b);
+                    let rc = self.rk_value(func_slot, base, c, k);
+                    let table_handle = match ra {
+                        TValue::Table(h) => h,
+                        _ => return Err(LuaError::Runtime(TValue::Nil)),
+                    };
+                    self.global.table_set(table_handle, key, rc);
+                }
                 // Binary arithmetic opcodes — R(A) := R(B) OP R(C).
                 // Every variant dispatches through lobject::raw_arith
                 // so integer/float coercion, error on non-numbers,
@@ -293,6 +419,30 @@ impl LuaState {
             .last_mut()
             .expect("skip: no frame");
         frame_mut.saved_pc += 1;
+    }
+
+    /// Read the constant at index `c` from the Proto of the
+    /// closure currently executing (whose slot on the stack is
+    /// `func_slot`). Used by OP_LOADK, OP_GETFIELD,
+    /// OP_SETFIELD, and the K variants of SETTABLE/SETI.
+    fn constant_at(&self, func_slot: u32, c: usize) -> TValue {
+        let proto_handle = match self.current_thread().stack[func_slot as usize] {
+            TValue::LuaClosure(h) => self.global.heap.lclosure(h).proto,
+            _ => unreachable!("constant_at in non-Lua frame"),
+        };
+        self.global.heap.proto(proto_handle).constants[c]
+    }
+
+    /// Read an "RK" value — either a register `R(c)` (when `k`
+    /// is false) or a constant `K[c]` (when `k` is true). This
+    /// is the standard Lua encoding for opcodes that accept
+    /// "register or constant" for the final operand.
+    fn rk_value(&self, func_slot: u32, base: u32, c: u32, k: bool) -> TValue {
+        if k {
+            self.constant_at(func_slot, c as usize)
+        } else {
+            self.current_thread().stack[(base + c) as usize]
+        }
     }
 
     /// Dispatch a binary arithmetic opcode (R(A) := R(B) op R(C)).
@@ -971,5 +1121,120 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(88));
+    }
+
+    // ---- Stage 5.7 table opcodes -----------------------------------
+
+    fn extraarg() -> u32 {
+        create_abck(OpCode::OP_EXTRAARG, 0, 0, 0, false)
+    }
+
+    #[test]
+    fn op_newtable_creates_empty_table_in_register() {
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_NEWTABLE, 0, 0, 0, false),
+                extraarg(),
+                return1(0),
+            ],
+            1,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert!(state.is_table(1));
+    }
+
+    #[test]
+    fn op_seti_then_geti_round_trips_integer_key_value() {
+        // t = {}; t[1] = 42; return t[1]
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_NEWTABLE, 0, 0, 0, false),
+                extraarg(),
+                loadi(1, 42),
+                // SETI R(0)[1] := R(1)   (k flag false → R operand)
+                create_abck(OpCode::OP_SETI, 0, 1, 1, false),
+                // GETI R(2) := R(0)[1]
+                create_abck(OpCode::OP_GETI, 2, 0, 1, false),
+                return1(2),
+            ],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn op_setfield_then_getfield_round_trips_string_key() {
+        // t = {}; t["name"] = "noricum"; return t["name"]
+        let mut state = LuaState::new(0);
+        let name_key = TValue::ShortString(
+            state.global.new_string(b"name", 0),
+        );
+        let name_val = TValue::ShortString(
+            state.global.new_string(b"noricum", 0),
+        );
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_NEWTABLE, 0, 0, 0, false),
+                extraarg(),
+                loadk(1, 1),
+                // SETFIELD R(0)[K[0]] := R(1)
+                create_abck(OpCode::OP_SETFIELD, 0, 0, 1, false),
+                // GETFIELD R(2) := R(0)[K[0]]
+                create_abck(OpCode::OP_GETFIELD, 2, 0, 0, false),
+                return1(2),
+            ],
+            vec![name_key, name_val],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_lstring(1), Some(b"noricum".as_slice()));
+    }
+
+    #[test]
+    fn op_settable_uses_register_for_key() {
+        // t = {}; t[5] = 100; return t[5]
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_NEWTABLE, 0, 0, 0, false),
+                extraarg(),
+                loadi(1, 5),     // key
+                loadi(2, 100),   // value
+                // SETTABLE R(0)[R(1)] := R(2)
+                create_abck(OpCode::OP_SETTABLE, 0, 1, 2, false),
+                // GETI R(3) := R(0)[5]
+                create_abck(OpCode::OP_GETI, 3, 0, 5, false),
+                return1(3),
+            ],
+            4,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(100));
+    }
+
+    #[test]
+    fn op_getfield_on_missing_key_returns_nil() {
+        let mut state = LuaState::new(0);
+        let key = TValue::ShortString(state.global.new_string(b"absent", 0));
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_NEWTABLE, 0, 0, 0, false),
+                extraarg(),
+                create_abck(OpCode::OP_GETFIELD, 1, 0, 0, false),
+                return1(1),
+            ],
+            vec![key],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert!(state.is_nil(1));
     }
 }
