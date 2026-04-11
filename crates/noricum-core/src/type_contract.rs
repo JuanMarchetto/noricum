@@ -29,7 +29,7 @@ You translate C type definitions to idiomatic Rust. You output ONLY valid Rust c
 /// 4. Post-process: strip fences, strip impl blocks
 /// 5. Validate with `check_rust_compiles()`
 /// 6. Try rule engine fixes before LLM retry
-/// 7. Retry up to [`MAX_CONTRACT_RETRIES`] times on failure
+/// 7. Retry up to `MAX_CONTRACT_RETRIES` times on failure
 /// 8. Return `None` if all retries fail (graceful degradation)
 pub async fn generate_type_contract(
     client: &LlmClient,
@@ -59,9 +59,12 @@ pub async fn generate_type_contract(
     };
 
     // Use Easy difficulty — type translation is a focused task
-    let model_sel =
-        select_model(provider_config, noricum_ir::Difficulty::Easy, "type_contract")
-            .map_err(|e| CoreError::Orchestration(format!("P33 model selection: {e}")))?;
+    let model_sel = select_model(
+        provider_config,
+        noricum_ir::Difficulty::Easy,
+        "type_contract",
+    )
+    .map_err(|e| CoreError::Orchestration(format!("P33 model selection: {e}")))?;
     let model = &model_sel.model;
 
     let c_abbreviated = abbreviate_c_for_context(c_source, CONTRACT_C_CONTEXT_MAX_LINES);
@@ -122,10 +125,8 @@ pub async fn generate_type_contract(
                     &result.stderr[..result.stderr.len().min(500)]
                 );
                 // Try mechanical fixes via rule engine before LLM retry
-                let parsed_errors =
-                    noricum_tools::repair_rules::parse_rustc_errors(&result.stderr);
-                let fixed =
-                    noricum_tools::repair_rules::apply_all_rules(&contract, &parsed_errors);
+                let parsed_errors = noricum_tools::repair_rules::parse_rustc_errors(&result.stderr);
+                let fixed = noricum_tools::repair_rules::apply_all_rules(&contract, &parsed_errors);
                 if fixed != contract {
                     match noricum_tools::compiler::check_rust_compiles(&fixed) {
                         Ok(r2) if r2.success => {
@@ -339,9 +340,7 @@ fn strip_impl_blocks(rust_source: &str) -> String {
             i = skip_braced_block_lines(&lines, i);
             continue;
         }
-        if (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn "))
-            && trimmed.contains('(')
-        {
+        if (trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ")) && trimmed.contains('(') {
             if trimmed.contains('{') {
                 i = skip_braced_block_lines(&lines, i);
             } else {
@@ -449,9 +448,14 @@ fn fix_contract_compilation_issues(source: &str) -> String {
 
         // Replace derive(Debug, Clone) → derive(Debug) to avoid E0277 on non-Clone fields
         if trimmed.starts_with("#[derive(") && fixed.contains("Clone") {
-            fixed = fixed.replace(", Clone", "").replace("Clone, ", "").replace("Clone", "Debug");
+            fixed = fixed
+                .replace(", Clone", "")
+                .replace("Clone, ", "")
+                .replace("Clone", "Debug");
             // Deduplicate Debug
-            fixed = fixed.replace("Debug, Debug", "Debug").replace("(Debug, )", "(Debug)");
+            fixed = fixed
+                .replace("Debug, Debug", "Debug")
+                .replace("(Debug, )", "(Debug)");
         }
 
         result.push_str(&fixed);
@@ -707,18 +711,31 @@ pub type MzUint = u32;
         assert!(result.contains("Debug"), "Debug should remain");
 
         // dyn multi-trait → usize
-        assert!(!result.contains("dyn std::io::Read"), "trait objects should be replaced");
+        assert!(
+            !result.contains("dyn std::io::Read"),
+            "trait objects should be replaced"
+        );
         assert!(result.contains("usize"), "should have usize replacements");
 
         // raw pointers → usize
         assert!(!result.contains("*mut"), "raw pointers should be replaced");
 
         // type aliases commented out (not active code)
-        assert!(result.contains("// P33: stripped alias"), "aliases should be commented out");
-        assert!(!result.contains("\npub type MzBool"), "aliases should not be active");
+        assert!(
+            result.contains("// P33: stripped alias"),
+            "aliases should be commented out"
+        );
+        assert!(
+            !result.contains("\npub type MzBool"),
+            "aliases should not be active"
+        );
 
         // Should compile
         let compile = noricum_tools::compiler::check_rust_compiles(&result).unwrap();
-        assert!(compile.success, "Fixed contract should compile: {}", compile.stderr);
+        assert!(
+            compile.success,
+            "Fixed contract should compile: {}",
+            compile.stderr
+        );
     }
 }

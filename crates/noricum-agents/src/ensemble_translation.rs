@@ -141,26 +141,26 @@ pub fn evaluate_candidate(
     estimated_cost_usd: f64,
 ) -> TranslationCandidate {
     // Gate 1: Compilation
-    let (compiles, compiler_errors) = match noricum_tools::compiler::check_rust_compiles(rust_source)
-    {
-        Ok(result) => {
-            let errors: Vec<String> = if !result.success {
-                result
-                    .stderr
-                    .lines()
-                    .filter(|l| l.contains("error"))
-                    .map(String::from)
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            (result.success, errors)
-        }
-        Err(e) => {
-            debug!(error = %e, "compilation check failed for candidate {}", config_label);
-            (false, vec![format!("Compilation check error: {e}")])
-        }
-    };
+    let (compiles, compiler_errors) =
+        match noricum_tools::compiler::check_rust_compiles(rust_source) {
+            Ok(result) => {
+                let errors: Vec<String> = if !result.success {
+                    result
+                        .stderr
+                        .lines()
+                        .filter(|l| l.contains("error"))
+                        .map(String::from)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                (result.success, errors)
+            }
+            Err(e) => {
+                debug!(error = %e, "compilation check failed for candidate {}", config_label);
+                (false, vec![format!("Compilation check error: {e}")])
+            }
+        };
 
     // Gate 2: Unsafe counting
     let unsafe_count = noricum_tools::compiler::count_unsafe_blocks(rust_source);
@@ -175,10 +175,7 @@ pub fn evaluate_candidate(
 
     info!(
         label = config_label,
-        compiles,
-        unsafe_count,
-        idiomatic_score,
-        "evaluated ensemble candidate"
+        compiles, unsafe_count, idiomatic_score, "evaluated ensemble candidate"
     );
 
     TranslationCandidate {
@@ -218,27 +215,28 @@ pub fn evaluate_candidate_with_specs(
     // Optional Gate: Spec validation (only if compiles and traces available)
     if candidate.compiles
         && let Some(traces) = traces
-            && !traces.is_empty() {
-                match noricum_tools::spec_mining::validate_against_specs(rust_source, traces) {
-                    Ok(spec_result) => {
-                        candidate.specs_passed = Some(spec_result.passed);
-                        candidate.specs_total = Some(spec_result.total_specs);
-                        info!(
-                            label = config_label,
-                            specs_passed = spec_result.passed,
-                            specs_total = spec_result.total_specs,
-                            "P38: spec validation for ensemble candidate"
-                        );
-                    }
-                    Err(e) => {
-                        debug!(
-                            label = config_label,
-                            error = %e,
-                            "P38: spec validation failed for ensemble candidate"
-                        );
-                    }
-                }
+        && !traces.is_empty()
+    {
+        match noricum_tools::spec_mining::validate_against_specs(rust_source, traces) {
+            Ok(spec_result) => {
+                candidate.specs_passed = Some(spec_result.passed);
+                candidate.specs_total = Some(spec_result.total_specs);
+                info!(
+                    label = config_label,
+                    specs_passed = spec_result.passed,
+                    specs_total = spec_result.total_specs,
+                    "P38: spec validation for ensemble candidate"
+                );
             }
+            Err(e) => {
+                debug!(
+                    label = config_label,
+                    error = %e,
+                    "P38: spec validation failed for ensemble candidate"
+                );
+            }
+        }
+    }
 
     candidate
 }
@@ -707,10 +705,7 @@ mod tests {
     #[test]
     fn test_estimate_candidate_cost_anthropic() {
         let cost = estimate_candidate_cost(1_000_000, 500_000, &ProviderKind::Anthropic);
-        assert!(
-            (cost - 10.5).abs() < 0.01,
-            "expected ~$10.50, got ${cost}"
-        );
+        assert!((cost - 10.5).abs() < 0.01, "expected ~$10.50, got ${cost}");
     }
 
     #[test]
@@ -945,9 +940,30 @@ pub fn hash_key(s: *const u8) -> u64 {
         let c = "unsigned long hash_key(const char *str) { unsigned long hash = 5381; int c; while ((c = *str++)) hash = ((hash << 5) + hash) + c; return hash; }";
 
         let candidates = vec![
-            evaluate_candidate(good_rust, c, "claude-0.3", ProviderKind::Anthropic, 0.3, 0.05),
-            evaluate_candidate(mid_rust, c, "deepseek-0.3", ProviderKind::DeepSeek, 0.3, 0.01),
-            evaluate_candidate(bad_rust, c, "deepseek-0.6", ProviderKind::DeepSeek, 0.6, 0.01),
+            evaluate_candidate(
+                good_rust,
+                c,
+                "claude-0.3",
+                ProviderKind::Anthropic,
+                0.3,
+                0.05,
+            ),
+            evaluate_candidate(
+                mid_rust,
+                c,
+                "deepseek-0.3",
+                ProviderKind::DeepSeek,
+                0.3,
+                0.01,
+            ),
+            evaluate_candidate(
+                bad_rust,
+                c,
+                "deepseek-0.6",
+                ProviderKind::DeepSeek,
+                0.6,
+                0.01,
+            ),
         ];
 
         let compiled_count = candidates.iter().filter(|c| c.compiles).count();

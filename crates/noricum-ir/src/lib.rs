@@ -67,7 +67,7 @@ pub enum SemanticHint {
         kind: String,
         /// C functions/structs involved
         involved: Vec<String>,
-        /// Suggested Rust type (e.g., "Vec<T>", "HashMap<K, V>", "BTreeMap<K, V>")
+        /// Suggested Rust type (e.g., `Vec<T>`, `HashMap<K, V>`, `BTreeMap<K, V>`)
         rust_type: String,
     },
     /// Algorithm pattern detected
