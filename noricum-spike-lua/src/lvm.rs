@@ -746,9 +746,10 @@ impl LuaState {
     /// Dispatch a binary arithmetic opcode (R(A) := R(B) op R(C)).
     /// Reads the operands out of the current frame, calls
     /// [`crate::lobject::raw_arith`], writes the result back to
-    /// R(A). Returns `Err` on domain errors (e.g. integer
-    /// div-by-zero) and panics on "needs metamethod fallback"
-    /// because that path lands with a later commit.
+    /// R(A). Falls back to a binary metamethod (`__add`,
+    /// `__sub`, ...) when neither operand admits a raw
+    /// computation. Returns `Err` when raw_arith reports a
+    /// domain error (e.g. integer div-by-zero).
     fn exec_arith_binary(
         &mut self,
         base: u32,
@@ -766,15 +767,7 @@ impl LuaState {
                 self.current_thread_mut().stack[(base + a) as usize] = v;
                 Ok(())
             }
-            None => {
-                // Stage 5.5 punts metamethod fallback to the
-                // commit that introduces __add/__sub/... dispatch.
-                // Raising a runtime error is strictly wrong for
-                // well-formed Lua programs that rely on
-                // metamethods, but it's loud and diagnosable
-                // until the real path lands.
-                Err(LuaError::Runtime(TValue::Nil))
-            }
+            None => self.try_binary_metamethod(op, rb, rc, base + a),
         }
     }
 
@@ -799,7 +792,7 @@ impl LuaState {
                 self.current_thread_mut().stack[(base + a) as usize] = v;
                 Ok(())
             }
-            None => Err(LuaError::Runtime(TValue::Nil)),
+            None => self.try_binary_metamethod(op, rb, rc, base + a),
         }
     }
 
@@ -824,7 +817,7 @@ impl LuaState {
                 self.current_thread_mut().stack[(base + a) as usize] = v;
                 Ok(())
             }
-            None => Err(LuaError::Runtime(TValue::Nil)),
+            None => self.try_binary_metamethod(op, rb, immediate, base + a),
         }
     }
 
@@ -848,8 +841,89 @@ impl LuaState {
                 self.current_thread_mut().stack[(base + a) as usize] = v;
                 Ok(())
             }
-            None => Err(LuaError::Runtime(TValue::Nil)),
+            // Unary metamethods (__unm, __bnot) also receive two
+            // operand slots in C Lua — the operand is duplicated.
+            None => self.try_binary_metamethod(op, rb, rb, base + a),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Arithmetic metamethod dispatch (__add, __sub, __unm, ...).
+    //
+    // Matches `luaT_trybinTM` in ltm.c. Reads the metamethod from
+    // either operand (left first), pushes a scratch call frame,
+    // and writes the return value into `dest_slot`.
+    // ------------------------------------------------------------------
+
+    /// Map an [`ArithOp`] to the corresponding [`TagMethod`].
+    fn arith_tag_method(op: ArithOp) -> TagMethod {
+        match op {
+            ArithOp::Add => TagMethod::Add,
+            ArithOp::Sub => TagMethod::Sub,
+            ArithOp::Mul => TagMethod::Mul,
+            ArithOp::Mod => TagMethod::Mod,
+            ArithOp::Pow => TagMethod::Pow,
+            ArithOp::Div => TagMethod::Div,
+            ArithOp::IDiv => TagMethod::IDiv,
+            ArithOp::BAnd => TagMethod::BAnd,
+            ArithOp::BOr => TagMethod::BOr,
+            ArithOp::BXor => TagMethod::BXor,
+            ArithOp::Shl => TagMethod::Shl,
+            ArithOp::Shr => TagMethod::Shr,
+            ArithOp::Unm => TagMethod::Unm,
+            ArithOp::BNot => TagMethod::BNot,
+        }
+    }
+
+    /// Look up a binary (or unary) arithmetic metamethod on
+    /// either operand (left first, right as fallback), call it
+    /// as `metamethod(a, b)`, and write the return value into
+    /// `dest_slot`. Returns the original error shape when
+    /// neither operand provides the metamethod — that's a
+    /// genuine type error at the Lua level.
+    pub(crate) fn try_binary_metamethod(
+        &mut self,
+        op: ArithOp,
+        a: TValue,
+        b: TValue,
+        dest_slot: u32,
+    ) -> LuaResult<()> {
+        let event = Self::arith_tag_method(op);
+        let mut tm = self.global.get_metamethod(a, event);
+        if matches!(tm, TValue::Nil) {
+            tm = self.global.get_metamethod(b, event);
+        }
+        if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
+            return Err(LuaError::Runtime(TValue::Nil));
+        }
+        self.call_binary_metamethod(tm, a, b, dest_slot)
+    }
+
+    /// Invoke a binary metamethod `tm(a, b)` and land the
+    /// single return value in `dest_slot`. Uses a scratch stack
+    /// region above the current top.
+    fn call_binary_metamethod(
+        &mut self,
+        tm: TValue,
+        a: TValue,
+        b: TValue,
+        dest_slot: u32,
+    ) -> LuaResult<()> {
+        let saved_top = self.current_thread().top;
+        let func_slot = saved_top;
+        {
+            let thread = self.current_thread_mut();
+            thread.grow_stack(3);
+            thread.stack[func_slot as usize] = tm;
+            thread.stack[(func_slot + 1) as usize] = a;
+            thread.stack[(func_slot + 2) as usize] = b;
+            thread.top = func_slot + 3;
+        }
+        self.call_value(func_slot, 2, 1)?;
+        let result = self.current_thread().stack[func_slot as usize];
+        self.current_thread_mut().stack[dest_slot as usize] = result;
+        self.current_thread_mut().top = saved_top;
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -2507,6 +2581,168 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(10));
+    }
+
+    // ---- Stage 5.14 arithmetic metamethods ------------------------
+
+    /// Register `event` on `target`'s metatable. Allocates a
+    /// fresh metatable if needed.
+    fn install_metamethod(
+        state: &mut LuaState,
+        target: crate::contract::TableHandle,
+        event: TagMethod,
+        value: TValue,
+    ) {
+        let mt = match state.global.heap.table(target).metatable {
+            Some(h) => h,
+            None => {
+                let mt = state.global.heap.alloc_table(crate::contract::Table::default());
+                state.global.heap.table_mut(target).metatable = Some(mt);
+                mt
+            }
+        };
+        let name = state.global.tag_method_name(event);
+        state.global.table_set_shortstr(mt, name, value);
+    }
+
+    #[test]
+    fn add_metamethod_dispatches_when_operand_is_table() {
+        // __add = function(a, b) return 99 end
+        unsafe extern "C" fn add_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.push_integer(99);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let t = state.global.heap.alloc_table(crate::contract::Table::default());
+        install_metamethod(
+            &mut state,
+            t,
+            TagMethod::Add,
+            TValue::LightCFunction(add_fn as crate::contract::RawCFunction),
+        );
+
+        // Proto: R(0) := t; R(1) := 5; R(2) := R(0) + R(1); return R(2)
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadi(1, 5),
+                arith_binary(OpCode::OP_ADD, 2, 0, 1),
+                return1(2),
+            ],
+            vec![TValue::Table(t)],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(99));
+    }
+
+    #[test]
+    fn add_metamethod_consulted_on_right_operand_when_left_absent() {
+        // Left operand is 5 (no metamethod), right operand is a table
+        // with __add -> 77.
+        unsafe extern "C" fn add_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.push_integer(77);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let t = state.global.heap.alloc_table(crate::contract::Table::default());
+        install_metamethod(
+            &mut state,
+            t,
+            TagMethod::Add,
+            TValue::LightCFunction(add_fn as crate::contract::RawCFunction),
+        );
+
+        // Proto: R(0) := 5; R(1) := t; R(2) := R(0) + R(1); return R(2)
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadi(0, 5),
+                loadk(1, 0),
+                arith_binary(OpCode::OP_ADD, 2, 0, 1),
+                return1(2),
+            ],
+            vec![TValue::Table(t)],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(77));
+    }
+
+    #[test]
+    fn unm_metamethod_dispatched_on_table_operand() {
+        // __unm = function(t) return -42 end
+        unsafe extern "C" fn unm_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.push_integer(-42);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let t = state.global.heap.alloc_table(crate::contract::Table::default());
+        install_metamethod(
+            &mut state,
+            t,
+            TagMethod::Unm,
+            TValue::LightCFunction(unm_fn as crate::contract::RawCFunction),
+        );
+
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_UNM, 1, 0, 0, false),
+                return1(1),
+            ],
+            vec![TValue::Table(t)],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(-42));
+    }
+
+    #[test]
+    fn addk_variant_falls_through_to_metamethod() {
+        // __add returns sentinel 123; ADDK R(2) = R(0) + K[0]
+        // where K[0] is a float.
+        unsafe extern "C" fn add_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.push_integer(123);
+            1
+        }
+        let mut state = LuaState::new(0);
+        let t = state.global.heap.alloc_table(crate::contract::Table::default());
+        install_metamethod(
+            &mut state,
+            t,
+            TagMethod::Add,
+            TValue::LightCFunction(add_fn as crate::contract::RawCFunction),
+        );
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                arith_binary(OpCode::OP_ADDK, 1, 0, 1),
+                return1(1),
+            ],
+            vec![TValue::Table(t), TValue::Number(3.5)],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(123));
     }
 
     #[test]
