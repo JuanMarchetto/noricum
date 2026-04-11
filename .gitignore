@@ -13,11 +13,13 @@ persist.txt
 
 # Generated output
 *-output.log
+*-stderr.log
 *-report.html
 run*-output.log
 run*-report.html
 miniz_*-output.log
 miniz_*-report.html
+results/
 
 # Local working notes (not tracked)
 docs/private/
