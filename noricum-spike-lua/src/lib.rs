@@ -21,6 +21,7 @@
 pub mod contract;
 pub mod heap;
 pub mod lapi;
+pub mod lauxlib;
 pub mod lctype;
 pub mod lfunc;
 pub mod lgc;
