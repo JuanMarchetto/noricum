@@ -85,6 +85,8 @@ const OP_SETTABLE_U8: u8 = OpCode::OP_SETTABLE as u8;
 const OP_SETI_U8: u8 = OpCode::OP_SETI as u8;
 const OP_SETFIELD_U8: u8 = OpCode::OP_SETFIELD as u8;
 
+const OP_CALL_U8: u8 = OpCode::OP_CALL as u8;
+
 impl LuaState {
     /// Run the bytecode interpreter for the top call frame until
     /// it returns. Expects the frame's callable slot to hold a
@@ -354,6 +356,49 @@ impl LuaState {
                         _ => return Err(LuaError::Runtime(TValue::Nil)),
                     };
                     self.global.table_set(table_handle, key, rc);
+                }
+                OP_CALL_U8 => {
+                    // Nested function call from inside bytecode.
+                    //   R(A), R(A+1), ..., R(A+B-1) := R(A)(R(A+1), ...)
+                    // B == 0 means "args go up to current top".
+                    // C is encoded as n_returns + 1 (0 means
+                    // MULTRET, 1 means 0 returns, 2 means 1 return).
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    let c = getarg_c(instruction) as u32;
+
+                    let func_abs = base + a;
+                    let n_args = if b == 0 {
+                        self.current_thread()
+                            .top
+                            .saturating_sub(func_abs + 1)
+                    } else {
+                        b - 1
+                    };
+                    // call_value's precondition: top == func_abs + 1 + n_args.
+                    self.current_thread_mut().top = func_abs + 1 + n_args;
+
+                    let n_results: i16 = if c == 0 {
+                        -1
+                    } else {
+                        (c - 1) as i16
+                    };
+                    self.call_value(func_abs, n_args, n_results)?;
+
+                    // After the callee returns, restore the
+                    // caller's frame top so subsequent
+                    // instructions see their full register
+                    // window. The callee's results already sit
+                    // at R(A)..R(A + (n_results or actual)),
+                    // which is below this frame top.
+                    let caller_top = self
+                        .current_call_frame()
+                        .expect("after CALL: caller frame vanished")
+                        .top;
+                    if self.current_thread().top < caller_top {
+                        let thread = self.current_thread_mut();
+                        thread.top = caller_top;
+                    }
                 }
                 // Binary arithmetic opcodes — R(A) := R(B) OP R(C).
                 // Every variant dispatches through lobject::raw_arith
@@ -1236,5 +1281,156 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert!(state.is_nil(1));
+    }
+
+    // ---- Stage 5.8 OP_CALL ----------------------------------------
+
+    /// Helper: build a Proto from code + max_stack_size, without
+    /// pushing it — the caller stores the returned ProtoHandle in
+    /// an outer closure's constant pool.
+    fn make_inner_proto(
+        state: &mut LuaState,
+        code: Vec<u32>,
+        max_stack: u8,
+    ) -> crate::contract::ProtoHandle {
+        let proto = Proto {
+            max_stack_size: max_stack,
+            code,
+            ..Proto::default()
+        };
+        state.global.heap.alloc_proto(proto)
+    }
+
+    #[test]
+    fn op_call_invokes_light_c_function_from_bytecode() {
+        unsafe extern "C" fn c_forty_two(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.set_top(0);
+            state.push_integer(42);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        // R(0) = LOADK 0 (the c_forty_two light C function)
+        // CALL R(0), 1, 2  (0 args, 1 result)
+        // RETURN1 R(0)
+        let lcf = TValue::LightCFunction(c_forty_two as crate::contract::RawCFunction);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_CALL, 0, 1, 2, false),
+                return1(0),
+            ],
+            vec![lcf],
+            1,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn op_call_nested_lua_closure_returns_computed_value() {
+        // Outer function:
+        //   const[0] = inner_proto (an LClosure returning 7)
+        //   R(0) = LOADK 0  -- load inner closure TValue
+        //   CALL R(0), 1, 2
+        //   RETURN1 R(0)
+        //
+        // But we can't store an LClosure in the constant pool
+        // directly — closures are Heap objects. Instead, we
+        // alloc the inner LClosure up-front and plant it in
+        // the outer proto's constants as a TValue::LuaClosure.
+        let mut state = LuaState::new(0);
+        let inner_proto = make_inner_proto(
+            &mut state,
+            vec![loadi(0, 7), return1(0)],
+            1,
+        );
+        let inner_closure = state.global.heap.alloc_lclosure(crate::contract::LClosure {
+            proto: inner_proto,
+            upvalues: vec![],
+        });
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_CALL, 0, 1, 2, false),
+                return1(0),
+            ],
+            vec![TValue::LuaClosure(inner_closure)],
+            1,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(7));
+    }
+
+    #[test]
+    fn op_call_passes_arguments_to_nested_closure() {
+        // Inner function: R(0) and R(1) are args; returns R(0) + R(1).
+        let mut state = LuaState::new(0);
+        let inner_proto = make_inner_proto(
+            &mut state,
+            vec![
+                arith_binary(OpCode::OP_ADD, 2, 0, 1),
+                return1(2),
+            ],
+            3,
+        );
+        let inner_closure = state.global.heap.alloc_lclosure(crate::contract::LClosure {
+            proto: inner_proto,
+            upvalues: vec![],
+        });
+        // Outer: R(0) = inner; R(1) = 10; R(2) = 20;
+        //        CALL R(0), 3, 2; RETURN1 R(0)
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadi(1, 10),
+                loadi(2, 20),
+                create_abck(OpCode::OP_CALL, 0, 3, 2, false),
+                return1(0),
+            ],
+            vec![TValue::LuaClosure(inner_closure)],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(30));
+    }
+
+    #[test]
+    fn op_call_with_zero_results_discards_callee_returns() {
+        // Call a function that returns 42, but ask for 0 results.
+        // R(0) is overwritten with nothing visible at the top.
+        let mut state = LuaState::new(0);
+        let inner_proto = make_inner_proto(
+            &mut state,
+            vec![loadi(0, 42), return1(0)],
+            1,
+        );
+        let inner_closure = state.global.heap.alloc_lclosure(crate::contract::LClosure {
+            proto: inner_proto,
+            upvalues: vec![],
+        });
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                // CALL R(0), 1 arg-slot (no args), 0 results
+                //   B=1 (0 args), C=1 (0 results)
+                create_abck(OpCode::OP_CALL, 0, 1, 1, false),
+                // Now R(0) should hold nil (filled by finish_vm_return).
+                // Load a sentinel and return it.
+                loadi(1, 999),
+                return1(1),
+            ],
+            vec![TValue::LuaClosure(inner_closure)],
+            2,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(999));
     }
 }
