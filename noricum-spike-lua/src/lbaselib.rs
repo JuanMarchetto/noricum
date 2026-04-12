@@ -285,20 +285,30 @@ unsafe extern "C" fn ipairs_aux(state: *mut LuaState) -> std::os::raw::c_int {
     // args: (t, i). Return (i+1, t[i+1]) while non-nil, else nil.
     let i = state.to_integer_x(2).unwrap_or(0);
     let next_i = i + 1;
-    // Fetch t[next_i] via raw_get_i (which pushes the result).
+    // Push next_i FIRST so it becomes the first return value.
+    state.push_integer(next_i);
+    // Then push t[next_i] as the second.
     state.raw_get_i(1, next_i);
-    // If nil, return just nil. Otherwise return (next_i, value).
+    // If the value was nil, just return nil (discard next_i).
+    // Signal end-of-sequence with a single nil.
     let top_idx = state.get_top() as i32;
-    let is_nil = state.type_at(top_idx) == 0;
-    if is_nil {
+    if state.type_at(top_idx) == 0 {
+        // Reset: return just one nil. We need to remove next_i
+        // and nil from the stack; push_nil after isn't needed
+        // because the current top IS the nil value.
+        // Actually, return count = 1 and top-1 value is nil.
+        // We rely on the caller's finish_c_call to take the
+        // last `n_returned` values. We pushed 2 but want 1.
+        // Move the nil down over next_i.
+        let base = state.frame_base_index().unwrap_or(0);
+        // Replace the slot at base (where next_i sits) with nil.
+        state
+            .current_thread_mut()
+            .stack[base as usize] = TValue::Nil;
+        // Drop the top (the pushed nil).
+        state.set_top(1);
         1
     } else {
-        // Need to push next_i BEFORE the value, but the value is
-        // already at the top. Workaround: clear top to 0, push
-        // next_i, then re-fetch.
-        state.set_top(0);
-        state.push_integer(next_i);
-        state.raw_get_i(1, next_i);
         2
     }
 }

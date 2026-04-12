@@ -13,7 +13,7 @@ use crate::lcode::{self, BinOpr, UnOpr, NO_JUMP};
 use crate::llex::{
     LexState, SemInfo, TK_AND, TK_BREAK, TK_CONCAT, TK_DO, TK_DOTS,
     TK_ELSE, TK_ELSEIF, TK_END, TK_EOS, TK_EQ, TK_FALSE, TK_FOR, TK_FUNCTION,
-    TK_GE, TK_IDIV, TK_IF, TK_INT, TK_LE, TK_LOCAL, TK_NAME,
+    TK_GE, TK_IDIV, TK_IF, TK_IN, TK_INT, TK_LE, TK_LOCAL, TK_NAME,
     TK_NE, TK_NIL, TK_NOT, TK_OR, TK_REPEAT, TK_RETURN, TK_SHL, TK_SHR,
     TK_STRING, TK_THEN, TK_TRUE, TK_UNTIL, TK_WHILE, TK_FLT,
 };
@@ -411,29 +411,56 @@ fn localstat(ls: &mut LexState, fs: &mut FuncState) {
         let _vidx = new_local(fs, name);
     }
     let n_values = if testnext(ls, b'=' as i32) {
-        // RHS values: comma-separated expressions.
-        let mut count = 0;
+        // Collect all RHS expressions, then discharge with
+        // multi-return expansion on the last call so
+        // `local a, b, c = f()` captures all returns.
+        let mut exprs: Vec<ExprDesc> = Vec::new();
         loop {
             let mut e = ExprDesc::void();
             expr(ls, fs, &mut e);
-            lcode::exp2nextreg(fs, &mut e);
-            count += 1;
+            exprs.push(e);
             if !testnext(ls, b',' as i32) {
                 break;
             }
         }
-        count
+        let n_exprs = exprs.len();
+        let wanted = nvars as i32;
+        for (i, e) in exprs.iter_mut().enumerate() {
+            if i + 1 < n_exprs {
+                lcode::exp2nextreg(fs, e);
+            } else if e.k == ExpKind::Call && wanted > n_exprs as i32 {
+                // Last expression is a call, caller wants more
+                // values than we have — expand results.
+                let call_pc = e.info as usize;
+                let func_reg = ((fs.proto.code[call_pc] >> 7) & 0xFF) as u8;
+                let extra = wanted - (n_exprs as i32 - 1);
+                lcode::set_returns(fs, e, extra);
+                fs.freereg = func_reg + extra as u8;
+            } else {
+                lcode::exp2nextreg(fs, e);
+            }
+        }
+        // If last was a multi-return call, we count nvars'
+        // worth of values (not n_exprs).
+        let last_is_expanded_call = n_exprs >= 1
+            && n_exprs < nvars
+            && exprs.last().map(|e| e.k == ExpKind::Call).unwrap_or(false);
+        if last_is_expanded_call {
+            wanted
+        } else {
+            n_exprs as i32
+        }
     } else {
         0
     };
     // Pad with nil up to nvars.
-    for _ in n_values..nvars {
+    for _ in (n_values as usize)..nvars {
         let mut e = ExprDesc::init(ExpKind::Nil, 0);
         lcode::exp2nextreg(fs, &mut e);
     }
     // Discard extra values (nvalues > nvars).
-    if n_values > nvars {
-        fs.freereg = (fs.actvar.len() - (n_values - nvars)) as u8;
+    if n_values as usize > nvars {
+        fs.freereg = (fs.actvar.len() - (n_values as usize - nvars)) as u8;
     }
     adjust_locals(fs, nvars as i32);
 }
@@ -565,8 +592,165 @@ fn forstat(ls: &mut LexState, fs: &mut FuncState) {
     let name = check_name(ls);
     match ls.t.token {
         x if x == b'=' as i32 => fornum(ls, fs, name),
+        x if x == b',' as i32 || x == TK_IN => forlist(ls, fs, name),
         _ => ls.syntax_error("'=' or 'in' expected"),
     }
+}
+
+/// Generic-for: `for v1, v2, ... in iter[, state[, control]] do body end`.
+fn forlist(ls: &mut LexState, fs: &mut FuncState, first_var: StringHandle) {
+    let base = fs.freereg;
+
+    // Collect loop variable names (at least one, first_var).
+    let mut var_names = vec![first_var];
+    while testnext(ls, b',' as i32) {
+        var_names.push(check_name(ls));
+    }
+    check_next(ls, TK_IN);
+
+    // Layout (Lua 5.5):
+    //   R(base+0) = iter (hidden)
+    //   R(base+1) = state (hidden)
+    //   R(base+2) = closing (hidden, stays nil)
+    //   R(base+3) = first loop var (also serves as "control"
+    //               variable — after TFORPREP swap, the initial
+    //               control value ends up here and subsequent
+    //               TFORCALLs overwrite it with their first
+    //               return)
+    //   R(base+4..) = additional loop vars
+    let hidden = {
+        let gs = unsafe { &mut *ls.gs };
+        gs.new_string(b"(for state)", gs.hash_seed)
+    };
+    new_local(fs, hidden); // iterator func
+    new_local(fs, hidden); // state
+    new_local(fs, hidden); // closing
+    // Do NOT adjust_locals here — during RHS parsing, these
+    // slots are treated as temporaries so the compiler places
+    // results directly at R(base), R(base+1), R(base+2).
+    // Keep freereg at `base` so the RHS call lands at R(base).
+
+    // Parse the RHS: 1..3 expressions (iter [, state [, control]]).
+    // If only one expression and it's a function call, expand
+    // up to 3 results. Otherwise each expression contributes 1.
+    let mut exprs: Vec<ExprDesc> = Vec::new();
+    loop {
+        let mut e = ExprDesc::void();
+        expr(ls, fs, &mut e);
+        exprs.push(e);
+        if !testnext(ls, b',' as i32) {
+            break;
+        }
+    }
+    let n_exprs = exprs.len();
+    // The number of result "slots" we want to fill is 3 (iter,
+    // state, control). Closing slot stays nil, filled below.
+    let wanted = 3;
+    // Discharge all-but-last as single-result. For the last, if
+    // it's a call, request (wanted - n_exprs + 1) results so the
+    // total count matches `wanted`.
+    for (i, e) in exprs.iter_mut().enumerate() {
+        if i + 1 < n_exprs {
+            lcode::exp2nextreg(fs, e);
+        } else {
+            if e.k == ExpKind::Call {
+                let extra = wanted - (n_exprs as i32 - 1);
+                // Extract the function register from the A field
+                // of the CALL instruction.
+                let call_pc = e.info as usize;
+                let func_reg = ((fs.proto.code[call_pc] >> 7) & 0xFF) as u8;
+                lcode::set_returns(fs, e, extra);
+                // After CALL with C = extra + 1, the results sit
+                // at R(func_reg)..R(func_reg + extra - 1).
+                // freereg should be func_reg + extra.
+                fs.freereg = func_reg + extra as u8;
+            } else {
+                lcode::exp2nextreg(fs, e);
+            }
+        }
+    }
+    // Pad with nil up to base+4 — 3 hidden + the first loop
+    // var slot (which receives the RHS's 3rd value as initial
+    // control, or nil if ipairs/pairs only returned 2 values).
+    while fs.freereg < base + 4 {
+        let mut e = ExprDesc::init(ExpKind::Nil, 0);
+        lcode::exp2nextreg(fs, &mut e);
+    }
+    fs.freereg = base + 4;
+    check_next(ls, TK_DO);
+
+    // Now activate the 3 hidden locals.
+    adjust_locals(fs, 3);
+
+    // TFORPREP skips to the TFORCALL at the end.
+    let tforprep_pc = lcode::emit_abx(
+        fs,
+        crate::lopcodes::OpCode::OP_TFORPREP,
+        base as u32,
+        0,
+    );
+
+    // Declare loop variables (they live at R(base+3..)).
+    for name in &var_names {
+        new_local(fs, *name);
+    }
+    let nvars = var_names.len();
+    adjust_locals(fs, nvars as i32);
+    // Align freereg with actvar.len() so subsequent `local x = expr`
+    // inside the body places x at actvar.len() consistently.
+    fs.freereg = fs.actvar.len() as u8;
+
+    // Loop body.
+    fs.blocks.push(BlockCnt {
+        firstlabel: fs.labels.len(),
+        firstgoto: fs.gotos.len(),
+        nactvar: fs.nactvar,
+        upval: false,
+        is_loop: 1,
+        inside_tbc: false,
+        breaks: Vec::new(),
+    });
+    let loop_body_start = fs.pc;
+    statlist(ls, fs);
+    check_match(ls, TK_END, TK_FOR);
+    let bl = fs.blocks.pop().expect("forlist: block missing");
+
+    // Patch TFORPREP Bx so it jumps forward to just before
+    // TFORCALL (the next instruction after the FORPREP).
+    let tforcall_pc = fs.pc as u32;
+    let forprep_offset = tforcall_pc - (tforprep_pc as u32 + 1);
+    let instr = &mut fs.proto.code[tforprep_pc as usize];
+    *instr = (*instr & 0x7FFF) | (forprep_offset << 15);
+
+    // TFORCALL: R(base+3)..R(base+3+nvars) := iter(state, ctrl).
+    lcode::emit_abc(
+        fs,
+        crate::lopcodes::OpCode::OP_TFORCALL,
+        base as u32,
+        0,
+        nvars as u32,
+        false,
+    );
+    // TFORLOOP: if R(base+3) != nil then ctrl = R(base+3); pc -= Bx.
+    let back_offset = (fs.pc + 1 - loop_body_start as i32) as u32;
+    lcode::emit_abx(
+        fs,
+        crate::lopcodes::OpCode::OP_TFORLOOP,
+        base as u32,
+        back_offset,
+    );
+
+    // Patch breaks to land post-loop.
+    let here = lcode::get_label(fs);
+    for brk in &bl.breaks {
+        lcode::patch_list(fs, *brk, here);
+    }
+
+    // Clean up: pop the 4 hidden + nvars loop-variable locals.
+    let total = 4 + nvars as i16;
+    fs.nactvar -= total;
+    fs.actvar.truncate(fs.actvar.len() - total as usize);
+    fs.freereg = base;
 }
 
 fn fornum(ls: &mut LexState, fs: &mut FuncState, loop_var: StringHandle) {
