@@ -27,6 +27,7 @@ pub mod ldo;
 pub mod lfunc;
 pub mod lgc;
 pub mod lmem;
+pub mod llex;
 pub mod lobject;
 pub mod lopcodes;
 pub mod lstate;
