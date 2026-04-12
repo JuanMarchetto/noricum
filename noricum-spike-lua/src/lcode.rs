@@ -245,19 +245,19 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExprDesc) {
             reserve_regs(fs, 1);
         }
         ExpKind::Call => {
-            // Call already placed result at e.info.
-            // Set returns to 1 if needed.
+            // Call already placed result at function slot.
+            // Patch C (bits 24..31) to 2 meaning "1 result".
             let instr = &mut fs.proto.code[e.info as usize];
-            // Patch C field to 2 (1 result).
-            *instr = (*instr & !(0xFF << 16)) | (2 << 16);
+            *instr = (*instr & !(0xFFu32 << 24)) | (2u32 << 24);
             e.k = ExpKind::NonReloc;
-            // Result is at the function slot (arg A of CALL).
+            // Result is at the function slot (arg A of CALL, bits 7..14).
             e.info = ((*instr >> 7) & 0xFF) as i32;
         }
         ExpKind::VarArg => {
-            // Already emitted VARARG; patch C to 2 (1 result).
+            // Already emitted VARARG; patch C (bits 24..31) to 2
+            // (request 1 result).
             let instr = &mut fs.proto.code[e.info as usize];
-            *instr = (*instr & !(0xFF << 16)) | (2 << 16);
+            *instr = (*instr & !(0xFFu32 << 24)) | (2u32 << 24);
             e.k = ExpKind::Reloc;
         }
         _ => {} // already discharged or constant
@@ -388,7 +388,7 @@ pub fn code_call(fs: &mut FuncState, e: &mut ExprDesc, nargs: i32) {
 pub fn set_returns(fs: &mut FuncState, e: &mut ExprDesc, nresults: i32) {
     if e.k == ExpKind::Call {
         let instr = &mut fs.proto.code[e.info as usize];
-        *instr = (*instr & !(0xFF << 16)) | (((nresults + 1) as u32) << 16);
+        *instr = (*instr & !(0xFFu32 << 24)) | (((nresults + 1) as u32) << 24);
     }
 }
 

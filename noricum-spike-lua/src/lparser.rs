@@ -332,8 +332,20 @@ fn retstat(ls: &mut LexState, fs: &mut FuncState) {
 
 fn localstat(ls: &mut LexState, fs: &mut FuncState) {
     ls.next_token(); // skip LOCAL
+    if ls.t.token == TK_FUNCTION {
+        // local function f() ... end
+        ls.next_token();
+        let name = check_name(ls);
+        let _vidx = new_local(fs, name);
+        adjust_locals(fs, 1);
+        let mut e = ExprDesc::void();
+        body(ls, fs, &mut e, false, ls.linenumber);
+        // The closure is already at fs.freereg - 1 (from reserve_regs
+        // in body()). That slot IS the local's register.
+        return;
+    }
     let name = check_name(ls);
-    let vidx = new_local(fs, name);
+    let _vidx = new_local(fs, name);
     if testnext(ls, b'=' as i32) {
         let mut e = ExprDesc::void();
         expr(ls, fs, &mut e);
@@ -469,13 +481,121 @@ fn fornum(ls: &mut LexState, fs: &mut FuncState) {
 }
 
 fn funcstat(ls: &mut LexState, fs: &mut FuncState) {
+    let line = ls.linenumber;
     ls.next_token(); // skip FUNCTION
-    // Simplified: just parse "function name() ... end" as assignment.
+    // Parse the target: name [ . name ]* [ : method ]
     let mut v = ExprDesc::void();
     let name = check_name(ls);
     singlevar(ls, fs, &mut v, name);
-    // TODO: body parsing
-    ls.syntax_error("function definitions not yet implemented in parser");
+    while ls.t.token == b'.' as i32 {
+        ls.next_token();
+        let field_name = check_name(ls);
+        lcode::field_access(fs, &mut v, field_name);
+    }
+    let mut body_e = ExprDesc::void();
+    body(ls, fs, &mut body_e, false, line);
+    lcode::store_var(fs, &mut v, &mut body_e);
+}
+
+/// Parse a function body: `( [params] ) [block] end`.
+/// `is_method` (true for `function obj:m()`) adds `self` as the
+/// first implicit parameter.
+fn body(ls: &mut LexState, outer_fs: &mut FuncState, e: &mut ExprDesc, is_method: bool, line: i32) {
+    // Save the inner proto handle idx in outer's inner_protos.
+    let inner_proto_idx = outer_fs.proto.inner_protos.len();
+
+    // Build the inner function.
+    let mut inner_fs = FuncState::new();
+    inner_fs.proto.line_defined = line;
+
+    check_next(ls, b'(' as i32);
+    let mut num_params: u8 = 0;
+    if is_method {
+        // Implicit 'self' parameter.
+        let self_name = {
+            let gs = unsafe { &mut *ls.gs };
+            gs.new_string(b"self", gs.hash_seed)
+        };
+        new_local(&mut inner_fs, self_name);
+        num_params += 1;
+    }
+    if ls.t.token != b')' as i32 {
+        loop {
+            match ls.t.token {
+                TK_NAME => {
+                    let pname = check_name(ls);
+                    new_local(&mut inner_fs, pname);
+                    num_params += 1;
+                }
+                TK_DOTS => {
+                    ls.next_token();
+                    inner_fs.proto.is_vararg = true;
+                    break;
+                }
+                _ => ls.syntax_error("name or '...' expected"),
+            }
+            if !testnext(ls, b',' as i32) {
+                break;
+            }
+        }
+    }
+    check_next(ls, b')' as i32);
+
+    inner_fs.proto.num_params = num_params;
+    inner_fs.nactvar = num_params as i16;
+    inner_fs.freereg = num_params;
+    inner_fs.proto.max_stack_size = num_params.max(2);
+
+    // Open the main block.
+    inner_fs.blocks.push(BlockCnt {
+        firstlabel: 0,
+        firstgoto: 0,
+        nactvar: num_params as i16,
+        upval: false,
+        is_loop: 0,
+        inside_tbc: false,
+    });
+
+    // Parse the body.
+    if inner_fs.proto.is_vararg {
+        // Emit OP_VARARGPREP at the start of vararg functions.
+        lcode::emit_abc(
+            &mut inner_fs,
+            crate::lopcodes::OpCode::OP_VARARGPREP,
+            num_params as u32,
+            0,
+            0,
+            false,
+        );
+    }
+    statlist(ls, &mut inner_fs);
+    check_match(ls, TK_END, TK_FUNCTION);
+
+    // Emit final RETURN0 if the body didn't end with RETURN.
+    lcode::code_return(&mut inner_fs, 0, 0);
+
+    inner_fs.proto.last_line_defined = ls.linenumber;
+    inner_fs.proto.max_stack_size = inner_fs.proto.max_stack_size.max(inner_fs.freereg);
+
+    // Allocate the inner proto on the heap.
+    let inner_proto = {
+        let gs = unsafe { &mut *ls.gs };
+        gs.heap.alloc_proto(inner_fs.proto)
+    };
+    outer_fs.proto.inner_protos.push(inner_proto);
+
+    // Emit OP_CLOSURE in the outer function.
+    let reg = outer_fs.freereg;
+    let pc = lcode::emit_abx(
+        outer_fs,
+        crate::lopcodes::OpCode::OP_CLOSURE,
+        reg as u32,
+        inner_proto_idx as u32,
+    );
+    lcode::reserve_regs(outer_fs, 1);
+    e.k = ExpKind::NonReloc;
+    e.info = reg as i32;
+    let _ = pc;
 }
 
 fn block(ls: &mut LexState, fs: &mut FuncState) {
@@ -615,16 +735,106 @@ fn simpleexp(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
             ls.next_token();
         }
         x if x == b'{' as i32 => {
-            // Table constructor — simplified stub.
-            ls.syntax_error("table constructors not yet implemented");
+            constructor(ls, fs, e);
         }
         TK_FUNCTION => {
-            ls.syntax_error("function expressions not yet implemented");
+            ls.next_token();
+            body(ls, fs, e, false, ls.linenumber);
         }
         _ => {
             suffixedexp(ls, fs, e);
         }
     }
+}
+
+/// Table constructor: `{ [fields] }`.
+/// Each field is either:
+///   - `name = expr` → set name key
+///   - `[expr] = expr` → set expression key
+///   - `expr` → array-style positional field
+fn constructor(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
+    ls.next_token(); // skip '{'
+    let reg = fs.freereg as u32;
+    // Emit OP_NEWTABLE. A = reg, B = array hint, C = hash hint,
+    // followed by an OP_EXTRAARG.
+    lcode::emit_abc(fs, crate::lopcodes::OpCode::OP_NEWTABLE, reg, 0, 0, false);
+    lcode::emit(
+        fs,
+        crate::lopcodes::create_abx(crate::lopcodes::OpCode::OP_EXTRAARG, 0, 0),
+    );
+    lcode::reserve_regs(fs, 1);
+
+    let mut array_count: u32 = 0; // positional fields seen
+    let mut array_pending: u32 = 0; // positional fields awaiting SETLIST
+    while ls.t.token != b'}' as i32 {
+        if ls.t.token == b'[' as i32 {
+            // [expr] = expr
+            ls.next_token();
+            let mut key = ExprDesc::void();
+            expr(ls, fs, &mut key);
+            check_next(ls, b']' as i32);
+            check_next(ls, b'=' as i32);
+            let mut val = ExprDesc::void();
+            expr(ls, fs, &mut val);
+            let mut target = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+            lcode::indexed(fs, &mut target, &mut key);
+            lcode::store_var(fs, &mut target, &mut val);
+            fs.freereg = (reg + 1 + array_pending) as u8;
+        } else if ls.t.token == TK_NAME
+            && peek_next_is_equals(ls)
+        {
+            // name = expr
+            let name = check_name(ls);
+            check_next(ls, b'=' as i32);
+            let mut val = ExprDesc::void();
+            expr(ls, fs, &mut val);
+            let mut target = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+            lcode::field_access(fs, &mut target, name);
+            lcode::store_var(fs, &mut target, &mut val);
+            fs.freereg = (reg + 1 + array_pending) as u8;
+        } else {
+            // positional
+            let mut val = ExprDesc::void();
+            expr(ls, fs, &mut val);
+            lcode::exp2nextreg(fs, &mut val);
+            array_count += 1;
+            array_pending += 1;
+        }
+        if !testnext(ls, b',' as i32) && !testnext(ls, b';' as i32) {
+            break;
+        }
+    }
+    check_match(ls, b'}' as i32, b'{' as i32);
+
+    if array_pending > 0 {
+        // Emit SETLIST to move positional fields into the table.
+        lcode::emit(
+            fs,
+            crate::lopcodes::create_vabck(
+                crate::lopcodes::OpCode::OP_SETLIST,
+                reg,
+                array_pending,
+                0,
+                false,
+            ),
+        );
+        fs.freereg = (reg + 1) as u8;
+        let _ = array_count;
+    }
+
+    *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+}
+
+/// Peek whether the token *after* the current TK_NAME is `=`.
+/// Used to disambiguate `{name = expr}` from `{name}`.
+fn peek_next_is_equals(ls: &mut LexState) -> bool {
+    let saved = ls.t.clone();
+    ls.lookahead = crate::llex::Token::eos();
+    let next = ls.lookahead_token();
+    // Don't consume the lookahead; it remains in ls.lookahead
+    // for next_token() to pick up.
+    let _ = saved;
+    next == b'=' as i32
 }
 
 fn suffixedexp(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
@@ -823,7 +1033,10 @@ fn token_name(t: i32) -> &'static str {
 }
 
 fn new_local(fs: &mut FuncState, name: StringHandle) -> usize {
-    let ridx = fs.freereg;
+    // Assign the next-free register to this local. For function
+    // parameters we call new_local before bumping nactvar, so the
+    // ridx is the position in the actvar list (index).
+    let ridx = fs.actvar.len() as u8;
     let idx = fs.actvar.len();
     fs.actvar.push(ActiveVar {
         name: Some(name),
@@ -917,6 +1130,56 @@ mod tests {
         state.current_thread_mut().push(TValue::LuaClosure(closure));
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(0));
+    }
+
+    #[test]
+    fn parse_table_constructor_empty() {
+        let mut state = LuaState::new(0);
+        let closure = parse(&mut state, b"local t = {}; return t[1]", b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        // t[1] on an empty table returns nil.
+        assert!(state.is_nil(1));
+    }
+
+    #[test]
+    fn parse_table_positional_fields() {
+        let mut state = LuaState::new(0);
+        let closure =
+            parse(&mut state, b"local t = {10, 20, 30}; return t[2]", b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(20));
+    }
+
+    #[test]
+    fn parse_table_named_field() {
+        let mut state = LuaState::new(0);
+        let closure =
+            parse(&mut state, b"local t = {x = 42}; return t.x", b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn parse_local_function_and_call() {
+        let mut state = LuaState::new(0);
+        let src = b"local function f(x) return x + 1 end\nreturn f(41)";
+        let closure = parse(&mut state, src, b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn parse_function_with_two_args() {
+        let mut state = LuaState::new(0);
+        let src = b"local function add(a, b) return a + b end\nreturn add(10, 32)";
+        let closure = parse(&mut state, src, b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
     }
 
     #[test]
