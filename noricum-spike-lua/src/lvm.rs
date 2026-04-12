@@ -176,8 +176,11 @@ impl LuaState {
                 let closure = match self.current_thread().stack[func_slot as usize] {
                     TValue::LuaClosure(h) => h,
                     other => panic!(
-                        "execute: frame func slot holds non-LClosure ({:?})",
-                        other
+                        "execute: frame func slot ({}) holds non-LClosure ({:?}); top={} stack[0..10]={:?}",
+                        func_slot,
+                        other,
+                        self.current_thread().top,
+                        &self.current_thread().stack[..10.min(self.current_thread().stack.len())]
                     ),
                 };
                 let proto_handle = self.global.heap.lclosure(closure).proto;
@@ -1172,6 +1175,48 @@ impl LuaState {
         uv
     }
 
+    /// Close all open upvalues that reference a stack slot at or
+    /// above `level`. Each such upvalue captures the current
+    /// stack value and transitions from Open to Closed. This is
+    /// called at function return and at block exit to preserve
+    /// the invariant that no closure holds a dangling stack
+    /// reference once the frame is popped.
+    pub(crate) fn close_upvalues(&mut self, level: u32) {
+        let to_close: Vec<crate::contract::UpValHandle> = {
+            let thread = self.current_thread();
+            thread
+                .open_upvals
+                .iter()
+                .copied()
+                .filter(|uv_h| {
+                    if let UpValState::Open { stack_index, .. } =
+                        &self.global.heap.upval(*uv_h).state
+                    {
+                        *stack_index >= level
+                    } else {
+                        false
+                    }
+                })
+                .collect()
+        };
+        for uv_h in &to_close {
+            let current_val =
+                if let UpValState::Open { stack_index, .. } =
+                    &self.global.heap.upval(*uv_h).state
+                {
+                    let si = *stack_index as usize;
+                    self.current_thread().stack[si]
+                } else {
+                    continue;
+                };
+            self.global.heap.upval_mut(*uv_h).state =
+                UpValState::Closed(current_val);
+        }
+        // Remove closed entries from open_upvals.
+        let thread = self.current_thread_mut();
+        thread.open_upvals.retain(|uv_h| !to_close.contains(uv_h));
+    }
+
     // ------------------------------------------------------------------
     // Vararg handling — OP_VARARGPREP / OP_VARARG.
     //
@@ -1903,6 +1948,9 @@ impl LuaState {
         n_returned: u32,
         n_expected: i16,
     ) {
+        // Close any open upvalues captured from this frame
+        // BEFORE the frame's stack slots are reclaimed.
+        self.close_upvalues(base);
         {
             let thread = self.current_thread_mut();
             let src_start = base + first_reg;

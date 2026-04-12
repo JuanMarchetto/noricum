@@ -258,18 +258,23 @@ impl LuaState {
         n_args: u32,
         n_results: i16,
     ) -> ThreadStatus {
+        // Remember the frame depth so we can unwind any frames
+        // pushed by the errored call tree.
+        let saved_depth = self.call_depth();
+        let _ = n_results;
         match self.call_value(func_slot, n_args, n_results) {
             Ok(()) => ThreadStatus::Ok,
             Err(err) => {
                 let status = err.matching_status();
                 let err_value = match err {
                     LuaError::Runtime(v) => v,
-                    // Non-runtime errors don't carry a value
-                    // payload yet. Leave the slot as nil; Stage
-                    // 5.4 will upgrade the other variants with
-                    // formatted message strings.
                     _ => TValue::Nil,
                 };
+                // Pop any frames that were pushed during the
+                // errored call and never unwound.
+                while self.call_depth() > saved_depth {
+                    let _ = self.pop_call_frame();
+                }
                 // Reset the stack back to the call site and
                 // push the error object where the caller
                 // expects to find it.
