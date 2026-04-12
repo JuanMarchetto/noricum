@@ -121,6 +121,10 @@ const OP_SETUPVAL_U8: u8 = OpCode::OP_SETUPVAL as u8;
 const OP_CONCAT_U8: u8 = OpCode::OP_CONCAT as u8;
 const OP_LEN_U8: u8 = OpCode::OP_LEN as u8;
 
+const OP_TFORPREP_U8: u8 = OpCode::OP_TFORPREP as u8;
+const OP_TFORCALL_U8: u8 = OpCode::OP_TFORCALL as u8;
+const OP_TFORLOOP_U8: u8 = OpCode::OP_TFORLOOP as u8;
+
 const OP_VARARG_U8: u8 = OpCode::OP_VARARG as u8;
 const OP_VARARGPREP_U8: u8 = OpCode::OP_VARARGPREP as u8;
 
@@ -774,6 +778,72 @@ impl LuaState {
                     };
                     self.finish_vm_return(func_slot, base, a, n_to_return, n_expected);
                     return Ok(());
+                }
+                OP_TFORPREP_U8 => {
+                    // Generic-for prep: swap R(A+2) ↔ R(A+3)
+                    // (closing ↔ control), then jump forward by
+                    // Bx to the TFORCALL at the bottom of the
+                    // loop body. TBC upvalue creation skipped
+                    // for now (deferred until close semantics
+                    // are implemented).
+                    let a = getarg_a(instruction) as u32;
+                    let bx = getarg_bx(instruction);
+                    {
+                        let thread = self.current_thread_mut();
+                        let slot2 = (base + a + 2) as usize;
+                        let slot3 = (base + a + 3) as usize;
+                        thread.stack.swap(slot2, slot3);
+                    }
+                    let frame_mut = self
+                        .current_thread_mut()
+                        .frames
+                        .last_mut()
+                        .expect("TFORPREP: frame vanished");
+                    frame_mut.saved_pc =
+                        ((frame_mut.saved_pc as i32) + bx) as u32;
+                }
+                OP_TFORCALL_U8 => {
+                    // Call the iterator:
+                    //   R(A+3) = R(A), R(A+4) = R(A+1), R(A+5) = R(A+3_old_ctrl)
+                    //   R(A+3), ..., R(A+3+C) := call(R(A+3), 2 args, C results)
+                    let a = getarg_a(instruction) as u32;
+                    let c = getarg_c(instruction) as u32;
+                    // Read originals before overwriting.
+                    let ctrl = self.current_thread().stack[(base + a + 3) as usize];
+                    let state = self.current_thread().stack[(base + a + 1) as usize];
+                    let func = self.current_thread().stack[(base + a) as usize];
+                    {
+                        let thread = self.current_thread_mut();
+                        thread.stack[(base + a + 5) as usize] = ctrl;
+                        thread.stack[(base + a + 4) as usize] = state;
+                        thread.stack[(base + a + 3) as usize] = func;
+                        thread.top = base + a + 3 + 3;
+                    }
+                    let n_results: i16 = if c == 0 { -1 } else { c as i16 };
+                    self.call_value(base + a + 3, 2, n_results)?;
+                    // Restore caller frame top.
+                    let caller_top = self
+                        .current_call_frame()
+                        .expect("after TFORCALL: caller frame vanished")
+                        .top;
+                    if self.current_thread().top < caller_top {
+                        self.current_thread_mut().top = caller_top;
+                    }
+                }
+                OP_TFORLOOP_U8 => {
+                    // if R(A+3) != nil then pc -= Bx (continue loop).
+                    let a = getarg_a(instruction) as u32;
+                    let bx = getarg_bx(instruction);
+                    let r_a3 = self.current_thread().stack[(base + a + 3) as usize];
+                    if !matches!(r_a3, TValue::Nil) {
+                        let frame_mut = self
+                            .current_thread_mut()
+                            .frames
+                            .last_mut()
+                            .expect("TFORLOOP: frame vanished");
+                        frame_mut.saved_pc =
+                            ((frame_mut.saved_pc as i32) - bx) as u32;
+                    }
                 }
                 OP_VARARGPREP_U8 => {
                     // Relocate the function + fixed params above
@@ -3492,6 +3562,76 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    // ---- Stage 5.18 generic-for ------------------------------------
+
+    #[test]
+    fn generic_for_iterates_with_c_function_iterator() {
+        // Simulates: for v in iter, state, 0 do sum = sum + v end
+        // where iter(state, control) returns control + 1 while <= 3,
+        // then nil. Expect sum = 1 + 2 + 3 = 6.
+        //
+        // Stack layout:
+        // R(0) = iter (light C function)
+        // R(1) = state (nil, unused)
+        // R(2) = closing var (nil, unused by our iter)
+        // R(3) = control = 0 (initial)
+        // R(4) = sum accumulator
+        //
+        // Code:
+        //   R(0) = LOADK 0  (iter)
+        //   R(1) = LOADNIL 0 (state)
+        //   R(3) = LOADI 0  (control = 0)
+        //   R(2) = LOADNIL 0 (closing)
+        //   R(4) = LOADI 0  (sum = 0)
+        //   TFORPREP 0, Bx=3 (swap R2↔R3, jump fwd 3 to TFORCALL)
+        //     body: R(4) = R(4) + R(3)
+        //   TFORCALL 0, C=1
+        //   TFORLOOP 0, Bx=2 (jump back past body)
+        //   RETURN1 R(4)
+
+        unsafe extern "C" fn iter_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            // Args: state (ignored at idx 1), control at idx 2.
+            let ctrl = state.to_integer_x(2).unwrap_or(0);
+            let next = ctrl + 1;
+            if next > 3 {
+                state.push_nil();
+                return 1;
+            }
+            state.push_integer(next);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let lcf = TValue::LightCFunction(iter_fn as crate::contract::RawCFunction);
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),                                           // R(0) = iter
+                create_abck(OpCode::OP_LOADNIL, 1, 0, 0, false),      // R(1) = nil
+                loadi(3, 0),                                           // R(3) = 0 (init ctrl)
+                create_abck(OpCode::OP_LOADNIL, 2, 0, 0, false),      // R(2) = nil (closing)
+                // R(3)..R(5) are TFORCALL scratch, so place sum
+                // at R(7) to avoid clobbering.
+                loadi(7, 0),                                           // R(7) = sum = 0
+                // Before TFORPREP: R(2) = 0 (init ctrl), R(3) = nil
+                // (closing). After swap: R(2) = nil, R(3) = 0.
+                crate::lopcodes::create_abx(OpCode::OP_TFORPREP, 0, 1), // Bx=1 → TFORCALL
+                // Body: sum += R(3) (the first loop result)
+                arith_binary(OpCode::OP_ADD, 7, 7, 3),
+                create_abck(OpCode::OP_TFORCALL, 0, 0, 1, false),
+                crate::lopcodes::create_abx(OpCode::OP_TFORLOOP, 0, 3),
+                return1(7),
+            ],
+            vec![lcf],
+            10,  // need R(0)..R(5) + scratch for call
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(6));
     }
 
     // ---- Stage 5.17 tailcalls --------------------------------------
