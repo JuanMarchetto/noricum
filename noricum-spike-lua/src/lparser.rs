@@ -899,6 +899,33 @@ mod tests {
         assert_eq!(state.to_integer_x(1), Some(-5));
     }
 
-    // TODO: parse_if_then_else test deferred — comparison codegen
-    // needs go_if_true to handle ExpKind::Jmp properly.
+    #[test]
+    fn parse_if_then_else_true_branch() {
+        let mut state = LuaState::new(0);
+        let src = b"local x = 10\nif x > 5 then return 1 else return 0 end";
+        let closure = parse(&mut state, src, b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    #[test]
+    fn parse_if_then_else_false_branch() {
+        let mut state = LuaState::new(0);
+        let src = b"local x = 3\nif x > 5 then return 1 else return 0 end";
+        let closure = parse(&mut state, src, b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(0));
+    }
+
+    #[test]
+    fn parse_while_loop() {
+        let mut state = LuaState::new(0);
+        let src = b"local i = 0\nlocal sum = 0\nwhile i < 5 do sum = sum + i; i = i + 1 end\nreturn sum";
+        let closure = parse(&mut state, src, b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(10)); // 0+1+2+3+4
+    }
 }

@@ -648,6 +648,10 @@ fn code_arith(fs: &mut FuncState, op: BinOpr, e1: &mut ExprDesc, e2: &mut ExprDe
     }
     let r1 = exp2anyreg(fs, e1);
     let r2 = exp2anyreg(fs, e2);
+    // Free operand temps BEFORE allocating the result slot so
+    // the result reuses the topmost of the freed slots.
+    free_exp(fs, e2);
+    free_exp(fs, e1);
     let dest = fs.freereg;
     emit_abc(
         fs,
@@ -657,8 +661,6 @@ fn code_arith(fs: &mut FuncState, op: BinOpr, e1: &mut ExprDesc, e2: &mut ExprDe
         r2 as u32,
         false,
     );
-    free_exp(fs, e2);
-    free_exp(fs, e1);
     e1.k = ExpKind::NonReloc;
     e1.info = dest as i32;
     reserve_regs(fs, 1);
@@ -690,38 +692,45 @@ fn code_comparison(
     e1: &mut ExprDesc,
     e2: &mut ExprDesc,
 ) {
-    let (ra, rb, cond) = match op {
+    // Generate comparison. The Lua 5.4 convention is:
+    //   OP_CMP a b k — if (a <cmp> b) == k, SKIP the next
+    //   instruction (which is typically a JMP).
+    //
+    // So to implement "exit when false" (used by go_if_true /
+    // patched later for if/while bodies), we set k=1 and emit
+    // JMP-to-patch: if comparison is TRUE, skip JMP → fall
+    // through into body; if FALSE, JMP to exit label.
+    let (ra, rb) = match op {
         BinOpr::Gt | BinOpr::Ge => {
-            // Swap operands: a > b becomes b < a.
+            // Swap operands: a > b ≡ b < a, a >= b ≡ b <= a.
             let r2 = exp2anyreg(fs, e2);
             let r1 = exp2anyreg(fs, e1);
-            (r2, r1, true)
-        }
-        BinOpr::Ne => {
-            let r1 = exp2anyreg(fs, e1);
-            let r2 = exp2anyreg(fs, e2);
-            (r1, r2, false) // negate result later
+            (r2, r1)
         }
         _ => {
             let r1 = exp2anyreg(fs, e1);
             let r2 = exp2anyreg(fs, e2);
-            (r1, r2, true)
+            (r1, r2)
         }
     };
     free_exp(fs, e2);
     free_exp(fs, e1);
     let opcode = cmp_op_to_opcode(op);
-    let pc = emit_abc(fs, opcode, ra as u32, rb as u32, 0, cond);
-    // The comparison is a conditional skip, followed by a JMP.
+    // OP_CMP a b k: "if (comp) != k, skip next". We want the
+    // body to run when the condition is TRUE — i.e. skip the
+    // exit JMP when comparison result matches the logical sense
+    // of our operator. For Lt/Gt/Le/Ge/Eq: skip JMP when
+    // comparison is true → k=0 (so comparison-true makes
+    // `true != 0` → skip). For Ne: skip JMP when values differ
+    // (NE true) → emit OP_EQ with k=1 (so EQ-false makes
+    // `false != 1` → skip).
+    let k = op == BinOpr::Ne;
+    let _pc = emit_abc(fs, opcode, ra as u32, rb as u32, 0, k);
     let jmp = emit_jump(fs);
     e1.k = ExpKind::Jmp;
     e1.info = jmp;
     e1.t = NO_JUMP;
-    e1.f = NO_JUMP;
-    // For NE, swap the sense of the jump.
-    if op == BinOpr::Ne {
-        std::mem::swap(&mut e1.t, &mut e1.f);
-    }
+    e1.f = jmp;
 }
 
 // ---- Conditional code generation -------------------------------------------
@@ -730,20 +739,30 @@ pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
     discharge_vars(fs, e);
     match e.k {
         ExpKind::Jmp => {
-            // Already a conditional jump — use its false branch.
-            // The jump is already emitted; patch t/f.
+            // Already a conditional jump; its false path is e.f
+            // (set by code_comparison). Do nothing more — the
+            // caller patches e.f to exit on false.
         }
         ExpKind::True | ExpKind::KInt | ExpKind::KFlt | ExpKind::KStr | ExpKind::K => {
-            // Always true; no jump needed.
-            e.t = NO_JUMP;
+            // Always true; no jump needed, f is NO_JUMP.
+        }
+        ExpKind::Nil | ExpKind::False => {
+            // Always false — emit unconditional jump to exit.
+            let jmp = emit_jump(fs);
+            concat_jmp(fs, &mut e.f, jmp);
         }
         _ => {
             let reg = exp2anyreg(fs, e);
+            // OP_TEST R(A), k=0: skip next if R(A) is FALSE (not
+            // truthy). So when R(A) is truthy → fall through.
+            // Emit TEST with k=1: skip next if truthy → JMP runs
+            // when falsy. Actually Lua's convention: k=C flag,
+            // skip if (truthy != k). k=0 means skip when truthy,
+            // k=1 means skip when falsy. We want: skip JMP when
+            // truthy (continue into body), so k=0.
             emit_abc(fs, OpCode::OP_TEST, reg as u32, 0, 0, false);
             let jmp = emit_jump(fs);
             concat_jmp(fs, &mut e.f, jmp);
-            patch_to_here(fs, e.t);
-            e.t = NO_JUMP;
         }
     }
 }
@@ -751,16 +770,23 @@ pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
 pub fn go_if_false(fs: &mut FuncState, e: &mut ExprDesc) {
     discharge_vars(fs, e);
     match e.k {
+        ExpKind::Jmp => {
+            // Conditional jump — swap t and f.
+            std::mem::swap(&mut e.t, &mut e.f);
+        }
         ExpKind::Nil | ExpKind::False => {
-            e.f = NO_JUMP;
+            // Always false — no jump needed.
+        }
+        ExpKind::True | ExpKind::KInt | ExpKind::KFlt | ExpKind::KStr | ExpKind::K => {
+            // Always true — emit unconditional jump.
+            let jmp = emit_jump(fs);
+            concat_jmp(fs, &mut e.t, jmp);
         }
         _ => {
             let reg = exp2anyreg(fs, e);
             emit_abc(fs, OpCode::OP_TEST, reg as u32, 0, 0, true);
             let jmp = emit_jump(fs);
             concat_jmp(fs, &mut e.t, jmp);
-            patch_to_here(fs, e.f);
-            e.f = NO_JUMP;
         }
     }
 }
