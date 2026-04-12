@@ -28,6 +28,7 @@ pub mod lctype;
 pub mod ldblib;
 pub mod ldump;
 pub mod linit;
+pub mod loadlib;
 pub mod lundump;
 pub mod liolib;
 pub mod loslib;
