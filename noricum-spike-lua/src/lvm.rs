@@ -96,6 +96,7 @@ const OP_SETI_U8: u8 = OpCode::OP_SETI as u8;
 const OP_SETFIELD_U8: u8 = OpCode::OP_SETFIELD as u8;
 
 const OP_CALL_U8: u8 = OpCode::OP_CALL as u8;
+const OP_TAILCALL_U8: u8 = OpCode::OP_TAILCALL as u8;
 const OP_FORLOOP_U8: u8 = OpCode::OP_FORLOOP as u8;
 const OP_FORPREP_U8: u8 = OpCode::OP_FORPREP as u8;
 
@@ -670,6 +671,49 @@ impl LuaState {
                         let thread = self.current_thread_mut();
                         thread.top = caller_top;
                     }
+                }
+                OP_TAILCALL_U8 => {
+                    // return R(A)(R(A+1), ..., R(A+B-1))
+                    //
+                    // We implement it as a nested call that
+                    // inherits the current frame's `n_expected`,
+                    // followed by an immediate return — correct
+                    // semantics but not a true in-place frame
+                    // reuse (the Rust call stack still grows by
+                    // one frame per Lua tail call). Stage 5 v2
+                    // revisits this once the CPS rewrite lands.
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    let func_abs = base + a;
+                    let n_args = if b == 0 {
+                        self.current_thread()
+                            .top
+                            .saturating_sub(func_abs + 1)
+                    } else {
+                        b - 1
+                    };
+                    self.current_thread_mut().top = func_abs + 1 + n_args;
+                    self.call_value(func_abs, n_args, n_expected)?;
+                    // Move results from func_abs down to
+                    // func_slot so the caller sees them at the
+                    // expected location.
+                    let n_actually = self
+                        .current_thread()
+                        .top
+                        .saturating_sub(func_abs);
+                    let n_returned = if n_expected < 0 {
+                        n_actually
+                    } else {
+                        n_expected as u32
+                    };
+                    for i in 0..n_returned {
+                        let v = self.current_thread().stack[(func_abs + i) as usize];
+                        self.current_thread_mut().stack[(func_slot + i) as usize] = v;
+                    }
+                    // Pop this frame.
+                    let _ = self.pop_call_frame();
+                    self.current_thread_mut().top = func_slot + n_returned;
+                    return Ok(());
                 }
                 // Binary arithmetic opcodes — R(A) := R(B) OP R(C).
                 // Every variant dispatches through lobject::raw_arith
@@ -3448,6 +3492,96 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    // ---- Stage 5.17 tailcalls --------------------------------------
+
+    #[test]
+    fn tailcall_to_light_c_function_returns_its_result() {
+        // inner() returns 77.
+        unsafe extern "C" fn inner_fn(
+            state: *mut LuaState,
+        ) -> std::os::raw::c_int {
+            let state = unsafe { &mut *state };
+            state.push_integer(77);
+            1
+        }
+
+        let mut state = LuaState::new(0);
+        let lcf = TValue::LightCFunction(inner_fn as crate::contract::RawCFunction);
+        // Outer: R(0) = lcf; TAILCALL R(0), B=1 (0 args); unreachable.
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_TAILCALL, 0, 1, 0, false),
+                // Safety fallback (should not execute).
+                return0(),
+            ],
+            vec![lcf],
+            1,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(77));
+    }
+
+    #[test]
+    fn tailcall_to_lua_closure_returns_its_result() {
+        // inner returns 123.
+        let mut state = LuaState::new(0);
+        let inner_proto = make_inner_proto(
+            &mut state,
+            vec![loadi(0, 123), return1(0)],
+            1,
+        );
+        let inner_closure = state.global.heap.alloc_lclosure(crate::contract::LClosure {
+            proto: inner_proto,
+            upvalues: vec![],
+        });
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                create_abck(OpCode::OP_TAILCALL, 0, 1, 0, false),
+                return0(),
+            ],
+            vec![TValue::LuaClosure(inner_closure)],
+            1,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(123));
+    }
+
+    #[test]
+    fn tailcall_passes_arguments_and_returns_their_sum() {
+        // inner(a, b) = a + b
+        let mut state = LuaState::new(0);
+        let inner_proto = make_inner_proto(
+            &mut state,
+            vec![
+                arith_binary(OpCode::OP_ADD, 2, 0, 1),
+                return1(2),
+            ],
+            3,
+        );
+        let inner_closure = state.global.heap.alloc_lclosure(crate::contract::LClosure {
+            proto: inner_proto,
+            upvalues: vec![],
+        });
+        push_closure_with_constants(
+            &mut state,
+            vec![
+                loadk(0, 0),
+                loadi(1, 6),
+                loadi(2, 36),
+                create_abck(OpCode::OP_TAILCALL, 0, 3, 0, false),
+                return0(),
+            ],
+            vec![TValue::LuaClosure(inner_closure)],
+            3,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(42));
     }
 
     // ---- Stage 5.16 varargs ----------------------------------------
