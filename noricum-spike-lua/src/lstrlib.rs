@@ -596,12 +596,88 @@ unsafe extern "C" fn str_match(state: *mut LuaState) -> std::os::raw::c_int {
     }
 }
 
-unsafe extern "C" fn str_gmatch(_state: *mut LuaState) -> std::os::raw::c_int {
-    // gmatch returns an iterator function. Full implementation
-    // requires closure with captured state; for now return a
-    // minimal placeholder that errors if called.
-    // TODO: proper iterator binding via C closure upvalues.
-    0
+unsafe extern "C" fn str_gmatch(state: *mut LuaState) -> std::os::raw::c_int {
+    // gmatch(s, pat) returns an iterator that yields each
+    // non-overlapping match on successive calls. We stash the
+    // string, pattern, and current position in a userdata and
+    // return an iterator closure that reads them.
+    let state = unsafe { &mut *state };
+    let s = state.to_lstring(1).map(|s| s.to_vec()).unwrap_or_default();
+    let pat = state.to_lstring(2).map(|s| s.to_vec()).unwrap_or_default();
+    // Encode state as: [s_bytes][0xFF][pat_bytes][0xFF][pos:u64 LE]
+    let mut ud_bytes = Vec::with_capacity(s.len() + pat.len() + 2 + 8);
+    ud_bytes.push((s.len() >> 56) as u8);
+    ud_bytes.push((s.len() >> 48) as u8);
+    ud_bytes.push((s.len() >> 40) as u8);
+    ud_bytes.push((s.len() >> 32) as u8);
+    ud_bytes.push((s.len() >> 24) as u8);
+    ud_bytes.push((s.len() >> 16) as u8);
+    ud_bytes.push((s.len() >> 8) as u8);
+    ud_bytes.push(s.len() as u8);
+    ud_bytes.extend_from_slice(&s);
+    ud_bytes.extend_from_slice(&pat);
+    let ud = state.global.heap.alloc_userdata(crate::contract::UserData {
+        data: ud_bytes,
+        metatable: None,
+        user_values: vec![crate::contract::TValue::Integer(0)], // pos
+    });
+    // Return iterator function + userdata + nil.
+    state.push_light_cfunction(gmatch_iter);
+    state
+        .current_thread_mut()
+        .push(crate::contract::TValue::UserData(ud));
+    state.push_nil();
+    3
+}
+
+unsafe extern "C" fn gmatch_iter(state: *mut LuaState) -> std::os::raw::c_int {
+    let state = unsafe { &mut *state };
+    // args: (ud, unused). ud holds s + pat + pos in user_values[0].
+    let ud_h = {
+        let base = state.frame_base_index().unwrap_or(0);
+        match state.current_thread().stack[base as usize] {
+            crate::contract::TValue::UserData(h) => h,
+            _ => return 0,
+        }
+    };
+    let (s, pat, pos) = {
+        let ud = state.global.heap.userdata_get(ud_h);
+        let data = &ud.data;
+        let s_len = ((data[0] as usize) << 56)
+            | ((data[1] as usize) << 48)
+            | ((data[2] as usize) << 40)
+            | ((data[3] as usize) << 32)
+            | ((data[4] as usize) << 24)
+            | ((data[5] as usize) << 16)
+            | ((data[6] as usize) << 8)
+            | (data[7] as usize);
+        let s = data[8..8 + s_len].to_vec();
+        let pat = data[8 + s_len..].to_vec();
+        let pos = match ud.user_values.first() {
+            Some(crate::contract::TValue::Integer(i)) => *i as usize,
+            _ => 0,
+        };
+        (s, pat, pos)
+    };
+    match pattern_find(&s, &pat, pos) {
+        Some((ms, me, caps)) => {
+            let new_pos = if me == ms { me + 1 } else { me };
+            state.global.heap.userdata_mut(ud_h).user_values[0] =
+                crate::contract::TValue::Integer(new_pos as i64);
+            if caps.is_empty() {
+                let slice = &s[ms..me];
+                state.push_string(&String::from_utf8_lossy(slice));
+                1
+            } else {
+                for (cs, ce) in &caps {
+                    let slice = &s[*cs..*ce];
+                    state.push_string(&String::from_utf8_lossy(slice));
+                }
+                caps.len() as i32
+            }
+        }
+        None => 0,
+    }
 }
 
 unsafe extern "C" fn str_gsub(state: *mut LuaState) -> std::os::raw::c_int {
