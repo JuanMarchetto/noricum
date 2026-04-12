@@ -11,9 +11,9 @@ use crate::contract::{
 };
 use crate::lcode::{self, BinOpr, UnOpr, NO_JUMP};
 use crate::llex::{
-    LexState, SemInfo, TK_AND, TK_BREAK, TK_CONCAT, TK_DO, TK_DOTS,
+    LexState, SemInfo, TK_AND, TK_BREAK, TK_CONCAT, TK_DBCOLON, TK_DO, TK_DOTS,
     TK_ELSE, TK_ELSEIF, TK_END, TK_EOS, TK_EQ, TK_FALSE, TK_FOR, TK_FUNCTION,
-    TK_GE, TK_IDIV, TK_IF, TK_IN, TK_INT, TK_LE, TK_LOCAL, TK_NAME,
+    TK_GE, TK_GOTO, TK_IDIV, TK_IF, TK_IN, TK_INT, TK_LE, TK_LOCAL, TK_NAME,
     TK_NE, TK_NIL, TK_NOT, TK_OR, TK_REPEAT, TK_RETURN, TK_SHL, TK_SHR,
     TK_STRING, TK_THEN, TK_TRUE, TK_UNTIL, TK_WHILE, TK_FLT,
 };
@@ -333,6 +333,8 @@ fn statement(ls: &mut LexState, fs: &mut FuncState) {
         TK_FUNCTION => funcstat(ls, fs),
         TK_LOCAL => localstat(ls, fs),
         TK_RETURN => retstat(ls, fs),
+        TK_DBCOLON => labelstat(ls, fs),
+        TK_GOTO => gotostat(ls, fs),
         TK_BREAK => {
             ls.next_token();
             // Find the nearest enclosing loop and record the JMP
@@ -362,6 +364,63 @@ fn statement(ls: &mut LexState, fs: &mut FuncState) {
     let needed = nvarstack(fs);
     if fs.freereg > needed {
         fs.freereg = needed;
+    }
+}
+
+/// `::labelname::` — define a label for `goto`.
+fn labelstat(ls: &mut LexState, fs: &mut FuncState) {
+    ls.next_token(); // skip `::`
+    let name = check_name(ls);
+    check_next(ls, TK_DBCOLON);
+    let pc = lcode::get_label(fs);
+    let line = ls.linenumber;
+    fs.labels.push(LabelDesc {
+        name: Some(name),
+        pc,
+        line,
+        nactvar: fs.nactvar,
+        close: false,
+    });
+    // Resolve any pending gotos that target this label.
+    let mut i = 0;
+    while i < fs.gotos.len() {
+        if fs.gotos[i].name == Some(name) {
+            let g = fs.gotos.remove(i);
+            lcode::patch_list(fs, g.pc, pc);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// `goto labelname` — emit a JMP to be patched when the label
+/// becomes known.
+fn gotostat(ls: &mut LexState, fs: &mut FuncState) {
+    ls.next_token(); // skip `goto`
+    let name = check_name(ls);
+    let line = ls.linenumber;
+    // If a matching label is already defined, patch straight to
+    // its pc. Otherwise, emit an unresolved JMP and park it on
+    // fs.gotos for the next `::label::` to pick up.
+    let existing = fs
+        .labels
+        .iter()
+        .rfind(|l| l.name == Some(name))
+        .map(|l| l.pc);
+    let jmp = lcode::emit_jump(fs);
+    match existing {
+        Some(target) => {
+            lcode::patch_list(fs, jmp, target);
+        }
+        None => {
+            fs.gotos.push(LabelDesc {
+                name: Some(name),
+                pc: jmp,
+                line,
+                nactvar: fs.nactvar,
+                close: false,
+            });
+        }
     }
 }
 
