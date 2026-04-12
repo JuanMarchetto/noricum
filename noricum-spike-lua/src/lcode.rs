@@ -525,6 +525,32 @@ pub fn field_access(fs: &mut FuncState, t: &mut ExprDesc, name: StringHandle) {
     t.ind.idx = ki as i16;
 }
 
+/// Emit OP_SELF for a method call `obj:method(args)`. After
+/// this, the method function sits at R(e.info) and `obj` (as
+/// 'self') sits at R(e.info + 1). The caller then emits
+/// OP_CALL with nargs+1 (accounting for self).
+pub fn self_call(fs: &mut FuncState, t: &mut ExprDesc, method: StringHandle) {
+    let ki = string_k(fs, method);
+    let treg = exp2anyreg(fs, t);
+    // Free the table register if it was a temp — we're going
+    // to place the method+self in consecutive new slots.
+    if treg >= nvarstack(fs) {
+        fs.freereg -= 1;
+    }
+    let dest = fs.freereg;
+    emit_abc(
+        fs,
+        OpCode::OP_SELF,
+        dest as u32,
+        treg as u32,
+        ki as u32,
+        false,
+    );
+    reserve_regs(fs, 2); // method + self
+    t.k = ExpKind::NonReloc;
+    t.info = dest as i32;
+}
+
 // ---- Arithmetic / comparison code generation --------------------------------
 
 fn bin_op_to_opcode(op: BinOpr) -> OpCode {

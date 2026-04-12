@@ -96,6 +96,7 @@ const OP_SETI_U8: u8 = OpCode::OP_SETI as u8;
 const OP_SETFIELD_U8: u8 = OpCode::OP_SETFIELD as u8;
 const OP_GETTABUP_U8: u8 = OpCode::OP_GETTABUP as u8;
 const OP_SETTABUP_U8: u8 = OpCode::OP_SETTABUP as u8;
+const OP_SELF_U8: u8 = OpCode::OP_SELF as u8;
 
 const OP_CALL_U8: u8 = OpCode::OP_CALL as u8;
 const OP_TAILCALL_U8: u8 = OpCode::OP_TAILCALL as u8;
@@ -491,6 +492,21 @@ impl LuaState {
                     let key = self.constant_at(func_slot, b);
                     let rc = self.rk_value(func_slot, base, c, k);
                     self.lua_set_index(upv_val, key, rc)?;
+                }
+                OP_SELF_U8 => {
+                    // R(A+1) := R(B);
+                    // R(A)   := R(B)[K(C):shortstring]
+                    //
+                    // Used by 'obj:method(args)' to set up the
+                    // call site with the method function in R(A)
+                    // and the receiver duplicated into R(A+1).
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    let c = getarg_c(instruction) as usize;
+                    let rb = self.current_thread().stack[(base + b) as usize];
+                    self.current_thread_mut().stack[(base + a + 1) as usize] = rb;
+                    let key = self.constant_at(func_slot, c);
+                    self.lua_get_index(rb, key, base + a)?;
                 }
                 OP_LEN_U8 => {
                     // R(A) := #R(B) — length operator with

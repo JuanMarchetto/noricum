@@ -609,8 +609,16 @@ fn funcstat(ls: &mut LexState, fs: &mut FuncState) {
         let field_name = check_name(ls);
         lcode::field_access(fs, &mut v, field_name);
     }
+    // Method-definition colon: 'function T:m(...)' is sugar for
+    // 'function T.m(self, ...)'.
+    let is_method = ls.t.token == b':' as i32;
+    if is_method {
+        ls.next_token();
+        let method_name = check_name(ls);
+        lcode::field_access(fs, &mut v, method_name);
+    }
     let mut body_e = ExprDesc::void();
-    body(ls, fs, &mut body_e, false, line);
+    body(ls, fs, &mut body_e, is_method, line);
     lcode::store_var(fs, &mut v, &mut body_e);
 }
 
@@ -988,9 +996,48 @@ fn suffixedexp(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
                 lcode::code_call(fs, e, nargs);
             }
             t if t == b':' as i32 => {
+                // Method call: e:method(args) compiles to
+                //   SELF R(A), e_reg, K[method]  — puts method
+                //     in R(A) and e in R(A+1) (as 'self').
+                //   CALL R(A), B, C
                 ls.next_token();
-                let _method = check_name(ls);
-                ls.syntax_error("method calls not yet implemented");
+                let name = check_name(ls);
+                lcode::self_call(fs, e, name);
+                // Expect '(' after :method to start call args.
+                match ls.t.token {
+                    tk if tk == b'(' as i32 => {
+                        ls.next_token();
+                        let extra = if ls.t.token == b')' as i32 {
+                            0
+                        } else {
+                            explist(ls, fs)
+                        };
+                        check_next(ls, b')' as i32);
+                        // Add 1 for the implicit self arg.
+                        lcode::code_call(fs, e, extra + 1);
+                    }
+                    tk if tk == b'{' as i32 => {
+                        let mut tbl = ExprDesc::void();
+                        constructor(ls, fs, &mut tbl);
+                        lcode::exp2nextreg(fs, &mut tbl);
+                        lcode::code_call(fs, e, 2);
+                    }
+                    TK_STRING => {
+                        let h = match &ls.t.seminfo {
+                            SemInfo::String(h) => *h,
+                            _ => panic!("TK_STRING without handle"),
+                        };
+                        ls.next_token();
+                        let mut arg = ExprDesc::void();
+                        arg.k = ExpKind::KStr;
+                        arg.strval = Some(h);
+                        arg.t = NO_JUMP;
+                        arg.f = NO_JUMP;
+                        lcode::exp2nextreg(fs, &mut arg);
+                        lcode::code_call(fs, e, 2);
+                    }
+                    _ => ls.syntax_error("function arguments expected"),
+                }
             }
             TK_STRING => {
                 // f"str" sugar
