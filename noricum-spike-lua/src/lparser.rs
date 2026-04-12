@@ -453,38 +453,89 @@ fn repeatstat(ls: &mut LexState, fs: &mut FuncState) {
 
 fn forstat(ls: &mut LexState, fs: &mut FuncState) {
     ls.next_token(); // skip FOR
-    let _name = check_name(ls);
+    let name = check_name(ls);
     match ls.t.token {
-        x if x == b'=' as i32 => fornum(ls, fs),
+        x if x == b'=' as i32 => fornum(ls, fs, name),
         _ => ls.syntax_error("'=' or 'in' expected"),
     }
 }
 
-fn fornum(ls: &mut LexState, fs: &mut FuncState) {
-    // For now, a simplified numeric for.
+fn fornum(ls: &mut LexState, fs: &mut FuncState, loop_var: StringHandle) {
     ls.next_token(); // skip '='
+    let base = fs.freereg;
+    // R(A)   = init
+    // R(A+1) = limit
+    // R(A+2) = step
+    // R(A+3) = loop variable (user-visible)
+    //
+    // The three control slots are hidden pseudo-locals so the
+    // register allocator doesn't stomp them. We push synthetic
+    // names.
+    let hidden = {
+        let gs = unsafe { &mut *ls.gs };
+        gs.new_string(b"(for state)", gs.hash_seed)
+    };
+    new_local(fs, hidden); // init slot
+    new_local(fs, hidden); // limit slot
+    new_local(fs, hidden); // step slot
+    adjust_locals(fs, 3);
+    fs.freereg = base + 3;
+
     // initial
     let mut e = ExprDesc::void();
     expr(ls, fs, &mut e);
-    lcode::exp2nextreg(fs, &mut e);
+    lcode::exp2nextreg_at(fs, &mut e, base);
     check_next(ls, b',' as i32);
     // limit
     expr(ls, fs, &mut e);
-    lcode::exp2nextreg(fs, &mut e);
+    lcode::exp2nextreg_at(fs, &mut e, base + 1);
     if testnext(ls, b',' as i32) {
-        // step
         expr(ls, fs, &mut e);
-        lcode::exp2nextreg(fs, &mut e);
+        lcode::exp2nextreg_at(fs, &mut e, base + 2);
     } else {
         // default step = 1
         let mut step = ExprDesc::init(ExpKind::KInt, 0);
         step.ival = 1;
-        lcode::exp2nextreg(fs, &mut step);
+        lcode::exp2nextreg_at(fs, &mut step, base + 2);
     }
     check_next(ls, TK_DO);
-    // Body (simplified — no proper for-loop opcodes yet from parser side).
+
+    // Emit OP_FORPREP. Bx will be patched after we emit the body.
+    let forprep_pc = lcode::emit_abx(
+        fs,
+        crate::lopcodes::OpCode::OP_FORPREP,
+        base as u32,
+        0,
+    );
+
+    // Declare the loop variable at R(A+3).
+    new_local(fs, loop_var);
+    adjust_locals(fs, 1);
+    fs.freereg = base + 4;
+
+    let loop_start = fs.pc;
     block(ls, fs);
     check_match(ls, TK_END, TK_FOR);
+
+    // Emit OP_FORLOOP jumping back to loop_start.
+    let back_offset = (fs.pc - loop_start + 1) as u32; // +1 for FORLOOP itself
+    lcode::emit_abx(
+        fs,
+        crate::lopcodes::OpCode::OP_FORLOOP,
+        base as u32,
+        back_offset,
+    );
+
+    // Patch FORPREP to jump past body + FORLOOP.
+    let skip_offset = (fs.pc - forprep_pc - 1) as u32;
+    let instr = &mut fs.proto.code[forprep_pc as usize];
+    // Replace Bx. Bx is bits 15..31 (17 bits).
+    *instr = (*instr & 0x7FFF) | (skip_offset << 15);
+
+    // Clean up: pop the 4 for-loop locals.
+    fs.nactvar -= 4;
+    fs.actvar.truncate(fs.actvar.len() - 4);
+    fs.freereg = base;
 }
 
 fn funcstat(ls: &mut LexState, fs: &mut FuncState) {
@@ -1242,6 +1293,16 @@ mod tests {
     fn parse_recursive_fibonacci() {
         let mut state = LuaState::new(0);
         let src = b"local function fib(n)\n  if n < 2 then return n else return fib(n-1) + fib(n-2) end\nend\nreturn fib(10)";
+        let closure = parse(&mut state, src, b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(55));
+    }
+
+    #[test]
+    fn parse_numeric_for_loop() {
+        let mut state = LuaState::new(0);
+        let src = b"local sum = 0\nfor i = 1, 10 do sum = sum + i end\nreturn sum";
         let closure = parse(&mut state, src, b"=test");
         state.current_thread_mut().push(TValue::LuaClosure(closure));
         state.call_value(0, 0, 1).unwrap();

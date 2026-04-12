@@ -336,6 +336,14 @@ pub fn exp2nextreg(fs: &mut FuncState, e: &mut ExprDesc) {
     discharge_to_reg(fs, e, reg);
 }
 
+/// Discharge the expression into a specific register (used by
+/// the parser for pseudo-locals like for-loop state slots).
+/// Does NOT reserve; assumes the caller already owns `reg`.
+pub fn exp2nextreg_at(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
+    discharge_vars(fs, e);
+    discharge_to_reg(fs, e, reg);
+}
+
 pub fn exp2anyreg(fs: &mut FuncState, e: &mut ExprDesc) -> u8 {
     discharge_vars(fs, e);
     if e.k == ExpKind::NonReloc {
