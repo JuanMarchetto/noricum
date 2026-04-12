@@ -351,18 +351,45 @@ fn localstat(ls: &mut LexState, fs: &mut FuncState) {
         // in body()). That slot IS the local's register.
         return;
     }
-    let name = check_name(ls);
-    let _vidx = new_local(fs, name);
-    if testnext(ls, b'=' as i32) {
-        let mut e = ExprDesc::void();
-        expr(ls, fs, &mut e);
-        lcode::exp2nextreg(fs, &mut e);
+    // Collect variable names: `a, b, c, ...`
+    let mut names = Vec::new();
+    loop {
+        let name = check_name(ls);
+        names.push(name);
+        if !testnext(ls, b',' as i32) {
+            break;
+        }
+    }
+    let nvars = names.len();
+    for &name in &names {
+        let _vidx = new_local(fs, name);
+    }
+    let n_values = if testnext(ls, b'=' as i32) {
+        // RHS values: comma-separated expressions.
+        let mut count = 0;
+        loop {
+            let mut e = ExprDesc::void();
+            expr(ls, fs, &mut e);
+            lcode::exp2nextreg(fs, &mut e);
+            count += 1;
+            if !testnext(ls, b',' as i32) {
+                break;
+            }
+        }
+        count
     } else {
-        // local x (no initializer) → nil.
+        0
+    };
+    // Pad with nil up to nvars.
+    for _ in n_values..nvars {
         let mut e = ExprDesc::init(ExpKind::Nil, 0);
         lcode::exp2nextreg(fs, &mut e);
     }
-    adjust_locals(fs, 1);
+    // Discard extra values (nvalues > nvars).
+    if n_values > nvars {
+        fs.freereg = (fs.actvar.len() - (n_values - nvars)) as u8;
+    }
+    adjust_locals(fs, nvars as i32);
 }
 
 fn exprstat(ls: &mut LexState, fs: &mut FuncState) {
@@ -1297,6 +1324,26 @@ mod tests {
         state.current_thread_mut().push(TValue::LuaClosure(closure));
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(55));
+    }
+
+    #[test]
+    fn parse_iterative_fibonacci() {
+        // fib iteratively up to 10 terms.
+        let mut state = LuaState::new(0);
+        let src = b"local a, b = 0, 1\nfor i = 1, 10 do local t = a + b; a = b; b = t end\nreturn a";
+        let closure = parse(&mut state, src, b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(55));
+    }
+
+    #[test]
+    fn parse_string_concat() {
+        let mut state = LuaState::new(0);
+        let closure = parse(&mut state, b"return \"hello\" .. \" \" .. \"world\"", b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_lstring(1), Some(b"hello world".as_slice()));
     }
 
     #[test]
