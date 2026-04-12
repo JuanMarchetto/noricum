@@ -352,8 +352,12 @@ fn retstat(ls: &mut LexState, fs: &mut FuncState) {
     } else {
         nret = explist(ls, fs);
     }
-    lcode::code_return(fs, first as i32, nret);
-    // Optional semicolon.
+    // After explist, results occupy consecutive registers ending
+    // at fs.freereg - 1. The first return register is
+    // fs.freereg - nret.
+    let actual_first = (fs.freereg as i32) - nret;
+    lcode::code_return(fs, actual_first, nret);
+    let _ = first;
     testnext(ls, b';' as i32);
 }
 
