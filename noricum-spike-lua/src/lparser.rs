@@ -178,6 +178,11 @@ pub struct FuncState {
     pub labels: Vec<LabelDesc>,
     /// Block scope stack.
     pub blocks: Vec<BlockCnt>,
+    /// Snapshot of outer function's locals (for upvalue capture).
+    /// Empty for the outermost chunk.
+    pub outer_locals: Vec<ActiveVar>,
+    /// Active var count from the outer function.
+    pub outer_nactvar: i16,
 }
 
 impl FuncState {
@@ -200,6 +205,8 @@ impl FuncState {
             gotos: Vec::new(),
             labels: Vec::new(),
             blocks: Vec::new(),
+            outer_locals: Vec::new(),
+            outer_nactvar: 0,
         }
     }
 }
@@ -507,6 +514,11 @@ fn body(ls: &mut LexState, outer_fs: &mut FuncState, e: &mut ExprDesc, is_method
     // Build the inner function.
     let mut inner_fs = FuncState::new();
     inner_fs.proto.line_defined = line;
+    // Inner function inherits outer's locals as potential
+    // upvalues. We snapshot outer locals here so singlevar can
+    // resolve names and create upvalues lazily.
+    inner_fs.outer_locals = outer_fs.actvar.clone();
+    inner_fs.outer_nactvar = outer_fs.nactvar;
 
     check_next(ls, b'(' as i32);
     let mut num_params: u8 = 0;
@@ -924,7 +936,7 @@ fn singlevar(_ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc, name: Str
             return;
         }
     }
-    // Search upvalues.
+    // Search existing upvalues (already captured).
     for i in 0..fs.nups as usize {
         let uv = &fs.proto.upvalues[i];
         if uv.name == Some(name) {
@@ -932,15 +944,49 @@ fn singlevar(_ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc, name: Str
             return;
         }
     }
-    // Global: _ENV[name]
-    // For the main chunk, _ENV is upvalue 0.
-    *e = ExprDesc::init(ExpKind::Upval, 0);
+    // Search the outer function's locals — capture as upvalue.
+    for i in (0..fs.outer_nactvar as usize).rev() {
+        let av = &fs.outer_locals[i];
+        if av.name == Some(name) {
+            let upv_idx = fs.proto.upvalues.len();
+            fs.proto.upvalues.push(UpvalDesc {
+                name: Some(name),
+                in_stack: true,
+                idx: av.ridx,
+                kind: 0,
+            });
+            fs.nups += 1;
+            *e = ExprDesc::init(ExpKind::Upval, upv_idx as i32);
+            return;
+        }
+    }
+    // Fall back: global via _ENV[name]. For the main chunk, _ENV
+    // is upvalue 0. For nested functions, we need to ensure _ENV
+    // is also an upvalue. Add it lazily if not present.
+    let env_idx = if fs.proto.upvalues.iter().any(|u| is_env_upval(u)) {
+        fs.proto.upvalues.iter().position(is_env_upval).unwrap() as i32
+    } else {
+        let idx = fs.proto.upvalues.len();
+        fs.proto.upvalues.push(UpvalDesc {
+            name: None,
+            in_stack: false,
+            idx: 0, // Index 0 of outer's upvalues (where _ENV lives).
+            kind: 0,
+        });
+        fs.nups += 1;
+        idx as i32
+    };
+    *e = ExprDesc::init(ExpKind::Upval, env_idx);
     let mut key = ExprDesc::void();
     key.k = ExpKind::KStr;
     key.strval = Some(name);
     key.t = NO_JUMP;
     key.f = NO_JUMP;
     lcode::indexed(fs, e, &mut key);
+}
+
+fn is_env_upval(u: &UpvalDesc) -> bool {
+    u.name.is_none() && !u.in_stack && u.idx == 0
 }
 
 // ---- Operator mapping ------------------------------------------------------
@@ -1180,6 +1226,35 @@ mod tests {
         state.current_thread_mut().push(TValue::LuaClosure(closure));
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(42));
+    }
+
+    #[test]
+    fn parse_recursive_factorial() {
+        let mut state = LuaState::new(0);
+        let src = b"local function fact(n)\n  if n <= 1 then return 1 else return n * fact(n - 1) end\nend\nreturn fact(5)";
+        let closure = parse(&mut state, src, b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(120));
+    }
+
+    #[test]
+    fn parse_recursive_fibonacci() {
+        let mut state = LuaState::new(0);
+        let src = b"local function fib(n)\n  if n < 2 then return n else return fib(n-1) + fib(n-2) end\nend\nreturn fib(10)";
+        let closure = parse(&mut state, src, b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(55));
+    }
+
+    #[test]
+    fn parse_string_literal_return() {
+        let mut state = LuaState::new(0);
+        let closure = parse(&mut state, b"return \"hello\"", b"=test");
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_lstring(1), Some(b"hello".as_slice()));
     }
 
     #[test]
