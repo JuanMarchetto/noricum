@@ -38,7 +38,7 @@
 
 use crate::contract::{
     LClosure, LClosureHandle, LuaError, LuaResult, LuaState, TValue, TableHandle,
-    UpVal, UpValState,
+    UpVal, UpValHandle, UpValState,
 };
 use crate::lobject::{raw_arith, to_number_ns, ArithOp};
 use crate::ltm::TagMethod;
@@ -121,6 +121,7 @@ const OP_SETUPVAL_U8: u8 = OpCode::OP_SETUPVAL as u8;
 const OP_CONCAT_U8: u8 = OpCode::OP_CONCAT as u8;
 const OP_LEN_U8: u8 = OpCode::OP_LEN as u8;
 
+const OP_SETLIST_U8: u8 = OpCode::OP_SETLIST as u8;
 const OP_TFORPREP_U8: u8 = OpCode::OP_TFORPREP as u8;
 const OP_TFORCALL_U8: u8 = OpCode::OP_TFORCALL as u8;
 const OP_TFORLOOP_U8: u8 = OpCode::OP_TFORLOOP as u8;
@@ -454,28 +455,32 @@ impl LuaState {
                     self.lua_concat_mm(base + a, b)?;
                 }
                 OP_CLOSURE_U8 => {
-                    // R(A) := closure(K[Bx]) — create a new
-                    // LClosure from the current proto's
-                    // inner_protos list. Stage 5.11 starts every
-                    // upvalue as `UpValState::Closed(Nil)` —
-                    // real open-upvalue capture from the enclosing
-                    // frame's stack lives with the commit that
-                    // adds instruction decoding for the
-                    // PSEUDO-Upvalue descriptors that follow
-                    // the opcode in Lua 5.4's bytecode format.
+                    // R(A) := closure(inner_protos[Bx]).
+                    // Reads the inner proto's upvalue descriptors
+                    // to set up each captured upvalue:
+                    //   in_stack=true, idx=N → open upvalue
+                    //     pointing to R(N) on the current frame.
+                    //   in_stack=false, idx=M → share the M-th
+                    //     upvalue of the enclosing closure.
                     let a = getarg_a(instruction) as u32;
                     let bx = getarg_bx(instruction) as usize;
-                    let outer_proto = match self.current_thread().stack[func_slot as usize] {
-                        TValue::LuaClosure(h) => self.global.heap.lclosure(h).proto,
+                    let outer_closure = match self.current_thread().stack[func_slot as usize] {
+                        TValue::LuaClosure(h) => h,
                         _ => unreachable!("CLOSURE in non-Lua frame"),
                     };
+                    let outer_proto = self.global.heap.lclosure(outer_closure).proto;
                     let inner_proto = self.global.heap.proto(outer_proto).inner_protos[bx];
-                    let n_upvals = self.global.heap.proto(inner_proto).upvalues.len();
-                    let mut upvalues = Vec::with_capacity(n_upvals);
-                    for _ in 0..n_upvals {
-                        let upv = self.global.heap.alloc_upval(UpVal {
-                            state: UpValState::Closed(TValue::Nil),
-                        });
+                    let descs: Vec<_> =
+                        self.global.heap.proto(inner_proto).upvalues.clone();
+                    let mut upvalues = Vec::with_capacity(descs.len());
+                    for desc in &descs {
+                        let upv = if desc.in_stack {
+                            let slot = base + desc.idx as u32;
+                            self.find_or_create_open_upval(slot)
+                        } else {
+                            let outer_uvs = &self.global.heap.lclosure(outer_closure).upvalues;
+                            outer_uvs[desc.idx as usize]
+                        };
                         upvalues.push(upv);
                     }
                     let handle = self.global.heap.alloc_lclosure(LClosure {
@@ -779,6 +784,38 @@ impl LuaState {
                     self.finish_vm_return(func_slot, base, a, n_to_return, n_expected);
                     return Ok(());
                 }
+                OP_SETLIST_U8 => {
+                    // R(A)[vC+i] := R(A+i), 1 <= i <= vB.
+                    // vB == 0 means "up to top".
+                    // vC is the base offset (0-based in the
+                    // instruction, but array indices are 1-based
+                    // at the Lua level).
+                    let a = getarg_a(instruction) as u32;
+                    let vb = crate::lopcodes::getarg_vb(instruction) as u32;
+                    let vc = crate::lopcodes::getarg_vc(instruction) as u32;
+                    let table_handle = match self.current_thread().stack[(base + a) as usize] {
+                        TValue::Table(h) => h,
+                        _ => return Err(LuaError::Runtime(TValue::Nil)),
+                    };
+                    let n = if vb == 0 {
+                        let top = self.current_thread().top;
+                        top.saturating_sub(base + a + 1)
+                    } else {
+                        vb
+                    };
+                    for i in 1..=n {
+                        let v = self.current_thread().stack[(base + a + i) as usize];
+                        self.global
+                            .table_set_int(table_handle, (vc + i) as i64, v);
+                    }
+                    if vb == 0 {
+                        let caller_top = self
+                            .current_call_frame()
+                            .expect("SETLIST: frame vanished")
+                            .top;
+                        self.current_thread_mut().top = caller_top;
+                    }
+                }
                 OP_TFORPREP_U8 => {
                     // Generic-for prep: swap R(A+2) ↔ R(A+3)
                     // (closing ↔ control), then jump forward by
@@ -1010,6 +1047,45 @@ impl LuaState {
             // operand slots in C Lua — the operand is duplicated.
             None => self.try_binary_metamethod(op, rb, rb, base + a),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Open-upvalue management.
+    //
+    // When `OP_CLOSURE` captures a local from the enclosing frame
+    // (`in_stack = true`), we either reuse an existing open upvalue
+    // pointing to that stack slot or create a fresh one and push it
+    // onto `Thread::open_upvals` so multiple closures sharing the
+    // same local see the same `UpVal`.
+    // ------------------------------------------------------------------
+
+    /// Find an existing open upvalue for `stack_index` on the
+    /// current thread, or create a new one and register it.
+    /// Returns the handle.
+    pub(crate) fn find_or_create_open_upval(
+        &mut self,
+        stack_index: u32,
+    ) -> UpValHandle {
+        let thread_handle = self.current_thread;
+        // Check if an open upvalue already points here.
+        for &uv_h in &self.current_thread().open_upvals {
+            if let UpValState::Open {
+                stack_index: si, ..
+            } = &self.global.heap.upval(uv_h).state
+            {
+                if *si == stack_index {
+                    return uv_h;
+                }
+            }
+        }
+        let uv = self.global.heap.alloc_upval(UpVal {
+            state: UpValState::Open {
+                thread: thread_handle,
+                stack_index,
+            },
+        });
+        self.current_thread_mut().open_upvals.push(uv);
+        uv
     }
 
     // ------------------------------------------------------------------
@@ -3562,6 +3638,156 @@ mod tests {
         );
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    // ---- Stage 5.19 open upvalue capture + SETLIST -----------------
+
+    #[test]
+    fn closure_captures_open_upvalue_from_enclosing_frame() {
+        // outer: local x = 10; inner = function() return x end; return inner()
+        // inner should see x = 10 via an open upvalue.
+        let mut state = LuaState::new(0);
+        let inner_proto = Proto {
+            max_stack_size: 1,
+            code: vec![
+                create_abck(OpCode::OP_GETUPVAL, 0, 0, 0, false),
+                return1(0),
+            ],
+            upvalues: vec![crate::contract::UpvalDesc {
+                name: None,
+                in_stack: true,
+                idx: 0,
+                kind: 0,
+            }],
+            ..Proto::default()
+        };
+        let inner_ph = state.global.heap.alloc_proto(inner_proto);
+
+        let outer_proto = Proto {
+            max_stack_size: 3,
+            code: vec![
+                loadi(0, 10), // R(0) = local x = 10
+                crate::lopcodes::create_abx(OpCode::OP_CLOSURE, 1, 0), // R(1) = closure(0)
+                create_abck(OpCode::OP_CALL, 1, 1, 2, false),          // call R(1)(), 1 result
+                return1(1), // return the result
+            ],
+            inner_protos: vec![inner_ph],
+            ..Proto::default()
+        };
+        let outer_ph = state.global.heap.alloc_proto(outer_proto);
+        let outer_closure = state.global.heap.alloc_lclosure(LClosure {
+            proto: outer_ph,
+            upvalues: vec![],
+        });
+        state
+            .current_thread_mut()
+            .push(TValue::LuaClosure(outer_closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(10));
+    }
+
+    #[test]
+    fn two_closures_share_same_open_upvalue() {
+        // outer: local x = 0
+        //        inc = function() x = x + 1; return x end
+        //        get = function() return x end
+        //        inc(); return get()
+        // Should return 1.
+        let mut state = LuaState::new(0);
+        // inc_proto: x = x + 1; return x
+        let inc_proto = Proto {
+            max_stack_size: 2,
+            code: vec![
+                create_abck(OpCode::OP_GETUPVAL, 0, 0, 0, false),
+                crate::lopcodes::create_abck(
+                    OpCode::OP_ADDI,
+                    0,
+                    0,
+                    (1 + crate::lopcodes::OFFSET_sC) as u32,
+                    false,
+                ),
+                create_abck(OpCode::OP_SETUPVAL, 0, 0, 0, false),
+                create_abck(OpCode::OP_GETUPVAL, 0, 0, 0, false),
+                return1(0),
+            ],
+            upvalues: vec![crate::contract::UpvalDesc {
+                name: None,
+                in_stack: true,
+                idx: 0,
+                kind: 0,
+            }],
+            ..Proto::default()
+        };
+        let inc_ph = state.global.heap.alloc_proto(inc_proto);
+
+        // get_proto: return x
+        let get_proto = Proto {
+            max_stack_size: 1,
+            code: vec![
+                create_abck(OpCode::OP_GETUPVAL, 0, 0, 0, false),
+                return1(0),
+            ],
+            upvalues: vec![crate::contract::UpvalDesc {
+                name: None,
+                in_stack: true,
+                idx: 0,
+                kind: 0,
+            }],
+            ..Proto::default()
+        };
+        let get_ph = state.global.heap.alloc_proto(get_proto);
+
+        // outer: local x=0; inc=closure(0); get=closure(1);
+        // call inc() discarding results; return get()
+        // R(1)=inc, R(2)=get. But calling inc() at R(1) clobbers
+        // R(2)+ as inner frame registers. Move get to R(3) so
+        // it survives the call. inc needs max_stack=2 so inner
+        // frame uses R(2)..R(3) — still collides. Move get to R(4).
+        let outer_proto = Proto {
+            max_stack_size: 6,
+            code: vec![
+                loadi(0, 0), // R(0) = x = 0
+                crate::lopcodes::create_abx(OpCode::OP_CLOSURE, 1, 0), // R(1) = inc
+                crate::lopcodes::create_abx(OpCode::OP_CLOSURE, 4, 1), // R(4) = get
+                create_abck(OpCode::OP_CALL, 1, 1, 1, false),          // inc() (0 results)
+                create_abck(OpCode::OP_CALL, 4, 1, 2, false),          // get() (1 result)
+                return1(4),
+            ],
+            inner_protos: vec![inc_ph, get_ph],
+            ..Proto::default()
+        };
+        let outer_ph = state.global.heap.alloc_proto(outer_proto);
+        let outer_closure = state.global.heap.alloc_lclosure(LClosure {
+            proto: outer_ph,
+            upvalues: vec![],
+        });
+        state
+            .current_thread_mut()
+            .push(TValue::LuaClosure(outer_closure));
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(1));
+    }
+
+    #[test]
+    fn setlist_populates_table_array_part() {
+        // t = {}; t[1], t[2], t[3] = 10, 20, 30; return #t
+        let mut state = LuaState::new(0);
+        push_simple_closure(
+            &mut state,
+            vec![
+                create_abck(OpCode::OP_NEWTABLE, 0, 0, 0, false),
+                extraarg(),
+                loadi(1, 10),
+                loadi(2, 20),
+                loadi(3, 30),
+                crate::lopcodes::create_vabck(OpCode::OP_SETLIST, 0, 3, 0, false),
+                create_abck(OpCode::OP_LEN, 4, 0, 0, false),
+                return1(4),
+            ],
+            5,
+        );
+        state.call_value(0, 0, 1).unwrap();
+        assert_eq!(state.to_integer_x(1), Some(3));
     }
 
     // ---- Stage 5.18 generic-for ------------------------------------
