@@ -22,6 +22,7 @@ pub mod contract;
 pub mod heap;
 pub mod lapi;
 pub mod lauxlib;
+pub mod lbaselib;
 pub mod lctype;
 pub mod ldo;
 pub mod lfunc;

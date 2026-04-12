@@ -206,7 +206,7 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExprDesc) {
             let reg = fs.freereg;
             emit_abc(
                 fs,
-                OpCode::OP_GETFIELD,
+                OpCode::OP_GETTABUP,
                 reg as u32,
                 e.ind.t as u32,
                 e.ind.idx as u32,
@@ -422,6 +422,17 @@ pub fn store_var(fs: &mut FuncState, var: &mut ExprDesc, val: &mut ExprDesc) {
             emit_abc(
                 fs,
                 OpCode::OP_SETFIELD,
+                var.ind.t as u32,
+                var.ind.idx as u32,
+                reg as u32,
+                false,
+            );
+        }
+        ExpKind::IndexUp => {
+            let reg = exp2anyreg(fs, val);
+            emit_abc(
+                fs,
+                OpCode::OP_SETTABUP,
                 var.ind.t as u32,
                 var.ind.idx as u32,
                 reg as u32,

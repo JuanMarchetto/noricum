@@ -214,6 +214,26 @@ impl FuncState {
 // ---- Parser entry ----------------------------------------------------------
 
 /// Compile a Lua source string into an LClosure ready for
+/// execution. The closure's single upvalue (_ENV) is bound to
+/// `globals` if provided, else to a fresh empty table.
+pub fn parse_with_env(
+    state: &mut LuaState,
+    source: &[u8],
+    source_name: &[u8],
+    globals: crate::contract::TableHandle,
+) -> crate::contract::LClosureHandle {
+    let closure = parse(state, source, source_name);
+    // Bind the _ENV upvalue (index 0) to `globals`.
+    let env_uv = state.global.heap.alloc_upval(crate::contract::UpVal {
+        state: crate::contract::UpValState::Closed(TValue::Table(globals)),
+    });
+    // Replace the closure's upvalue list.
+    let lc = state.global.heap.lclosure_mut(closure);
+    lc.upvalues = vec![env_uv];
+    closure
+}
+
+/// Compile a Lua source string into an LClosure ready for
 /// execution. Returns the allocated closure handle.
 pub fn parse(
     state: &mut LuaState,
@@ -1038,21 +1058,23 @@ fn singlevar(_ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc, name: Str
             return;
         }
     }
-    // Fall back: global via _ENV[name]. For the main chunk, _ENV
-    // is upvalue 0. For nested functions, we need to ensure _ENV
-    // is also an upvalue. Add it lazily if not present.
-    let env_idx = if fs.proto.upvalues.iter().any(|u| is_env_upval(u)) {
-        fs.proto.upvalues.iter().position(is_env_upval).unwrap() as i32
+    // Fall back: global via _ENV[name]. Convention: _ENV lives at
+    // upvalue slot 0. The main chunk pre-registers it; nested
+    // functions chain through by referencing the outer's
+    // upvalue 0 when they lack a local binding.
+    let env_idx: i32 = if !fs.proto.upvalues.is_empty()
+        && fs.proto.upvalues[0].name.is_none()
+    {
+        0
     } else {
-        let idx = fs.proto.upvalues.len();
         fs.proto.upvalues.push(UpvalDesc {
             name: None,
             in_stack: false,
-            idx: 0, // Index 0 of outer's upvalues (where _ENV lives).
+            idx: 0,
             kind: 0,
         });
         fs.nups += 1;
-        idx as i32
+        (fs.proto.upvalues.len() - 1) as i32
     };
     *e = ExprDesc::init(ExpKind::Upval, env_idx);
     let mut key = ExprDesc::void();
@@ -1324,6 +1346,48 @@ mod tests {
         state.current_thread_mut().push(TValue::LuaClosure(closure));
         state.call_value(0, 0, 1).unwrap();
         assert_eq!(state.to_integer_x(1), Some(55));
+    }
+
+    #[test]
+    fn parse_and_call_print_via_env() {
+        use crate::lbaselib::{open_base, reset_print_buffer, take_print_buffer};
+        let mut state = LuaState::new(0);
+        let globals = open_base(&mut state);
+        reset_print_buffer();
+        let closure = parse_with_env(&mut state, b"print(42)", b"=test", globals);
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        match state.call_value(0, 0, 0) {
+            Ok(()) => {}
+            Err(e) => {
+                if let crate::contract::LuaError::Runtime(TValue::ShortString(h))
+                    | crate::contract::LuaError::Runtime(TValue::LongString(h)) = e
+                {
+                    let bytes = state.global.heap.string(h).bytes.clone();
+                    panic!("runtime error: {}", String::from_utf8_lossy(&bytes));
+                } else {
+                    panic!("runtime error: {:?}", e);
+                }
+            }
+        }
+        let buf = take_print_buffer();
+        assert_eq!(buf, vec!["42".to_string()]);
+    }
+
+    #[test]
+    fn parse_tostring_type_check() {
+        use crate::lbaselib::{open_base, reset_print_buffer, take_print_buffer};
+        let mut state = LuaState::new(0);
+        let globals = open_base(&mut state);
+        reset_print_buffer();
+        let closure = parse_with_env(
+            &mut state,
+            b"print(type(42))",
+            b"=test",
+            globals,
+        );
+        state.current_thread_mut().push(TValue::LuaClosure(closure));
+        state.call_value(0, 0, 0).unwrap();
+        assert_eq!(take_print_buffer(), vec!["number".to_string()]);
     }
 
     #[test]

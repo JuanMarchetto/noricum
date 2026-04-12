@@ -94,6 +94,8 @@ const OP_GETFIELD_U8: u8 = OpCode::OP_GETFIELD as u8;
 const OP_SETTABLE_U8: u8 = OpCode::OP_SETTABLE as u8;
 const OP_SETI_U8: u8 = OpCode::OP_SETI as u8;
 const OP_SETFIELD_U8: u8 = OpCode::OP_SETFIELD as u8;
+const OP_GETTABUP_U8: u8 = OpCode::OP_GETTABUP as u8;
+const OP_SETTABUP_U8: u8 = OpCode::OP_SETTABUP as u8;
 
 const OP_CALL_U8: u8 = OpCode::OP_CALL as u8;
 const OP_TAILCALL_U8: u8 = OpCode::OP_TAILCALL as u8;
@@ -448,6 +450,47 @@ impl LuaState {
                     let key = self.constant_at(func_slot, b);
                     let rc = self.rk_value(func_slot, base, c, k);
                     self.lua_set_index(ra, key, rc)?;
+                }
+                OP_GETTABUP_U8 => {
+                    // R(A) := UpValue[B][K(C):shortstring]
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as usize;
+                    let c = getarg_c(instruction) as usize;
+                    // Read the upvalue as the target.
+                    let closure_handle = match self.current_thread().stack[func_slot as usize] {
+                        TValue::LuaClosure(h) => h,
+                        _ => unreachable!("GETTABUP in non-Lua frame"),
+                    };
+                    let upv_h = self.global.heap.lclosure(closure_handle).upvalues[b];
+                    let upv_val = match &self.global.heap.upval(upv_h).state {
+                        UpValState::Closed(v) => *v,
+                        UpValState::Open { thread, stack_index } => {
+                            self.global.heap.thread(*thread).stack[*stack_index as usize]
+                        }
+                    };
+                    let key = self.constant_at(func_slot, c);
+                    self.lua_get_index(upv_val, key, base + a)?;
+                }
+                OP_SETTABUP_U8 => {
+                    // UpValue[A][K(B):shortstring] := R/K(C)
+                    let a = getarg_a(instruction) as usize;
+                    let b = getarg_b(instruction) as usize;
+                    let c = getarg_c(instruction) as u32;
+                    let k = getarg_k(instruction);
+                    let closure_handle = match self.current_thread().stack[func_slot as usize] {
+                        TValue::LuaClosure(h) => h,
+                        _ => unreachable!("SETTABUP in non-Lua frame"),
+                    };
+                    let upv_h = self.global.heap.lclosure(closure_handle).upvalues[a];
+                    let upv_val = match &self.global.heap.upval(upv_h).state {
+                        UpValState::Closed(v) => *v,
+                        UpValState::Open { thread, stack_index } => {
+                            self.global.heap.thread(*thread).stack[*stack_index as usize]
+                        }
+                    };
+                    let key = self.constant_at(func_slot, b);
+                    let rc = self.rk_value(func_slot, base, c, k);
+                    self.lua_set_index(upv_val, key, rc)?;
                 }
                 OP_LEN_U8 => {
                     // R(A) := #R(B) — length operator with
