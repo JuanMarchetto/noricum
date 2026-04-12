@@ -189,12 +189,20 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExprDesc) {
             reserve_regs(fs, 1);
         }
         ExpKind::IndexStr => {
+            // Free the source-table register first if it's a temp
+            // (above nvarstack) so the result reuses that slot
+            // and the caller's freereg is correct for subsequent
+            // arg slots.
+            let t_reg = e.ind.t;
+            if t_reg >= nvarstack(fs) {
+                fs.freereg -= 1;
+            }
             let reg = fs.freereg;
             emit_abc(
                 fs,
                 OpCode::OP_GETFIELD,
                 reg as u32,
-                e.ind.t as u32,
+                t_reg as u32,
                 e.ind.idx as u32,
                 false,
             );
@@ -217,13 +225,22 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExprDesc) {
             reserve_regs(fs, 1);
         }
         ExpKind::Indexed => {
+            let t_reg = e.ind.t;
+            let k_reg = e.ind.idx as u8;
+            // Free key temp first (it's above table temp).
+            if k_reg >= nvarstack(fs) {
+                fs.freereg -= 1;
+            }
+            if t_reg >= nvarstack(fs) {
+                fs.freereg -= 1;
+            }
             let reg = fs.freereg;
             emit_abc(
                 fs,
                 OpCode::OP_GETTABLE,
                 reg as u32,
-                e.ind.t as u32,
-                e.ind.idx as u32,
+                t_reg as u32,
+                k_reg as u32,
                 false,
             );
             e.k = ExpKind::NonReloc;
@@ -231,12 +248,16 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExprDesc) {
             reserve_regs(fs, 1);
         }
         ExpKind::IndexI => {
+            let t_reg = e.ind.t;
+            if t_reg >= nvarstack(fs) {
+                fs.freereg -= 1;
+            }
             let reg = fs.freereg;
             emit_abc(
                 fs,
                 OpCode::OP_GETI,
                 reg as u32,
-                e.ind.t as u32,
+                t_reg as u32,
                 e.ind.idx as u32,
                 false,
             );

@@ -74,7 +74,7 @@ impl LuaState {
     /// single-line path to the stack. `pub(crate)` so sibling
     /// modules like `ldo` can reuse the single-line path.
     #[inline]
-    pub(crate) fn current_thread(&self) -> &Thread {
+    pub fn current_thread(&self) -> &Thread {
         self.global.heap.thread(self.current_thread)
     }
 
@@ -556,6 +556,12 @@ impl LuaState {
     /// Stage 4.2.5 because it needs to read values off the stack.
     pub fn push_light_cfunction(&mut self, f: crate::contract::RawCFunction) {
         self.current_thread_mut().push(TValue::LightCFunction(f));
+    }
+
+    /// Push an arbitrary TValue onto the stack. Used by external
+    /// embedders / the standalone `lua` binary.
+    pub fn push_tvalue_helper(&mut self, v: TValue) {
+        self.current_thread_mut().push(v);
     }
 }
 

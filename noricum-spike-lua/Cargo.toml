@@ -10,6 +10,10 @@ publish = false
 name = "spike"
 path = "src/lib.rs"
 
+[[bin]]
+name = "lua"
+path = "src/bin/lua.rs"
+
 [build-dependencies]
 cc = "1"
 

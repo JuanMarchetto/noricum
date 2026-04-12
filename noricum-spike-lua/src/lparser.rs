@@ -341,6 +341,14 @@ fn statement(ls: &mut LexState, fs: &mut FuncState) {
         }
         _ => exprstat(ls, fs),
     }
+    // Reset freereg to nvarstack at the end of each statement —
+    // matches C Lua's `leavelevel` / per-statement temporary
+    // cleanup. Without this, intermediate temps from one
+    // statement leak into the next, shifting register slots.
+    let needed = nvarstack(fs);
+    if fs.freereg > needed {
+        fs.freereg = needed;
+    }
 }
 
 fn retstat(ls: &mut LexState, fs: &mut FuncState) {
