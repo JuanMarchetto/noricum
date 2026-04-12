@@ -161,8 +161,18 @@ impl LuaState {
             TValue::LuaClosure(handle) => {
                 self.invoke_lua_closure(func_slot, handle, n_results)
             }
-            TValue::Nil => Err(LuaError::Runtime(TValue::Nil)),
-            _ => Err(LuaError::Runtime(TValue::Nil)),
+            TValue::Nil => Err(LuaError::Runtime(
+                crate::lvm::make_error_string(
+                    &mut self.global,
+                    "attempt to call a nil value",
+                ),
+            )),
+            _ => Err(LuaError::Runtime(
+                crate::lvm::make_error_string(
+                    &mut self.global,
+                    "attempt to call a non-function value",
+                ),
+            )),
         }
     }
 
@@ -491,7 +501,7 @@ mod tests {
         let mut state = LuaState::new(0);
         state.push_nil();
         let result = state.call_value(0, 0, 0);
-        assert!(matches!(result, Err(LuaError::Runtime(TValue::Nil))));
+        assert!(matches!(result, Err(LuaError::Runtime(_))));
     }
 
     #[test]

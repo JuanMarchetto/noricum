@@ -133,6 +133,24 @@ const OP_VARARGPREP_U8: u8 = OpCode::OP_VARARGPREP as u8;
 /// `__newindex`. Matches `MAXTAGLOOP` in `lvm.c`.
 const MAX_TAG_LOOP: u32 = 2000;
 
+/// Build a runtime error `TValue::ShortString` from a formatted
+/// message. Interns the bytes through `GlobalState::new_string`
+/// so the GC can reach it.
+pub(crate) fn make_error_string(gs: &mut crate::contract::GlobalState, msg: &str) -> TValue {
+    let seed = gs.hash_seed;
+    let handle = gs.new_string(msg.as_bytes(), seed);
+    TValue::ShortString(handle)
+}
+
+impl LuaState {
+    /// Build a `LuaError::Runtime` carrying a formatted error
+    /// message as a short string interned on the heap. This
+    /// replaces the old `LuaError::Runtime(TValue::Nil)` stubs.
+    fn make_lua_error(&mut self, msg: &str) -> LuaError {
+        LuaError::Runtime(make_error_string(&mut self.global, msg))
+    }
+}
+
 impl LuaState {
     /// Run the bytecode interpreter for the top call frame until
     /// it returns. Expects the frame's callable slot to hold a
@@ -559,7 +577,9 @@ impl LuaState {
                             TValue::Integer(step),
                         ) => {
                             if step == 0 {
-                                return Err(LuaError::Runtime(TValue::Nil));
+                                return Err(self.make_lua_error(
+                                    "'for' step is zero",
+                                ));
                             }
                             // Empty loop: (step > 0 && init > limit)
                             // or (step < 0 && init < limit)
@@ -587,8 +607,9 @@ impl LuaState {
                             }
                         }
                         _ => {
-                            // Float loops not yet supported.
-                            return Err(LuaError::Runtime(TValue::Nil));
+                            return Err(self.make_lua_error(
+                                "'for' initial value must be a number",
+                            ));
                         }
                     }
                 }
@@ -634,7 +655,9 @@ impl LuaState {
                             }
                         }
                         _ => {
-                            return Err(LuaError::Runtime(TValue::Nil));
+                            return Err(self.make_lua_error(
+                                "'for' loop variables must be numbers",
+                            ));
                         }
                     }
                 }
@@ -795,7 +818,9 @@ impl LuaState {
                     let vc = crate::lopcodes::getarg_vc(instruction) as u32;
                     let table_handle = match self.current_thread().stack[(base + a) as usize] {
                         TValue::Table(h) => h,
-                        _ => return Err(LuaError::Runtime(TValue::Nil)),
+                        _ => return Err(self.make_lua_error(
+                            "SETLIST target is not a table",
+                        )),
                     };
                     let n = if vb == 0 {
                         let top = self.current_thread().top;
@@ -1204,7 +1229,9 @@ impl LuaState {
             tm = self.global.get_metamethod(b, event);
         }
         if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
-            return Err(LuaError::Runtime(TValue::Nil));
+            return Err(self.make_lua_error(
+                "attempt to perform arithmetic on a non-numeric value",
+            ));
         }
         self.call_binary_metamethod(tm, a, b, dest_slot)
     }
@@ -1289,7 +1316,9 @@ impl LuaState {
             tm = self.global.get_metamethod(b, TagMethod::Lt);
         }
         if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
-            return Err(LuaError::Runtime(TValue::Nil));
+            return Err(self.make_lua_error(
+                "attempt to compare two values",
+            ));
         }
         let result = self.call_binary_metamethod_to_register(tm, a, b)?;
         Ok(result.is_truthy())
@@ -1312,10 +1341,9 @@ impl LuaState {
             tm = self.global.get_metamethod(b, TagMethod::Le);
         }
         if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
-            // Lua 5.4 used to fall back to `not (b < a)` but as of
-            // 5.4.4 that is disabled by default because it breaks
-            // partial orders. We preserve the strict semantics.
-            return Err(LuaError::Runtime(TValue::Nil));
+            return Err(self.make_lua_error(
+                "attempt to compare two values",
+            ));
         }
         let result = self.call_binary_metamethod_to_register(tm, a, b)?;
         Ok(result.is_truthy())
@@ -1399,7 +1427,9 @@ impl LuaState {
             _ => {
                 let tm = self.global.get_metamethod(v, TagMethod::Len);
                 if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
-                    return Err(LuaError::Runtime(TValue::Nil));
+                    return Err(self.make_lua_error(
+                        "attempt to get length of a non-string/table value",
+                    ));
                 }
                 self.call_unary_metamethod_to_register(tm, v)
             }
@@ -1463,7 +1493,9 @@ impl LuaState {
                     tm = self.global.get_metamethod(right, TagMethod::Concat);
                 }
                 if matches!(tm, TValue::Nil) || !Self::is_callable(tm) {
-                    return Err(LuaError::Runtime(TValue::Nil));
+                    return Err(self.make_lua_error(
+                        "attempt to concatenate a non-string value",
+                    ));
                 }
                 let result = self.call_binary_metamethod_to_register(tm, left, right)?;
                 self.current_thread_mut().stack[left_idx as usize] = result;
@@ -1597,7 +1629,9 @@ impl LuaState {
                         .global
                         .get_metamethod(target, TagMethod::Index);
                     if matches!(tm, TValue::Nil) {
-                        return Err(LuaError::Runtime(TValue::Nil));
+                        return Err(self.make_lua_error(
+                            "attempt to index a non-table value",
+                        ));
                     }
                     if Self::is_callable(tm) {
                         return self.call_index_metamethod(
@@ -1609,7 +1643,9 @@ impl LuaState {
                 }
             }
         }
-        Err(LuaError::Runtime(TValue::Nil))
+        Err(self.make_lua_error(
+            "'__index' chain too long; possible loop",
+        ))
     }
 
     /// Perform a Lua store operation (`t[key] := value`) with
@@ -1655,7 +1691,9 @@ impl LuaState {
                         .global
                         .get_metamethod(target, TagMethod::NewIndex);
                     if matches!(tm, TValue::Nil) {
-                        return Err(LuaError::Runtime(TValue::Nil));
+                        return Err(self.make_lua_error(
+                            "attempt to index a non-table value",
+                        ));
                     }
                     if Self::is_callable(tm) {
                         return self.call_newindex_metamethod(
@@ -1667,7 +1705,9 @@ impl LuaState {
                 }
             }
         }
-        Err(LuaError::Runtime(TValue::Nil))
+        Err(self.make_lua_error(
+            "'__newindex' chain too long; possible loop",
+        ))
     }
 
     /// True for the three "function" variants Lua recognises as
