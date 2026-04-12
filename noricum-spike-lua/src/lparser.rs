@@ -746,8 +746,8 @@ fn forlist(ls: &mut LexState, fs: &mut FuncState, first_var: StringHandle) {
         lcode::patch_list(fs, *brk, here);
     }
 
-    // Clean up: pop the 4 hidden + nvars loop-variable locals.
-    let total = 4 + nvars as i16;
+    // Clean up: pop the 3 hidden + nvars loop-variable locals.
+    let total = 3 + nvars as i16;
     fs.nactvar -= total;
     fs.actvar.truncate(fs.actvar.len() - total as usize);
     fs.freereg = base;

@@ -82,7 +82,7 @@ impl LuaState {
     /// [`LuaState::current_thread`]. `pub(crate)` so `lauxlib`
     /// can reuse the single-line path.
     #[inline]
-    pub(crate) fn current_thread_mut(&mut self) -> &mut Thread {
+    pub fn current_thread_mut(&mut self) -> &mut Thread {
         self.global.heap.thread_mut(self.current_thread)
     }
 
