@@ -139,6 +139,10 @@ pub struct BlockCnt {
     pub upval: bool,
     pub is_loop: u8,
     pub inside_tbc: bool,
+    /// Pending `break` jump PCs collected within this block.
+    /// The ends of enclosing loops patch these to the post-loop
+    /// PC.
+    pub breaks: Vec<i32>,
 }
 
 // ---- Label / Goto ----------------------------------------------------------
@@ -256,6 +260,7 @@ pub fn parse(
         upval: false,
         is_loop: 0,
         inside_tbc: false,
+        breaks: Vec::new(),
     });
 
     // Add _ENV upvalue (index 0).
@@ -330,11 +335,20 @@ fn statement(ls: &mut LexState, fs: &mut FuncState) {
         TK_RETURN => retstat(ls, fs),
         TK_BREAK => {
             ls.next_token();
-            // break is a placeholder — needs label resolution.
-            // For now just emit a JMP that will need patching.
+            // Find the nearest enclosing loop and record the JMP
+            // PC in its break_chain for later patching.
             let jmp = lcode::emit_jump(fs);
-            // TODO: record break for patching when block closes.
-            let _ = jmp;
+            let mut patched = false;
+            for bl in fs.blocks.iter_mut().rev() {
+                if bl.is_loop != 0 {
+                    bl.breaks.push(jmp);
+                    patched = true;
+                    break;
+                }
+            }
+            if !patched {
+                ls.syntax_error("break outside a loop");
+            }
         }
         x if x == b';' as i32 => {
             ls.next_token(); // skip ';'
@@ -492,22 +506,58 @@ fn whilestat(ls: &mut LexState, fs: &mut FuncState) {
     check_next(ls, TK_DO);
     lcode::go_if_true(fs, &mut e);
     let exit_jmp = e.f;
-    block(ls, fs);
+    // Open a loop block so `break` inside the body knows to
+    // attach its JMP to this loop's break list.
+    fs.blocks.push(BlockCnt {
+        firstlabel: fs.labels.len(),
+        firstgoto: fs.gotos.len(),
+        nactvar: fs.nactvar,
+        upval: false,
+        is_loop: 1,
+        inside_tbc: false,
+        breaks: Vec::new(),
+    });
+    statlist(ls, fs);
+    let bl = fs.blocks.pop().expect("while: block missing");
+    // Back-edge jump to loop_start.
     let back_jmp = lcode::emit_jump(fs);
     lcode::patch_list(fs, back_jmp, loop_start);
     check_match(ls, TK_END, TK_WHILE);
     lcode::patch_to_here(fs, exit_jmp);
+    // Patch all breaks to land here (after the back-edge).
+    let here = lcode::get_label(fs);
+    for brk in &bl.breaks {
+        lcode::patch_list(fs, *brk, here);
+    }
+    fs.nactvar = bl.nactvar;
+    fs.freereg = nvarstack(fs);
 }
 
 fn repeatstat(ls: &mut LexState, fs: &mut FuncState) {
     ls.next_token(); // skip REPEAT
     let loop_start = lcode::get_label(fs);
-    block(ls, fs);
+    fs.blocks.push(BlockCnt {
+        firstlabel: fs.labels.len(),
+        firstgoto: fs.gotos.len(),
+        nactvar: fs.nactvar,
+        upval: false,
+        is_loop: 1,
+        inside_tbc: false,
+        breaks: Vec::new(),
+    });
+    statlist(ls, fs);
     check_match(ls, TK_UNTIL, TK_REPEAT);
     let mut e = ExprDesc::void();
     expr(ls, fs, &mut e);
     lcode::go_if_true(fs, &mut e);
     lcode::patch_list(fs, e.f, loop_start);
+    let bl = fs.blocks.pop().expect("repeat: block missing");
+    let here = lcode::get_label(fs);
+    for brk in &bl.breaks {
+        lcode::patch_list(fs, *brk, here);
+    }
+    fs.nactvar = bl.nactvar;
+    fs.freereg = nvarstack(fs);
 }
 
 fn forstat(ls: &mut LexState, fs: &mut FuncState) {
@@ -572,9 +622,20 @@ fn fornum(ls: &mut LexState, fs: &mut FuncState, loop_var: StringHandle) {
     adjust_locals(fs, 1);
     fs.freereg = base + 4;
 
+    // Open a loop block so `break` lands after the FORLOOP.
+    fs.blocks.push(BlockCnt {
+        firstlabel: fs.labels.len(),
+        firstgoto: fs.gotos.len(),
+        nactvar: fs.nactvar,
+        upval: false,
+        is_loop: 1,
+        inside_tbc: false,
+        breaks: Vec::new(),
+    });
     let loop_start = fs.pc;
-    block(ls, fs);
+    statlist(ls, fs);
     check_match(ls, TK_END, TK_FOR);
+    let bl = fs.blocks.pop().expect("for: block missing");
 
     // Emit OP_FORLOOP jumping back to loop_start.
     let back_offset = (fs.pc - loop_start + 1) as u32; // +1 for FORLOOP itself
@@ -590,6 +651,13 @@ fn fornum(ls: &mut LexState, fs: &mut FuncState, loop_var: StringHandle) {
     let instr = &mut fs.proto.code[forprep_pc as usize];
     // Replace Bx. Bx is bits 15..31 (17 bits).
     *instr = (*instr & 0x7FFF) | (skip_offset << 15);
+
+    // Patch breaks inside the for body to land here
+    // (post-FORLOOP).
+    let here = lcode::get_label(fs);
+    for brk in &bl.breaks {
+        lcode::patch_list(fs, *brk, here);
+    }
 
     // Clean up: pop the 4 for-loop locals.
     fs.nactvar -= 4;
@@ -684,6 +752,7 @@ fn body(ls: &mut LexState, outer_fs: &mut FuncState, e: &mut ExprDesc, is_method
         upval: false,
         is_loop: 0,
         inside_tbc: false,
+        breaks: Vec::new(),
     });
 
     // Parse the body.
@@ -736,6 +805,7 @@ fn block(ls: &mut LexState, fs: &mut FuncState) {
         upval: false,
         is_loop: 0,
         inside_tbc: false,
+        breaks: Vec::new(),
     });
     statlist(ls, fs);
     let bl = fs.blocks.pop().unwrap();
