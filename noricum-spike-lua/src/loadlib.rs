@@ -351,10 +351,14 @@ unsafe extern "C" fn load_string(state: *mut LuaState) -> std::os::raw::c_int {
         }
     };
     // Wrap parse in catch_unwind since parser panics on syntax
-    // errors (pending real error propagation).
+    // errors (pending real error propagation). Silence the default
+    // panic hook so the backtrace doesn't leak to stderr.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::lparser::parse_with_env(state, &src_bytes, &chunkname_bytes, globals)
     }));
+    std::panic::set_hook(prev_hook);
     match result {
         Ok(cl) => {
             state.current_thread_mut().push(TValue::LuaClosure(cl));

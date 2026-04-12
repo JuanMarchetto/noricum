@@ -128,6 +128,9 @@ pub struct ActiveVar {
 }
 
 pub const VDKREG: u8 = 0;
+pub const VDKCONST: u8 = 1;
+pub const VDKTOCLOSE: u8 = 2;
+pub const VDKCTC: u8 = 3;
 
 // ---- Block scope -----------------------------------------------------------
 
@@ -456,18 +459,23 @@ fn localstat(ls: &mut LexState, fs: &mut FuncState) {
         // in body()). That slot IS the local's register.
         return;
     }
-    // Collect variable names: `a, b, c, ...`
-    let mut names = Vec::new();
+    // Collect variable names: `a, b, c, ...` with optional <attrib>
+    let mut names: Vec<(StringHandle, u8)> = Vec::new();
     loop {
         let name = check_name(ls);
-        names.push(name);
+        let kind = getlocalattrib(ls);
+        names.push((name, kind));
         if !testnext(ls, b',' as i32) {
             break;
         }
     }
     let nvars = names.len();
-    for &name in &names {
+    let first_vidx = fs.actvar.len();
+    for &(name, _) in &names {
         let _vidx = new_local(fs, name);
+    }
+    for (i, (_, kind)) in names.iter().enumerate() {
+        fs.actvar[first_vidx + i].kind = *kind;
     }
     let n_values = if testnext(ls, b'=' as i32) {
         // Collect all RHS expressions, then discharge with
@@ -542,7 +550,12 @@ fn exprstat(ls: &mut LexState, fs: &mut FuncState) {
 }
 
 fn assignment(ls: &mut LexState, fs: &mut FuncState, lhs: &mut ExprDesc, _nvars: i32) {
-    // Simple single-variable assignment for now.
+    if lhs.k == ExpKind::Local {
+        let vidx = lhs.var.vidx as usize;
+        if vidx < fs.actvar.len() && fs.actvar[vidx].kind == VDKCONST {
+            ls.syntax_error("attempt to assign to const variable");
+        }
+    }
     check_next(ls, b'=' as i32);
     let mut rhs = ExprDesc::void();
     expr(ls, fs, &mut rhs);
@@ -1534,6 +1547,23 @@ fn check_name(ls: &mut LexState) -> StringHandle {
     };
     ls.next_token();
     h
+}
+
+/// Parse optional `<Name>` attribute after a local-var name.
+/// Returns VDKREG, VDKCONST, or VDKTOCLOSE.
+fn getlocalattrib(ls: &mut LexState) -> u8 {
+    if !testnext(ls, b'<' as i32) {
+        return VDKREG;
+    }
+    let attr_h = check_name(ls);
+    check_next(ls, b'>' as i32);
+    let bytes = unsafe { (*ls.gs).heap.string(attr_h).bytes.clone() };
+    let kind = match bytes.as_slice() {
+        b"const" => VDKCONST,
+        b"close" => VDKTOCLOSE,
+        _ => ls.syntax_error("unknown attribute"),
+    };
+    kind
 }
 
 fn token_name(t: i32) -> &'static str {

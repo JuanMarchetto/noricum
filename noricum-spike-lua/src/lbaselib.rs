@@ -476,16 +476,28 @@ fn tv_type_name(state: &LuaState, idx: i32) -> &'static str {
 }
 
 fn tv_to_string(state: &mut LuaState, idx: i32) -> String {
-    if let Some(bytes) = state.to_lstring(idx) {
-        return String::from_utf8_lossy(bytes).to_string();
-    }
-    if let Some(i) = state.to_integer_x(idx) {
-        return i.to_string();
-    }
-    if let Some(f) = state.to_number_x(idx) {
-        return format!("{}", f);
-    }
+    // Check type before coercing — floats and integers must format
+    // differently (`1` vs `1.0`). to_integer_x would happily convert
+    // a float with integer value and lose the decimal point.
     let tt = state.type_at(idx);
+    if tt == 4 {
+        if let Some(bytes) = state.to_lstring(idx) {
+            return String::from_utf8_lossy(bytes).to_string();
+        }
+    }
+    if tt == 3 {
+        // Introspect the underlying TValue to distinguish integer/float.
+        let v = {
+            let base = state.frame_base_index().unwrap_or(0) as usize;
+            let slot = (base as i32 + idx - 1).max(0) as usize;
+            state.current_thread().stack.get(slot).copied().unwrap_or(crate::contract::TValue::Nil)
+        };
+        match v {
+            crate::contract::TValue::Integer(i) => return i.to_string(),
+            crate::contract::TValue::Number(f) => return format_lua_number(f),
+            _ => {}
+        }
+    }
     match tt {
         0 => "nil".to_string(),
         1 => if state.to_boolean(idx) { "true" } else { "false" }.to_string(),
@@ -493,6 +505,27 @@ fn tv_to_string(state: &mut LuaState, idx: i32) -> String {
         6 => "function: ?".to_string(),
         _ => format!("{}: ?", tv_type_name(state, idx)),
     }
+}
+
+/// Format a Lua float using `%.14g` semantics, adding a `.0` suffix
+/// when the output would otherwise look like an integer so the value
+/// survives a tostring/tonumber round-trip with type preserved.
+pub(crate) fn format_lua_number(f: f64) -> String {
+    if f.is_nan() {
+        return "nan".to_string();
+    }
+    if f.is_infinite() {
+        return if f < 0.0 { "-inf" } else { "inf" }.to_string();
+    }
+    let s = format!("{:.14e}", f);
+    // Use %g-equivalent via Rust's own shortest-repr when possible.
+    let mut s = format!("{}", f);
+    // If the result contains no '.', 'e', or 'n'/'i' (nan/inf), append .0
+    if !s.contains('.') && !s.contains('e') && !s.contains('E')
+        && !s.contains('n') && !s.contains('i') {
+        s.push_str(".0");
+    }
+    s
 }
 
 // ---- Tests ----------------------------------------------------------------

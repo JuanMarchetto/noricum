@@ -145,6 +145,17 @@ pub(crate) fn make_error_string(gs: &mut crate::contract::GlobalState, msg: &str
     TValue::ShortString(handle)
 }
 
+/// Coerce a `TValue` to `f64` for the numeric-for loop. Accepts
+/// Integer/Number directly; leaves string coercion to the caller
+/// (would need heap access). Returns `None` for non-numeric inputs.
+pub(crate) fn tonumber_coerce(v: &TValue) -> Option<f64> {
+    match v {
+        TValue::Integer(i) => Some(*i as f64),
+        TValue::Number(f) => Some(*f),
+        _ => None,
+    }
+}
+
 impl LuaState {
     /// Build a `LuaError::Runtime` carrying a formatted error
     /// message as a short string interned on the heap. This
@@ -624,60 +635,66 @@ impl LuaState {
                 OP_FORPREP_U8 => {
                     // Initialize a numeric for loop. R(A) =
                     // initial, R(A+1) = limit, R(A+2) = step.
-                    // Stage 5.9 implements the integer-only
-                    // case; float loops fall through to the
-                    // unimplemented panic.
+                    // If all three are integer, run an integer
+                    // loop; otherwise coerce all to float.
                     let a = getarg_a(instruction) as u32;
                     let bx = getarg_bx(instruction) as u32;
                     let init = self.current_thread().stack[(base + a) as usize];
                     let limit = self.current_thread().stack[(base + a + 1) as usize];
                     let step = self.current_thread().stack[(base + a + 2) as usize];
-                    match (init, limit, step) {
-                        (
-                            TValue::Integer(init),
-                            TValue::Integer(limit),
-                            TValue::Integer(step),
-                        ) => {
-                            if step == 0 {
-                                return Err(self.make_lua_error(
-                                    "'for' step is zero",
-                                ));
-                            }
-                            // Empty loop: (step > 0 && init > limit)
-                            // or (step < 0 && init < limit)
-                            let skip = (step > 0 && init > limit)
-                                || (step < 0 && init < limit);
-                            if skip {
-                                // Jump past the loop body and the
-                                // trailing FORLOOP instruction. C
-                                // Lua encodes this as "pc += Bx + 1"
-                                // because Bx is offset-to-FORLOOP
-                                // and we want to skip FORLOOP too.
-                                let frame_mut = self
-                                    .current_thread_mut()
-                                    .frames
-                                    .last_mut()
-                                    .expect("FORPREP: no frame");
-                                frame_mut.saved_pc += bx + 1;
-                            } else {
-                                // R(A+3) = R(A) — the visible loop
-                                // variable, separate from the
-                                // internal counter R(A).
-                                let thread = self.current_thread_mut();
-                                thread.stack[(base + a + 3) as usize] =
-                                    TValue::Integer(init);
-                            }
+                    let all_int = matches!(init, TValue::Integer(_))
+                        && matches!(limit, TValue::Integer(_))
+                        && matches!(step, TValue::Integer(_));
+                    if all_int {
+                        let (TValue::Integer(init), TValue::Integer(limit), TValue::Integer(step)) =
+                            (init, limit, step)
+                        else { unreachable!() };
+                        if step == 0 {
+                            return Err(self.make_lua_error("'for' step is zero"));
                         }
-                        _ => {
+                        let skip = (step > 0 && init > limit)
+                            || (step < 0 && init < limit);
+                        if skip {
+                            let frame_mut = self
+                                .current_thread_mut()
+                                .frames
+                                .last_mut()
+                                .expect("FORPREP: no frame");
+                            frame_mut.saved_pc += bx + 1;
+                        } else {
+                            let thread = self.current_thread_mut();
+                            thread.stack[(base + a + 3) as usize] = TValue::Integer(init);
+                        }
+                    } else {
+                        // Float loop (or mixed types coerced to float).
+                        let fi = tonumber_coerce(&init);
+                        let fl = tonumber_coerce(&limit);
+                        let fs = tonumber_coerce(&step);
+                        let (Some(fi), Some(fl), Some(fs)) = (fi, fl, fs) else {
                             return Err(self.make_lua_error(
-                                "'for' initial value must be a number",
+                                "'for' initial/limit/step must be numbers",
                             ));
+                        };
+                        if fs == 0.0 {
+                            return Err(self.make_lua_error("'for' step is zero"));
+                        }
+                        let skip = (fs > 0.0 && fi > fl) || (fs < 0.0 && fi < fl);
+                        let thread = self.current_thread_mut();
+                        thread.stack[(base + a) as usize] = TValue::Number(fi);
+                        thread.stack[(base + a + 1) as usize] = TValue::Number(fl);
+                        thread.stack[(base + a + 2) as usize] = TValue::Number(fs);
+                        if skip {
+                            let frame_mut = thread
+                                .frames
+                                .last_mut()
+                                .expect("FORPREP: no frame");
+                            frame_mut.saved_pc += bx + 1;
+                        } else {
+                            thread.stack[(base + a + 3) as usize] = TValue::Number(fi);
                         }
                     }
                 }
                 OP_FORLOOP_U8 => {
-                    // R(A) += R(A+2); if the loop still runs,
-                    // R(A+3) = R(A); pc -= Bx.
                     let a = getarg_a(instruction) as u32;
                     let bx = getarg_bx(instruction) as u32;
                     let counter = self.current_thread().stack[(base + a) as usize];
@@ -690,9 +707,6 @@ impl LuaState {
                             TValue::Integer(step),
                         ) => {
                             let next = counter.wrapping_add(step);
-                            // Loop continues if next is still
-                            // within [limit] in the direction of
-                            // step.
                             let still_running = if step > 0 {
                                 next <= limit
                             } else {
@@ -700,19 +714,30 @@ impl LuaState {
                             };
                             if still_running {
                                 let thread = self.current_thread_mut();
-                                thread.stack[(base + a) as usize] =
-                                    TValue::Integer(next);
-                                thread.stack[(base + a + 3) as usize] =
-                                    TValue::Integer(next);
+                                thread.stack[(base + a) as usize] = TValue::Integer(next);
+                                thread.stack[(base + a + 3) as usize] = TValue::Integer(next);
                                 let frame_mut = thread
                                     .frames
                                     .last_mut()
                                     .expect("FORLOOP: no frame");
-                                // Jump back: saved_pc -= Bx. pc
-                                // was already advanced past
-                                // FORLOOP, so this points at the
-                                // first instruction of the loop
-                                // body.
+                                frame_mut.saved_pc = frame_mut.saved_pc.wrapping_sub(bx);
+                            }
+                        }
+                        (TValue::Number(counter), TValue::Number(limit), TValue::Number(step)) => {
+                            let next = counter + step;
+                            let still_running = if step > 0.0 {
+                                next <= limit
+                            } else {
+                                next >= limit
+                            };
+                            if still_running {
+                                let thread = self.current_thread_mut();
+                                thread.stack[(base + a) as usize] = TValue::Number(next);
+                                thread.stack[(base + a + 3) as usize] = TValue::Number(next);
+                                let frame_mut = thread
+                                    .frames
+                                    .last_mut()
+                                    .expect("FORLOOP: no frame");
                                 frame_mut.saved_pc = frame_mut.saved_pc.wrapping_sub(bx);
                             }
                         }

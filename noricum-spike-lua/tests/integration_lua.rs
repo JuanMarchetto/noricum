@@ -144,7 +144,8 @@ fn math_functions() {
     let out = run(r#"
         print(math.floor(3.7), math.ceil(3.2), math.sqrt(9), math.max(1,5,3))
     "#);
-    assert_eq!(out, vec!["3\t4\t3\t5".to_string()]);
+    // math.sqrt always returns a float, so print formats it as "3.0"
+    assert_eq!(out, vec!["3\t4\t3.0\t5".to_string()]);
 }
 
 #[test]

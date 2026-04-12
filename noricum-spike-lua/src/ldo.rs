@@ -148,32 +148,54 @@ impl LuaState {
                 self.invoke_c_function(func_slot, raw_fn, n_results)
             }
             TValue::CClosure(handle) => {
-                // Resolve the captured function pointer. C
-                // closure upvalues live in `self.global.heap
-                // .cclosures[handle].upvalues` and will be
-                // exposed via pseudo-indices in a later sub
-                // commit — for now we just dispatch on the
-                // raw function pointer so simple C closures
-                // (no upvalue access) work.
                 let raw_fn = self.global.heap.cclosure(handle).f;
                 self.invoke_c_function(func_slot, raw_fn, n_results)
             }
             TValue::LuaClosure(handle) => {
                 self.invoke_lua_closure(func_slot, handle, n_results)
             }
-            TValue::Nil => Err(LuaError::Runtime(
-                crate::lvm::make_error_string(
-                    &mut self.global,
-                    "attempt to call a nil value",
-                ),
-            )),
-            _ => Err(LuaError::Runtime(
-                crate::lvm::make_error_string(
-                    &mut self.global,
-                    "attempt to call a non-function value",
-                ),
-            )),
+            _ => self.try_call_metamethod(func_slot, n_args, n_results, func_value),
         }
+    }
+
+    /// Try `__call` metamethod for a non-callable value. If present,
+    /// shift args up by one, place the original value at func_slot+1,
+    /// install the metamethod at func_slot, and recurse into
+    /// `call_value` with n_args + 1.
+    fn try_call_metamethod(
+        &mut self,
+        func_slot: u32,
+        n_args: u32,
+        n_results: i16,
+        func_value: TValue,
+    ) -> LuaResult<()> {
+        let mm = self.global.get_metamethod(func_value, crate::ltm::TagMethod::Call);
+        if matches!(mm, TValue::Nil) {
+            let msg = match func_value {
+                TValue::Nil => "attempt to call a nil value",
+                TValue::False | TValue::True => "attempt to call a boolean value",
+                TValue::Integer(_) | TValue::Number(_) => "attempt to call a number value",
+                TValue::ShortString(_) | TValue::LongString(_) => "attempt to call a string value",
+                TValue::Table(_) => "attempt to call a table value",
+                _ => "attempt to call a non-function value",
+            };
+            return Err(LuaError::Runtime(crate::lvm::make_error_string(
+                &mut self.global,
+                msg,
+            )));
+        }
+        let thread = self.current_thread_mut();
+        let base = func_slot as usize;
+        let total = (n_args + 1) as usize;
+        if thread.stack.len() < base + total + 1 {
+            thread.stack.resize(base + total + 1, TValue::Nil);
+        }
+        for i in (0..total).rev() {
+            thread.stack[base + 1 + i] = thread.stack[base + i];
+        }
+        thread.stack[base] = mm;
+        thread.top = (base + total + 1) as u32;
+        self.call_value(func_slot, n_args + 1, n_results)
     }
 
     /// Push a call frame, hand control to `raw_fn` via a raw
