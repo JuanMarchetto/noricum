@@ -432,16 +432,34 @@ fn retstat(ls: &mut LexState, fs: &mut FuncState) {
     ls.next_token(); // skip RETURN
     let first = fs.freereg;
     let nret;
+    let multret;
     if block_follow(ls, true) || ls.t.token == b';' as i32 {
         nret = 0;
+        multret = false;
     } else {
-        nret = explist(ls, fs);
+        // Use explist_ex so a trailing function call or `...`
+        // expands to MULTRET — `return f(...)` should return ALL
+        // of f's values, not just the first.
+        let (n, mr) = explist_ex(ls, fs);
+        nret = n;
+        multret = mr;
     }
-    // After explist, results occupy consecutive registers ending
-    // at fs.freereg - 1. The first return register is
-    // fs.freereg - nret.
-    let actual_first = (fs.freereg as i32) - nret;
-    lcode::code_return(fs, actual_first, nret);
+    if multret {
+        // MULTRET: encode RETURN with B=0 so the VM grabs everything
+        // from `actual_first` up to the current top.
+        let actual_first = first as i32;
+        lcode::emit_abc(
+            fs,
+            crate::lopcodes::OpCode::OP_RETURN,
+            actual_first as u32,
+            0,
+            0,
+            false,
+        );
+    } else {
+        let actual_first = (fs.freereg as i32) - nret;
+        lcode::code_return(fs, actual_first, nret);
+    }
     let _ = first;
     testnext(ls, b';' as i32);
 }

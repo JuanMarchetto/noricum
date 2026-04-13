@@ -119,15 +119,57 @@ unsafe extern "C" fn lua_type(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn lua_tonumber(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
-    // Two-arg form: tonumber(s, base). Only the single-arg form
-    // covered here; base form left as an enhancement.
-    if let Some(i) = state.to_integer_x(1) {
-        state.push_integer(i);
-    } else if let Some(f) = state.to_number_x(1) {
-        state.push_number(f);
-    } else {
+    let top = state.get_top() as i32;
+    // Two-arg form: tonumber(s, base). When `base` is given, the
+    // first arg must be a string and the result is an integer
+    // parsed in that base.
+    if top >= 2 {
+        let base = state.to_integer_x(2).unwrap_or(10) as u32;
+        if let Some(bytes) = state.to_lstring(1) {
+            let s = std::str::from_utf8(bytes).unwrap_or("").trim();
+            if let Ok(n) = i64::from_str_radix(s, base) {
+                state.push_integer(n);
+                return 1;
+            }
+        }
         state.push_nil();
+        return 1;
     }
+    // Single-arg form. First check the underlying TValue: numbers
+    // pass through, strings get parsed as int-then-float.
+    use crate::contract::TValue;
+    match state.value_at_public(1) {
+        Some(TValue::Integer(i)) => {
+            state.push_integer(i);
+            return 1;
+        }
+        Some(TValue::Number(f)) => {
+            state.push_number(f);
+            return 1;
+        }
+        Some(TValue::ShortString(_)) | Some(TValue::LongString(_)) => {
+            if let Some(bytes) = state.to_lstring(1) {
+                let s = std::str::from_utf8(bytes).unwrap_or("").trim();
+                if let Ok(i) = s.parse::<i64>() {
+                    state.push_integer(i);
+                    return 1;
+                }
+                if let Ok(f) = s.parse::<f64>() {
+                    state.push_number(f);
+                    return 1;
+                }
+                // Hex prefix support.
+                if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    if let Ok(i) = i64::from_str_radix(rest, 16) {
+                        state.push_integer(i);
+                        return 1;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    state.push_nil();
     1
 }
 
@@ -766,10 +808,11 @@ fn tv_to_string(state: &mut LuaState, idx: i32) -> String {
 /// Format a Lua float using `%.14g` semantics, adding a `.0` suffix
 /// when the output would otherwise look like an integer so the value
 /// survives a tostring/tonumber round-trip with type preserved.
-/// Format a Lua number using `%.17g` semantics — the same default
-/// Lua 5.5 uses (`LUAI_NUMFMT` in luaconf.h). 17 significant
-/// decimal digits is the minimum needed to round-trip every f64
-/// exactly; matches the C reference byte-for-byte.
+/// Format a Lua number using Lua 5.5's two-stage strategy: first
+/// try `%.15g` (LUA_NUMBER_FMT). If `tonumber(tostring(n)) == n`
+/// we use that — the shortest precise form. Otherwise fall back
+/// to `%.17g` (LUA_NUMBER_FMT_N) to guarantee a round-trip.
+/// Matches lobject.c::tostringbuffFloat byte-for-byte.
 pub fn format_lua_number(f: f64) -> String {
     if f.is_nan() {
         return "nan".to_string();
@@ -780,9 +823,16 @@ pub fn format_lua_number(f: f64) -> String {
     if f == 0.0 {
         return if f.is_sign_negative() { "-0.0".to_string() } else { "0.0".to_string() };
     }
-    let s = format_g(f, 17);
-    // Add a trailing ".0" if the output looks like an integer so
-    // tonumber(tostring(x)) preserves the float type.
+    let mut s = format_g(f, 15);
+    // Round-trip test: parse the formatted string back. If it
+    // matches bit-exact, we're done. Otherwise widen to %.17g.
+    let needs_widen = match s.parse::<f64>() {
+        Ok(parsed) => parsed.to_bits() != f.to_bits(),
+        Err(_) => true,
+    };
+    if needs_widen {
+        s = format_g(f, 17);
+    }
     if !s.contains('.') && !s.contains('e') && !s.contains('E') && !s.contains('n') && !s.contains('i') {
         let mut with_dot = s;
         with_dot.push_str(".0");
