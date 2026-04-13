@@ -53,6 +53,7 @@ const OP_MOVE_U8: u8 = OpCode::OP_MOVE as u8;
 const OP_LOADI_U8: u8 = OpCode::OP_LOADI as u8;
 const OP_LOADFALSE_U8: u8 = OpCode::OP_LOADFALSE as u8;
 const OP_LOADTRUE_U8: u8 = OpCode::OP_LOADTRUE as u8;
+const OP_LFALSESKIP_U8: u8 = OpCode::OP_LFALSESKIP as u8;
 const OP_LOADNIL_U8: u8 = OpCode::OP_LOADNIL as u8;
 const OP_RETURN_U8: u8 = OpCode::OP_RETURN as u8;
 const OP_RETURN0_U8: u8 = OpCode::OP_RETURN0 as u8;
@@ -232,6 +233,21 @@ impl LuaState {
                 OP_LOADTRUE_U8 => {
                     let a = getarg_a(instruction) as u32;
                     self.current_thread_mut().stack[(base + a) as usize] = TValue::True;
+                }
+                OP_LFALSESKIP_U8 => {
+                    // Load FALSE into R(A) AND skip the next
+                    // instruction. Used in the comparison-as-value
+                    // pattern: TRUE branch falls through past the
+                    // LFALSESKIP via a +1 jump, FALSE branch lands
+                    // here directly.
+                    let a = getarg_a(instruction) as u32;
+                    self.current_thread_mut().stack[(base + a) as usize] = TValue::False;
+                    let frame = self
+                        .current_thread_mut()
+                        .frames
+                        .last_mut()
+                        .expect("LFALSESKIP: no frame");
+                    frame.saved_pc += 1;
                 }
                 OP_LOADNIL_U8 => {
                     let a = getarg_a(instruction) as u32;

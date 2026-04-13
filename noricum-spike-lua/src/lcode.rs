@@ -345,8 +345,31 @@ fn discharge_to_reg(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
                 );
             }
         }
+        ExpKind::Jmp => {
+            // Comparison used as a value. The CMP+JMP at e.info is
+            // already in place: JMP fires when comparison is
+            // FALSE, fall-through means comparison was TRUE.
+            // Inline the LOADBOOL pair so the natural fall-through
+            // lands on LOADTRUE:
+            //   ...CMP/JMP (e.info) ...
+            //   LOADTRUE  R          ; cmp-matched (skipped JMP) lands here
+            //   JMP past_false       ; over the LOADFALSE
+            //   LOADFALSE R          ; e.info's JMP lands here
+            //   ...next code         ; the skip JMP lands here
+            let cmp_jmp = e.info;
+            let _t_pc = emit_abc(fs, OpCode::OP_LOADTRUE, reg as u32, 0, 0, false);
+            let skip_jmp = emit_jump(fs);
+            let f_pc = emit_abc(fs, OpCode::OP_LOADFALSE, reg as u32, 0, 0, false);
+            fix_jump(fs, cmp_jmp, f_pc);
+            fix_jump(fs, skip_jmp, f_pc + 1);
+            e.k = ExpKind::NonReloc;
+            e.info = reg as i32;
+            e.t = NO_JUMP;
+            e.f = NO_JUMP;
+            return;
+        }
         _ => {
-            // void / jmp — nothing to emit.
+            // void — nothing to emit.
             return;
         }
     }
@@ -354,12 +377,54 @@ fn discharge_to_reg(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
     e.info = reg as i32;
 }
 
+
 pub fn exp2nextreg(fs: &mut FuncState, e: &mut ExprDesc) {
     discharge_vars(fs, e);
     free_exp(fs, e);
     let reg = fs.freereg;
     reserve_regs(fs, 1);
     discharge_to_reg(fs, e, reg);
+    // If the expression carries pending true/false jump lists
+    // (from `and`/`or` short-circuiting or comparisons), patch
+    // them with LOADBOOL pairs so the materialized value is
+    // correct on either path.
+    if e.t != NO_JUMP || e.f != NO_JUMP {
+        materialize_jump_lists(fs, e, reg);
+    }
+}
+
+/// Patch the `t` and `f` jump lists on `e` so that, after this
+/// runs, register `reg` holds the boolean outcome regardless of
+/// which path was taken. Mirrors the bottom half of Lua's exp2reg.
+///
+/// Layout emitted (only when t or f is non-empty):
+///   skip_jmp:    JMP final               ; value-already-in-reg path
+///   p_f:         LFALSESKIP reg          ; false jumps land here; R=false AND skip next
+///   p_t:         LOADTRUE   reg          ; true jumps land here; R=true, fall through
+///   final:       ...next code
+fn materialize_jump_lists(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
+    let need_pair = e.t != NO_JUMP || e.f != NO_JUMP;
+    if !need_pair {
+        return;
+    }
+    let skip_jmp = emit_jump(fs);
+    let p_f = emit_abc(fs, OpCode::OP_LFALSESKIP, reg as u32, 0, 0, false);
+    let p_t = emit_abc(fs, OpCode::OP_LOADTRUE, reg as u32, 0, 0, false);
+    let final_pc = fs.pc as i32;
+    fix_jump(fs, skip_jmp, final_pc);
+    patch_list_to(fs, e.f, p_f);
+    patch_list_to(fs, e.t, p_t);
+    e.t = NO_JUMP;
+    e.f = NO_JUMP;
+}
+
+/// Patch every jump in `list` to land at `target`.
+fn patch_list_to(fs: &mut FuncState, mut list: i32, target: i32) {
+    while list != NO_JUMP {
+        let next = get_jump_dest(fs, list);
+        fix_jump(fs, list, target);
+        list = next;
+    }
 }
 
 /// Discharge the expression into a specific register (used by
@@ -832,68 +897,77 @@ fn code_comparison(
     let k = op == BinOpr::Ne;
     let _pc = emit_abc(fs, opcode, ra as u32, rb as u32, 0, k);
     let jmp = emit_jump(fs);
+    // Lua invariant: a fresh comparison stores the conditional
+    // jump in `e.info` only; t/f are NO_JUMP. go_if_true /
+    // go_if_false will read `info` and decide whether the jump
+    // belongs in the true-list or the false-list.
     e1.k = ExpKind::Jmp;
     e1.info = jmp;
     e1.t = NO_JUMP;
-    e1.f = jmp;
+    e1.f = NO_JUMP;
 }
 
 // ---- Conditional code generation -------------------------------------------
 
 pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
     discharge_vars(fs, e);
+    let pc: i32;
     match e.k {
         ExpKind::Jmp => {
-            // Already a conditional jump; its false path is e.f
-            // (set by code_comparison). Do nothing more — the
-            // caller patches e.f to exit on false.
+            // Already a conditional jump; e.f is the JMP that fires
+            // when the condition is false. Concat that into f-list.
+            // Lua sets `pc = e->u.info` here.
+            pc = e.info;
+            // The Jmp's t-list is empty by construction.
         }
         ExpKind::True | ExpKind::KInt | ExpKind::KFlt | ExpKind::KStr | ExpKind::K => {
-            // Always true; no jump needed, f is NO_JUMP.
+            // Always true; no jump needed.
+            pc = NO_JUMP;
         }
         ExpKind::Nil | ExpKind::False => {
-            // Always false — emit unconditional jump to exit.
-            let jmp = emit_jump(fs);
-            concat_jmp(fs, &mut e.f, jmp);
+            // Always false — unconditional jump.
+            pc = emit_jump(fs);
         }
         _ => {
             let reg = exp2anyreg(fs, e);
-            // After the value is consumed by OP_TEST it's dead; free
-            // the temp slot so the IF body's first emission reuses
-            // it. Without this, every `if expr then` leaks one
-            // register into the body, which compounds inside nested
-            // for loops (the inner FORPREP base ends up shifted).
             *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
             free_exp(fs, e);
             emit_abc(fs, OpCode::OP_TEST, reg as u32, 0, 0, false);
-            let jmp = emit_jump(fs);
-            concat_jmp(fs, &mut e.f, jmp);
+            pc = emit_jump(fs);
         }
     }
+    concat_jmp(fs, &mut e.f, pc);
+    // True jumps (already in e.t) land here.
+    patch_to_here(fs, e.t);
+    e.t = NO_JUMP;
 }
 
 pub fn go_if_false(fs: &mut FuncState, e: &mut ExprDesc) {
     discharge_vars(fs, e);
+    let pc: i32;
     match e.k {
         ExpKind::Jmp => {
-            // Conditional jump — swap t and f.
-            std::mem::swap(&mut e.t, &mut e.f);
+            // Already conditional — its TRUE path is e.info.
+            pc = e.info;
         }
         ExpKind::Nil | ExpKind::False => {
-            // Always false — no jump needed.
+            pc = NO_JUMP;
         }
         ExpKind::True | ExpKind::KInt | ExpKind::KFlt | ExpKind::KStr | ExpKind::K => {
-            // Always true — emit unconditional jump.
-            let jmp = emit_jump(fs);
-            concat_jmp(fs, &mut e.t, jmp);
+            // Always true — unconditional jump.
+            pc = emit_jump(fs);
         }
         _ => {
             let reg = exp2anyreg(fs, e);
+            *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+            free_exp(fs, e);
             emit_abc(fs, OpCode::OP_TEST, reg as u32, 0, 0, true);
-            let jmp = emit_jump(fs);
-            concat_jmp(fs, &mut e.t, jmp);
+            pc = emit_jump(fs);
         }
     }
+    concat_jmp(fs, &mut e.t, pc);
+    patch_to_here(fs, e.f);
+    e.f = NO_JUMP;
 }
 
 // ---- Tests -----------------------------------------------------------------
