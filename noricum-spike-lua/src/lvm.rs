@@ -73,6 +73,7 @@ const OP_SHL_U8: u8 = OpCode::OP_SHL as u8;
 const OP_SHR_U8: u8 = OpCode::OP_SHR as u8;
 const OP_UNM_U8: u8 = OpCode::OP_UNM as u8;
 const OP_BNOT_U8: u8 = OpCode::OP_BNOT as u8;
+const OP_NOT_U8: u8 = OpCode::OP_NOT as u8;
 
 const OP_LOADK_U8: u8 = OpCode::OP_LOADK as u8;
 const OP_JMP_U8: u8 = OpCode::OP_JMP as u8;
@@ -895,6 +896,19 @@ impl LuaState {
                 // Unary arithmetic — R(A) := OP R(B).
                 OP_UNM_U8 => self.exec_arith_unary(base, instruction, ArithOp::Unm)?,
                 OP_BNOT_U8 => self.exec_arith_unary(base, instruction, ArithOp::BNot)?,
+                OP_NOT_U8 => {
+                    // R(A) := not R(B). Applies Lua truthiness: nil
+                    // and false become true, everything else false.
+                    let a = getarg_a(instruction) as u32;
+                    let b = getarg_b(instruction) as u32;
+                    let val = self.current_thread().stack[(base + b) as usize];
+                    let result = if matches!(val, TValue::Nil | TValue::False) {
+                        TValue::True
+                    } else {
+                        TValue::False
+                    };
+                    self.current_thread_mut().stack[(base + a) as usize] = result;
+                }
                 OP_RETURN0_U8 => {
                     self.finish_vm_return(func_slot, base, 0, 0, n_expected);
                     return Ok(());

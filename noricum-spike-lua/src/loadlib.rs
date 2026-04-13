@@ -217,13 +217,38 @@ unsafe extern "C" fn require(state: *mut LuaState) -> std::os::raw::c_int {
         return 1;
     }
 
-    // Try to locate the file.
-    let modname_str2 = modname_str.replace('.', "/");
-    let path = format!("./{}.lua", modname_str2);
-    let content = match std::fs::read(&path) {
-        Ok(c) => c,
-        Err(_) => {
-            let err = format!("module '{}' not found", modname_str);
+    // Walk package.path, substituting `?` for the module name
+    // with dots converted to path separators. First match wins.
+    let modname_sub = modname_str.replace('.', "/");
+    let search_paths: Vec<String> = if _path_str.is_empty() {
+        vec![
+            format!("./{}.lua", modname_sub),
+            format!("./{}/init.lua", modname_sub),
+        ]
+    } else {
+        _path_str
+            .split(';')
+            .filter(|p| !p.is_empty())
+            .map(|p| p.replace('?', &modname_sub))
+            .collect()
+    };
+    let mut content: Option<Vec<u8>> = None;
+    let mut last_err = String::new();
+    for p in &search_paths {
+        match std::fs::read(p) {
+            Ok(c) => {
+                content = Some(c);
+                break;
+            }
+            Err(e) => {
+                last_err = format!("'{}': {}", p, e);
+            }
+        }
+    }
+    let content = match content {
+        Some(c) => c,
+        None => {
+            let err = format!("module '{}' not found: {}", modname_str, last_err);
             let h = state.global.new_string(err.as_bytes(), 0);
             state.raise_error_value(TValue::ShortString(h));
             return 0;
@@ -243,7 +268,7 @@ unsafe extern "C" fn require(state: *mut LuaState) -> std::os::raw::c_int {
     };
 
     // Compile and run.
-    let source_name = format!("@{}.lua", modname_str2);
+    let source_name = format!("@{}.lua", modname_sub);
     let closure = crate::lparser::parse_with_env(
         state,
         &content,

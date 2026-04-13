@@ -438,6 +438,12 @@ unsafe extern "C" fn lua_ipairs(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn lua_next(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
+    // If the caller didn't pass a key argument, treat it as nil so
+    // `next_key` starts from the beginning rather than popping the
+    // table and trying to look it up as a key.
+    if state.get_top() < 2 {
+        state.push_nil();
+    }
     if state.next_key(1) {
         2
     } else {
