@@ -655,30 +655,33 @@ fn ifstat(ls: &mut LexState, fs: &mut FuncState) {
     expr(ls, fs, &mut e);
     check_next(ls, TK_THEN);
     lcode::go_if_true(fs, &mut e);
-    let false_jump = e.f;
+    // `current_false` tracks the most recent unpatched "skip body
+    // when condition is false" jump. It rolls forward through each
+    // elseif, then a single patch at the bottom resolves it. Each
+    // jump is patched exactly once.
+    let mut current_false = e.f;
     block(ls, fs);
     let mut escape_list = NO_JUMP;
     while ls.t.token == TK_ELSEIF {
         let ej = lcode::emit_jump(fs);
         lcode::concat_jmp(fs, &mut escape_list, ej);
-        lcode::patch_to_here(fs, false_jump);
+        lcode::patch_to_here(fs, current_false);
         ls.next_token(); // skip ELSEIF
         let mut cond = ExprDesc::void();
         expr(ls, fs, &mut cond);
         check_next(ls, TK_THEN);
         lcode::go_if_true(fs, &mut cond);
-        let fb = cond.f;
+        current_false = cond.f;
         block(ls, fs);
-        lcode::patch_to_here(fs, fb);
     }
     if ls.t.token == TK_ELSE {
         let ej = lcode::emit_jump(fs);
         lcode::concat_jmp(fs, &mut escape_list, ej);
-        lcode::patch_to_here(fs, false_jump);
+        lcode::patch_to_here(fs, current_false);
         ls.next_token(); // skip ELSE
         block(ls, fs);
     } else {
-        lcode::patch_to_here(fs, false_jump);
+        lcode::patch_to_here(fs, current_false);
     }
     lcode::patch_to_here(fs, escape_list);
     check_match(ls, TK_END, TK_IF);

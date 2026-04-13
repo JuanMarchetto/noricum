@@ -85,6 +85,24 @@ fn fix_jump(fs: &mut FuncState, pc: i32, dest: i32) {
 pub fn patch_list(fs: &mut FuncState, mut list: i32, target: i32) {
     while list != NO_JUMP {
         let next = get_jump_dest(fs, list);
+        // If the controlling instruction is OP_TESTSET placed here
+        // by `jump_on_cond` with A=NO_REG, convert it to a
+        // self-copy (A := B) so the runtime doesn't write into
+        // stack slot 255.
+        if list >= 1 {
+            let ctrl_pc = (list - 1) as usize;
+            if ctrl_pc < fs.proto.code.len() {
+                let op = (fs.proto.code[ctrl_pc] & 0x7F) as u8;
+                if op == OpCode::OP_TESTSET as u8 {
+                    let instr = &mut fs.proto.code[ctrl_pc];
+                    let a = ((*instr >> 7) & 0xFF) as u8;
+                    if a == NO_REG {
+                        let b = ((*instr >> 16) & 0xFF) as u8;
+                        *instr = (*instr & !(0xFFu32 << 7)) | ((b as u32) << 7);
+                    }
+                }
+            }
+        }
         fix_jump(fs, list, target);
         list = next;
     }
@@ -393,34 +411,74 @@ pub fn exp2nextreg(fs: &mut FuncState, e: &mut ExprDesc) {
 
 /// Patch the `t` and `f` jump lists on `e` so that, after this
 /// runs, register `reg` holds the boolean outcome regardless of
-/// which path was taken. Mirrors the bottom half of Lua's exp2reg.
-///
-/// Layout emitted (only when t or f is non-empty):
-///   skip_jmp:    JMP final               ; value-already-in-reg path
-///   p_f:         LFALSESKIP reg          ; false jumps land here; R=false AND skip next
-///   p_t:         LOADTRUE   reg          ; true jumps land here; R=true, fall through
-///   final:       ...next code
+/// which path was taken. Mirrors the bottom half of Lua's
+/// exp2reg + patchlistaux.
 fn materialize_jump_lists(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
     let need_pair = e.t != NO_JUMP || e.f != NO_JUMP;
     if !need_pair {
         return;
     }
-    let skip_jmp = emit_jump(fs);
-    let p_f = emit_abc(fs, OpCode::OP_LFALSESKIP, reg as u32, 0, 0, false);
-    let p_t = emit_abc(fs, OpCode::OP_LOADTRUE, reg as u32, 0, 0, false);
-    let final_pc = fs.pc as i32;
-    fix_jump(fs, skip_jmp, final_pc);
-    patch_list_to(fs, e.f, p_f);
-    patch_list_to(fs, e.t, p_t);
+    // Decide whether we also need the LOADBOOL pair. Jumps whose
+    // controlling instruction is OP_TESTSET don't need it (they
+    // copy the operand into the result register on fall-through).
+    // Jumps from OP_CMP / direct OP_TEST do need it because they
+    // carry no value.
+    let need_loadbool = need_value_list(fs, e.t) || need_value_list(fs, e.f);
+    if need_loadbool {
+        let skip_jmp = emit_jump(fs);
+        let p_f = emit_abc(fs, OpCode::OP_LFALSESKIP, reg as u32, 0, 0, false);
+        let p_t = emit_abc(fs, OpCode::OP_LOADTRUE, reg as u32, 0, 0, false);
+        let final_pc = fs.pc as i32;
+        fix_jump(fs, skip_jmp, final_pc);
+        patchlistaux(fs, e.f, final_pc, reg, p_f);
+        patchlistaux(fs, e.t, final_pc, reg, p_t);
+    } else {
+        let final_pc = fs.pc as i32;
+        patchlistaux(fs, e.f, final_pc, reg, final_pc);
+        patchlistaux(fs, e.t, final_pc, reg, final_pc);
+    }
     e.t = NO_JUMP;
     e.f = NO_JUMP;
 }
 
-/// Patch every jump in `list` to land at `target`.
-fn patch_list_to(fs: &mut FuncState, mut list: i32, target: i32) {
+/// Return true if any jump in `list` has a controlling instruction
+/// that doesn't carry its operand's value (OP_CMP / direct JMP),
+/// meaning we need the LOADBOOL pair to materialize a boolean.
+fn need_value_list(fs: &FuncState, mut list: i32) -> bool {
+    while list != NO_JUMP {
+        let ctrl_pc = (list - 1) as usize;
+        if ctrl_pc < fs.proto.code.len() {
+            let opcode = (fs.proto.code[ctrl_pc] & 0x7F) as u8;
+            if opcode != OpCode::OP_TESTSET as u8 {
+                return true;
+            }
+        }
+        list = get_jump_dest(fs, list);
+    }
+    false
+}
+
+/// Walk `list`, patching each jump. If the controlling
+/// instruction is OP_TESTSET, set its A field to `reg` (so the
+/// operand gets copied on the fall-through path) and route the
+/// jump to `vtarget` (the "value already in reg" label).
+/// Otherwise route to `dtarget` (the LOADBOOL pair or final).
+fn patchlistaux(fs: &mut FuncState, mut list: i32, vtarget: i32, reg: u8, dtarget: i32) {
     while list != NO_JUMP {
         let next = get_jump_dest(fs, list);
-        fix_jump(fs, list, target);
+        let ctrl_pc = (list - 1) as usize;
+        let is_testset = ctrl_pc < fs.proto.code.len()
+            && (fs.proto.code[ctrl_pc] & 0x7F) as u8 == OpCode::OP_TESTSET as u8;
+        if is_testset {
+            // SETARG_A: A sits at bits 7..14.
+            let instr = &mut fs.proto.code[ctrl_pc];
+            let b = ((*instr >> 16) & 0xFF) as u8;
+            let target_a = if reg != NO_REG && reg != b { reg } else { b };
+            *instr = (*instr & !(0xFFu32 << 7)) | ((target_a as u32) << 7);
+            fix_jump(fs, list, vtarget);
+        } else {
+            fix_jump(fs, list, dtarget);
+        }
         list = next;
     }
 }
@@ -514,6 +572,12 @@ pub fn store_var(fs: &mut FuncState, var: &mut ExprDesc, val: &mut ExprDesc) {
         ExpKind::Local => {
             free_exp(fs, val);
             discharge_to_reg(fs, val, var.var.ridx);
+            // If the value carried t/f jump lists from short-circuit
+            // operators, patch them now or the TESTSET-A=NO_REG
+            // emitted by go_if_* would crash at runtime.
+            if val.t != NO_JUMP || val.f != NO_JUMP {
+                materialize_jump_lists(fs, val, var.var.ridx);
+            }
         }
         ExpKind::Upval => {
             let reg = exp2anyreg(fs, val);
@@ -776,11 +840,26 @@ pub fn posfix(fs: &mut FuncState, op: BinOpr, e1: &mut ExprDesc, e2: &mut ExprDe
     match op {
         BinOpr::And => {
             discharge_vars(fs, e2);
+            // For `LHS and RHS` where RHS is a simple value (constant
+            // or another expression), discharge RHS into LHS's slot
+            // so the truthy-fallthrough path lands on real bytecode.
+            // Without this, a chained `LHS and RHS_const or X` would
+            // lose the RHS_const value because OR's posfix overwrites.
+            if e1.f != NO_JUMP && e1.k == ExpKind::NonReloc {
+                let target = e1.info as u8;
+                discharge_to_reg(fs, e2, target);
+            }
             concat_jmp(fs, &mut e2.f, e1.f);
             *e1 = e2.clone();
         }
         BinOpr::Or => {
             discharge_vars(fs, e2);
+            // Symmetric to And: discharge RHS into LHS's slot so the
+            // falsy-fallthrough path emits the value at the right pc.
+            if e1.t != NO_JUMP && e1.k == ExpKind::NonReloc {
+                let target = e1.info as u8;
+                discharge_to_reg(fs, e2, target);
+            }
             concat_jmp(fs, &mut e2.t, e1.t);
             *e1 = e2.clone();
         }
@@ -914,34 +993,49 @@ pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
     let pc: i32;
     match e.k {
         ExpKind::Jmp => {
-            // The CMP+JMP fires on TRUE-of-cmp (per codecomp's
-            // k=1 convention). go_if_true wants a jump that fires
-            // on FALSE (so we skip the body when cond is false),
-            // so flip the cmp's k flag in place — Lua's
-            // negatecondition().
+            // Flip k so JMP fires on FALSE (skip body on false).
             negate_cmp_condition(fs, e.info);
             pc = e.info;
         }
         ExpKind::True | ExpKind::KInt | ExpKind::KFlt | ExpKind::KStr | ExpKind::K => {
-            // Always true; no jump needed.
             pc = NO_JUMP;
         }
         ExpKind::Nil | ExpKind::False => {
-            // Always false — unconditional jump.
             pc = emit_jump(fs);
         }
         _ => {
             let reg = exp2anyreg(fs, e);
             *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
             free_exp(fs, e);
-            emit_abc(fs, OpCode::OP_TEST, reg as u32, 0, 0, false);
-            pc = emit_jump(fs);
+            // OP_TESTSET with A=NO_REG placeholder. patchlistaux
+            // will rewrite A to the result register at materialize
+            // time. k=0 → take JMP on TRUTHY operand; emit inverted
+            // so that take-JMP-on-FALSY lands on the false-list.
+            pc = jump_on_cond(fs, reg, 0);
         }
     }
     concat_jmp(fs, &mut e.f, pc);
     patch_to_here(fs, e.t);
     e.t = NO_JUMP;
 }
+
+/// Emit `OP_TESTSET R(A=NO_REG), R(reg), 0, k` followed by a JMP.
+/// Returns the JMP pc. patchlistaux later rewrites A to the result
+/// register and fixes the JMP target, giving OR/AND their
+/// copy-to-result semantics.
+fn jump_on_cond(fs: &mut FuncState, reg: u8, k: u32) -> i32 {
+    emit_abc(
+        fs,
+        OpCode::OP_TESTSET,
+        NO_REG as u32,
+        reg as u32,
+        0,
+        k != 0,
+    );
+    emit_jump(fs)
+}
+
+const NO_REG: u8 = 255;
 
 /// Flip the `k` flag on the CMP instruction immediately preceding
 /// the JMP at `jmp_pc`. After the flip, the JMP fires on the
@@ -963,22 +1057,22 @@ pub fn go_if_false(fs: &mut FuncState, e: &mut ExprDesc) {
     let pc: i32;
     match e.k {
         ExpKind::Jmp => {
-            // Already conditional — its TRUE path is e.info.
+            // CMP already fires JMP on TRUE-of-cmp. Perfect for
+            // go_if_false (we want to jump when the value is TRUE
+            // so we can skip RHS of OR, etc.).
             pc = e.info;
         }
         ExpKind::Nil | ExpKind::False => {
             pc = NO_JUMP;
         }
         ExpKind::True | ExpKind::KInt | ExpKind::KFlt | ExpKind::KStr | ExpKind::K => {
-            // Always true — unconditional jump.
             pc = emit_jump(fs);
         }
         _ => {
             let reg = exp2anyreg(fs, e);
             *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
             free_exp(fs, e);
-            emit_abc(fs, OpCode::OP_TEST, reg as u32, 0, 0, true);
-            pc = emit_jump(fs);
+            pc = jump_on_cond(fs, reg, 1);
         }
     }
     concat_jmp(fs, &mut e.t, pc);
