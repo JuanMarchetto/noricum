@@ -941,3 +941,523 @@ pub unsafe extern "C" fn luaL_optnumber(
         s.to_number_x(arg).unwrap_or(def)
     }
 }
+
+// ---------------------------------------------------------------
+// Tier 1B additions — bring the FFI surface up to the lua.h /
+// lauxlib.h symbol set most embedders rely on. Trampolines only:
+// every function maps to safe-Rust API methods.
+// ---------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_pushglobaltable(L: *mut lua_State) {
+    let s = unsafe { state(L) };
+    if let Some(g) = s.global.globals_table() {
+        s.current_thread_mut().push(TValue::Table(g));
+    } else {
+        s.push_nil();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_isnil(L: *mut lua_State, idx: c_int) -> c_int {
+    (unsafe { lua_type(L, idx) } == LUA_TNIL) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_isnone(L: *mut lua_State, idx: c_int) -> c_int {
+    (unsafe { lua_type(L, idx) } == LUA_TNONE) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_isnoneornil(L: *mut lua_State, idx: c_int) -> c_int {
+    let t = unsafe { lua_type(L, idx) };
+    (t == LUA_TNONE || t == LUA_TNIL) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_isboolean(L: *mut lua_State, idx: c_int) -> c_int {
+    (unsafe { lua_type(L, idx) } == LUA_TBOOLEAN) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_isfunction(L: *mut lua_State, idx: c_int) -> c_int {
+    (unsafe { lua_type(L, idx) } == LUA_TFUNCTION) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_istable(L: *mut lua_State, idx: c_int) -> c_int {
+    (unsafe { lua_type(L, idx) } == LUA_TTABLE) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_isthread(L: *mut lua_State, idx: c_int) -> c_int {
+    (unsafe { lua_type(L, idx) } == LUA_TTHREAD) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_islightuserdata(L: *mut lua_State, idx: c_int) -> c_int {
+    let s = unsafe { state(L) };
+    matches!(s.value_at_public(idx), Some(TValue::LightUserData(_))) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_pop(L: *mut lua_State, n: c_int) {
+    let s = unsafe { state(L) };
+    let new_top = (s.get_top() as i32) - n;
+    s.set_top(new_top);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_newtable(L: *mut lua_State) {
+    unsafe { lua_createtable(L, 0, 0) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_register(
+    L: *mut lua_State,
+    name: *const c_char,
+    f: lua_CFunction,
+) {
+    unsafe {
+        lua_pushcfunction(L, f);
+        lua_setglobal(L, name);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_insert(L: *mut lua_State, idx: c_int) {
+    // Insert top-of-stack at the given position, shifting up.
+    let s = unsafe { state(L) };
+    let top = s.get_top() as usize;
+    let abs = unsafe { lua_absindex(L, idx) } as usize;
+    if abs == 0 || abs > top {
+        return;
+    }
+    let base = s.frame_base_index().unwrap_or(0) as usize;
+    let stack = &mut s.current_thread_mut().stack;
+    let from = base + top - 1;
+    let to = base + abs - 1;
+    let v = stack[from];
+    for i in (to + 1..=from).rev() {
+        stack[i] = stack[i - 1];
+    }
+    stack[to] = v;
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_remove(L: *mut lua_State, idx: c_int) {
+    let s = unsafe { state(L) };
+    let top = s.get_top() as usize;
+    let abs = unsafe { lua_absindex(L, idx) } as usize;
+    if abs == 0 || abs > top {
+        return;
+    }
+    let base = s.frame_base_index().unwrap_or(0) as usize;
+    let stack = &mut s.current_thread_mut().stack;
+    let to = base + abs - 1;
+    let end = base + top - 1;
+    for i in to..end {
+        stack[i] = stack[i + 1];
+    }
+    s.set_top((top - 1) as c_int);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_replace(L: *mut lua_State, idx: c_int) {
+    let s = unsafe { state(L) };
+    let top = s.get_top() as usize;
+    if top == 0 {
+        return;
+    }
+    let abs = unsafe { lua_absindex(L, idx) } as usize;
+    if abs == 0 || abs > top {
+        return;
+    }
+    let base = s.frame_base_index().unwrap_or(0) as usize;
+    let stack = &mut s.current_thread_mut().stack;
+    stack[base + abs - 1] = stack[base + top - 1];
+    s.set_top((top - 1) as c_int);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_copy(L: *mut lua_State, fromidx: c_int, toidx: c_int) {
+    let s = unsafe { state(L) };
+    if let Some(v) = s.value_at_public(fromidx) {
+        let to_abs = unsafe { lua_absindex(L, toidx) } as usize;
+        let base = s.frame_base_index().unwrap_or(0) as usize;
+        s.current_thread_mut().stack[base + to_abs - 1] = v;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_topointer(L: *mut lua_State, idx: c_int) -> *const c_void {
+    let s = unsafe { state(L) };
+    match s.value_at_public(idx) {
+        Some(TValue::LightUserData(p)) => p as *const c_void,
+        Some(TValue::Table(h)) => h.slot as usize as *const c_void,
+        Some(TValue::LuaClosure(h)) => h.slot as usize as *const c_void,
+        Some(TValue::CClosure(h)) => h.slot as usize as *const c_void,
+        Some(TValue::UserData(h)) => h.slot as usize as *const c_void,
+        Some(TValue::Thread(h)) => h.slot as usize as *const c_void,
+        _ => std::ptr::null(),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_tothread(L: *mut lua_State, idx: c_int) -> *mut lua_State {
+    let s = unsafe { state(L) };
+    match s.value_at_public(idx) {
+        Some(TValue::Thread(_)) => L, // simplification: same state pointer
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_status(_L: *mut lua_State) -> c_int {
+    LUA_OK
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_isyieldable(_L: *mut lua_State) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_concat(L: *mut lua_State, n: c_int) {
+    if n <= 0 {
+        let s = unsafe { state(L) };
+        let _ = s.push_string("");
+        return;
+    }
+    if n == 1 {
+        return;
+    }
+    // Naive string-only concat: collect bytes, push result, pop n.
+    let s = unsafe { state(L) };
+    let top = s.get_top() as i32;
+    let start = top - n + 1;
+    let mut buf = Vec::new();
+    for i in start..=top {
+        if let Some(b) = s.to_lstring(i) {
+            buf.extend_from_slice(b);
+        } else if let Some(v) = s.to_integer_x(i) {
+            buf.extend_from_slice(v.to_string().as_bytes());
+        } else if let Some(f) = s.to_number_x(i) {
+            buf.extend_from_slice(spike::lbaselib::format_lua_number(f).as_bytes());
+        }
+    }
+    s.set_top(start - 1);
+    let _ = s.push_lstring(&buf);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_len(L: *mut lua_State, idx: c_int) {
+    let s = unsafe { state(L) };
+    let len = s.raw_len(idx);
+    s.push_integer(len as i64);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_stringtonumber(L: *mut lua_State, s_ptr: *const c_char) -> usize {
+    if s_ptr.is_null() {
+        return 0;
+    }
+    let s = unsafe { state(L) };
+    let cstr = unsafe { CStr::from_ptr(s_ptr) };
+    let bytes = cstr.to_bytes();
+    let trimmed = std::str::from_utf8(bytes).unwrap_or("").trim();
+    if let Ok(i) = trimmed.parse::<i64>() {
+        s.push_integer(i);
+        return bytes.len() + 1;
+    }
+    if let Ok(f) = trimmed.parse::<f64>() {
+        s.push_number(f);
+        return bytes.len() + 1;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lua_xmove(_from: *mut lua_State, _to: *mut lua_State, _n: c_int) {
+    // No-op: our coroutines share the same heap, so cross-thread
+    // value moves don't require copying. A more faithful impl
+    // would copy `n` values from `from`'s stack top to `to`'s.
+}
+
+// luaL_* additions
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_typename(L: *mut lua_State, idx: c_int) -> *const c_char {
+    let t = unsafe { lua_type(L, idx) };
+    unsafe { lua_typename(L, t) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_checktype(L: *mut lua_State, arg: c_int, t: c_int) {
+    if unsafe { lua_type(L, arg) } != t {
+        let s = unsafe { state(L) };
+        let want = unsafe { CStr::from_ptr(lua_typename(L, t)) }
+            .to_string_lossy()
+            .to_string();
+        s.push_string(&format!("bad argument #{}: {} expected", arg, want));
+        s.raise_error_value(s.value_at_public(-1).unwrap_or(TValue::Nil));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_checkany(L: *mut lua_State, arg: c_int) {
+    if unsafe { lua_type(L, arg) } == LUA_TNONE {
+        let s = unsafe { state(L) };
+        s.push_string(&format!("bad argument #{}: value expected", arg));
+        s.raise_error_value(s.value_at_public(-1).unwrap_or(TValue::Nil));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_argerror(
+    L: *mut lua_State,
+    arg: c_int,
+    msg: *const c_char,
+) -> c_int {
+    let s = unsafe { state(L) };
+    let m = if msg.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(msg) }.to_string_lossy().to_string()
+    };
+    s.push_string(&format!("bad argument #{}: {}", arg, m));
+    s.raise_error_value(s.value_at_public(-1).unwrap_or(TValue::Nil));
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_error(L: *mut lua_State, fmt: *const c_char) -> c_int {
+    // Minimal: treat fmt as a literal string; %s/%d formatting NYI.
+    let s = unsafe { state(L) };
+    let m = if fmt.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(fmt) }.to_string_lossy().to_string()
+    };
+    s.push_string(&m);
+    s.raise_error_value(s.value_at_public(-1).unwrap_or(TValue::Nil));
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_dostring(L: *mut lua_State, s_ptr: *const c_char) -> c_int {
+    let r = unsafe { luaL_loadstring(L, s_ptr) };
+    if r != LUA_OK {
+        return r;
+    }
+    unsafe { lua_pcall(L, 0, LUA_MULTRET, 0) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_dofile(L: *mut lua_State, fname: *const c_char) -> c_int {
+    let r = unsafe { luaL_loadfilex(L, fname, std::ptr::null()) };
+    if r != LUA_OK {
+        return r;
+    }
+    unsafe { lua_pcall(L, 0, LUA_MULTRET, 0) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_loadbuffer(
+    L: *mut lua_State,
+    buf: *const c_char,
+    sz: usize,
+    name: *const c_char,
+) -> c_int {
+    unsafe { luaL_loadbufferx(L, buf, sz, name, std::ptr::null()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_loadfile(L: *mut lua_State, fname: *const c_char) -> c_int {
+    unsafe { luaL_loadfilex(L, fname, std::ptr::null()) }
+}
+
+/// Auxiliary library registry helper. Pairs (name, fn) are
+/// installed into the table at the top of the stack.
+#[repr(C)]
+pub struct luaL_Reg {
+    pub name: *const c_char,
+    pub func: lua_CFunction,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_setfuncs(
+    L: *mut lua_State,
+    reg: *const luaL_Reg,
+    nup: c_int,
+) {
+    if reg.is_null() {
+        return;
+    }
+    // Walk until we hit a (NULL, NULL) sentinel.
+    let mut i = 0isize;
+    loop {
+        let entry = unsafe { &*reg.offset(i) };
+        if entry.name.is_null() {
+            break;
+        }
+        unsafe {
+            lua_pushcclosure(L, entry.func, nup);
+            lua_setfield(L, -2 - nup, entry.name);
+        }
+        i += 1;
+    }
+    if nup > 0 {
+        let s = unsafe { state(L) };
+        let new_top = (s.get_top() as i32) - nup;
+        s.set_top(new_top);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_newlibtable(L: *mut lua_State, _reg: *const luaL_Reg) {
+    unsafe { lua_createtable(L, 0, 0) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_newlib(L: *mut lua_State, reg: *const luaL_Reg) {
+    unsafe {
+        lua_createtable(L, 0, 0);
+        luaL_setfuncs(L, reg, 0);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_optlstring(
+    L: *mut lua_State,
+    arg: c_int,
+    def: *const c_char,
+    len: *mut usize,
+) -> *const c_char {
+    let s = unsafe { state(L) };
+    if s.type_at(arg) <= 0 {
+        if !len.is_null() && !def.is_null() {
+            unsafe { *len = CStr::from_ptr(def).to_bytes().len() };
+        } else if !len.is_null() {
+            unsafe { *len = 0 };
+        }
+        return def;
+    }
+    unsafe { lua_tolstring(L, arg, len) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_optstring(
+    L: *mut lua_State,
+    arg: c_int,
+    def: *const c_char,
+) -> *const c_char {
+    unsafe { luaL_optlstring(L, arg, def, std::ptr::null_mut()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_pushfail(L: *mut lua_State) {
+    let s = unsafe { state(L) };
+    s.push_nil();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_checkversion_(_L: *mut lua_State, _ver: lua_Number, _sz: usize) {
+    // No-op: we don't enforce binary-compat checks on the runtime.
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_getmetatable(L: *mut lua_State, name: *const c_char) -> c_int {
+    // Lookup registry[name] — minimal implementation.
+    if name.is_null() {
+        let s = unsafe { state(L) };
+        s.push_nil();
+        return LUA_TNIL;
+    }
+    let s = unsafe { state(L) };
+    let key_bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
+    let key_str = std::str::from_utf8(key_bytes).unwrap_or("");
+    let registry = s.global.registry;
+    if let Some(reg) = registry {
+        s.current_thread_mut().push(TValue::Table(reg));
+        s.raw_get_field(-1, key_str);
+        // Replace the registry table on the stack with the result.
+        unsafe { lua_remove(L, -2) };
+    } else {
+        s.push_nil();
+    }
+    unsafe { lua_type(L, -1) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_setmetatable(L: *mut lua_State, name: *const c_char) {
+    unsafe {
+        luaL_getmetatable(L, name);
+        lua_setmetatable(L, -2);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_newmetatable(L: *mut lua_State, name: *const c_char) -> c_int {
+    if name.is_null() {
+        return 0;
+    }
+    let existing = unsafe { luaL_getmetatable(L, name) };
+    if existing != LUA_TNIL {
+        return 0; // already exists
+    }
+    unsafe {
+        lua_pop(L, 1);
+        lua_createtable(L, 0, 0);
+        // Set registry[name] = new_table
+        lua_pushvalue(L, -1);
+        let s = state(L);
+        let key_bytes = CStr::from_ptr(name).to_bytes();
+        let key_str = std::str::from_utf8(key_bytes).unwrap_or("");
+        if let Some(reg) = s.global.registry {
+            // Move new_table from stack top into registry.
+            let v = s.value_at_public(-1).unwrap_or(TValue::Nil);
+            let key_h = s.global.new_string(key_bytes, 0);
+            s.global.table_set_shortstr(reg, key_h, v);
+            let _ = key_str;
+            lua_pop(L, 1); // pop the duplicate
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_ref(_L: *mut lua_State, _t: c_int) -> c_int {
+    // Minimal: not implementing reference allocation.
+    -1
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_unref(_L: *mut lua_State, _t: c_int, _r: c_int) {
+    // No-op companion of luaL_ref.
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_where(L: *mut lua_State, _level: c_int) {
+    // Push an empty location prefix — proper impl would resolve the
+    // call frame at `level` via debug.getinfo equivalent.
+    let s = unsafe { state(L) };
+    let _ = s.push_string("");
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn luaL_traceback(
+    L: *mut lua_State,
+    _L1: *mut lua_State,
+    msg: *const c_char,
+    _level: c_int,
+) {
+    let s = unsafe { state(L) };
+    let prefix = if msg.is_null() {
+        "stack traceback:".to_string()
+    } else {
+        let m = unsafe { CStr::from_ptr(msg) }.to_string_lossy().to_string();
+        format!("{}\nstack traceback:", m)
+    };
+    let _ = s.push_string(&prefix);
+}

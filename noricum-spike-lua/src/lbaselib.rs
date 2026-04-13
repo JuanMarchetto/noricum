@@ -764,7 +764,7 @@ fn tv_to_string(state: &mut LuaState, idx: i32) -> String {
 /// Lua 5.5 uses (`LUAI_NUMFMT` in luaconf.h). 17 significant
 /// decimal digits is the minimum needed to round-trip every f64
 /// exactly; matches the C reference byte-for-byte.
-pub(crate) fn format_lua_number(f: f64) -> String {
+pub fn format_lua_number(f: f64) -> String {
     if f.is_nan() {
         return "nan".to_string();
     }
