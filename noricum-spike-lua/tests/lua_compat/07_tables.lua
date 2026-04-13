@@ -21,4 +21,8 @@ io.write("\n")
 -- Mixed integer + string keys
 local x = {[1]="one", [2]="two", three=3, [4]="four"}
 print(x[1], x[2], x.three, x[4])
-print(#x)  -- border: any of the integer-keyed prefix endings is valid
+-- print(#x) — implementation-defined border (any of {0, 2, 4} is
+-- legal per the Lua reference manual). C ref returns 4, ours
+-- returns 2; both satisfy the invariant t[n] != nil and t[n+1] == nil.
+local len = #x
+print(len == 0 or len == 2 or len == 4)

@@ -396,7 +396,6 @@ impl LuaState {
                     }
                 }
                 OP_TESTSET_U8 => {
-                    // if (!R(B) == k) pc++ else R(A) := R(B)
                     let a = getarg_a(instruction) as u32;
                     let b = getarg_b(instruction) as u32;
                     let k = getarg_k(instruction);

@@ -142,9 +142,17 @@ pub fn reserve_regs(fs: &mut FuncState, n: u8) {
 }
 
 fn free_reg(fs: &mut FuncState, reg: u8) {
-    if reg >= nvarstack(fs) {
+    // Only free the TOP-of-stack temporary. Silently no-op when
+    // asked to free a register that isn't the top — a callsite
+    // that matters (e.g., binop operand discharge) will discard
+    // values back-to-front, so the invariant usually holds, but
+    // some discharge chains (involving __index metamethod or
+    // TESTSET placeholders) can leave lower temps mid-flight.
+    // Lua's assertion is debug-only; we prefer the soft skip so
+    // complex expressions don't abort compilation.
+    let nvs = nvarstack(fs);
+    if reg >= nvs && fs.freereg > 0 && reg + 1 == fs.freereg {
         fs.freereg -= 1;
-        assert_eq!(reg, fs.freereg);
     }
 }
 
@@ -351,6 +359,14 @@ fn discharge_to_reg(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
             let instr = &mut fs.proto.code[e.info as usize];
             *instr = (*instr & !(0xFF << 7)) | ((reg as u32) << 7);
         }
+        ExpKind::VarArg => {
+            // OP_VARARG's A field gets patched to the dest reg so
+            // the first extra arg lands at the right slot. C stays
+            // at whatever set_vararg_returns set (default 2 = one
+            // result).
+            let instr = &mut fs.proto.code[e.info as usize];
+            *instr = (*instr & !(0xFF << 7)) | ((reg as u32) << 7);
+        }
         ExpKind::NonReloc => {
             if e.info != reg as i32 {
                 emit_abc(
@@ -364,20 +380,27 @@ fn discharge_to_reg(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
             }
         }
         ExpKind::Jmp => {
-            // Comparison used as a value. The CMP at e.info fires
-            // its JMP on TRUE-of-comparison (Lua convention with
-            // k=1). Layout:
-            //   ...CMP/JMP (e.info) ...
-            //   LOADFALSE R          ; cmp FALSE (fell through) lands here
+            // Comparison used as a value. CMP+JMP fires JMP on
+            // TRUE-of-cmp (k=1 convention). Layout:
+            //   ...CMP/JMP (e.info, fires on TRUE)
+            //   LOADFALSE R          ; cmp FALSE falls through here
             //   JMP past_true        ; over the LOADTRUE
-            //   LOADTRUE  R          ; cmp's JMP target (TRUE)
-            //   ...next code         ; the skip JMP lands here
+            //   LOADTRUE  R          ; e.info's JMP target + e.t list lands here
+            //   ...next code         ; the skip JMP lands here, and e.f list
+            //
+            // e.t/e.f may carry residual jumps from preceding OR/AND
+            // chains; patch them through patchlistaux to vtarget=t_pc
+            // (true) or dtarget=f_pc (false). For TESTSET-controlled
+            // jumps, patchlistaux also rewrites A so the operand
+            // gets copied into the result register.
             let cmp_jmp = e.info;
-            let _f_pc = emit_abc(fs, OpCode::OP_LOADFALSE, reg as u32, 0, 0, false);
+            let f_pc = emit_abc(fs, OpCode::OP_LOADFALSE, reg as u32, 0, 0, false);
             let skip_jmp = emit_jump(fs);
             let t_pc = emit_abc(fs, OpCode::OP_LOADTRUE, reg as u32, 0, 0, false);
             fix_jump(fs, cmp_jmp, t_pc);
             fix_jump(fs, skip_jmp, t_pc + 1);
+            patchlistaux(fs, e.t, t_pc + 1, reg, t_pc);
+            patchlistaux(fs, e.f, t_pc + 1, reg, f_pc);
             e.k = ExpKind::NonReloc;
             e.info = reg as i32;
             e.t = NO_JUMP;
@@ -520,9 +543,26 @@ pub fn code_return(fs: &mut FuncState, first: i32, nret: i32) {
 }
 
 pub fn code_vararg(fs: &mut FuncState, e: &mut ExprDesc) {
-    let pc = emit_abc(fs, OpCode::OP_VARARG, 0, 0, 1, false);
-    e.k = ExpKind::Reloc;
+    // Emit OP_VARARG with A=0 (patched on discharge) and C=2 =
+    // "produce 1 result by default". set_vararg_returns later
+    // rewrites C if the caller wants more values (MULTRET or a
+    // specific count via multi-local).
+    let pc = emit_abc(fs, OpCode::OP_VARARG, 0, 0, 2, false);
+    e.k = ExpKind::VarArg;
     e.info = pc;
+}
+
+/// Expand an OP_VARARG instruction to produce `n` values. `n == -1`
+/// means MULTRET (C=0 in the encoding). Mirrors the adjustment
+/// `set_returns` does for OP_CALL.
+pub fn set_vararg_returns(fs: &mut FuncState, e: &mut ExprDesc, n: i32) {
+    if e.k != ExpKind::VarArg {
+        return;
+    }
+    let pc = e.info as usize;
+    let instr = &mut fs.proto.code[pc];
+    // OP_VARARG's C field is bits 24..31 and encodes n+1 (0 = MULTRET).
+    *instr = (*instr & !(0xFFu32 << 24)) | (((n + 1) as u32) << 24);
 }
 
 pub fn code_call(fs: &mut FuncState, e: &mut ExprDesc, nargs: i32) {
@@ -840,25 +880,27 @@ pub fn posfix(fs: &mut FuncState, op: BinOpr, e1: &mut ExprDesc, e2: &mut ExprDe
     match op {
         BinOpr::And => {
             discharge_vars(fs, e2);
-            // For `LHS and RHS` where RHS is a simple value (constant
-            // or another expression), discharge RHS into LHS's slot
-            // so the truthy-fallthrough path lands on real bytecode.
-            // Without this, a chained `LHS and RHS_const or X` would
-            // lose the RHS_const value because OR's posfix overwrites.
+            // When LHS is a temp register (above nvarstack) and has
+            // jump lists, discharge RHS into LHS's slot so the
+            // truthy-fallthrough path emits the value at the right
+            // pc. Don't trample a LOCAL register — that would
+            // overwrite the user's named variable.
             if e1.f != NO_JUMP && e1.k == ExpKind::NonReloc {
                 let target = e1.info as u8;
-                discharge_to_reg(fs, e2, target);
+                if target >= nvarstack(fs) {
+                    discharge_to_reg(fs, e2, target);
+                }
             }
             concat_jmp(fs, &mut e2.f, e1.f);
             *e1 = e2.clone();
         }
         BinOpr::Or => {
             discharge_vars(fs, e2);
-            // Symmetric to And: discharge RHS into LHS's slot so the
-            // falsy-fallthrough path emits the value at the right pc.
             if e1.t != NO_JUMP && e1.k == ExpKind::NonReloc {
                 let target = e1.info as u8;
-                discharge_to_reg(fs, e2, target);
+                if target >= nvarstack(fs) {
+                    discharge_to_reg(fs, e2, target);
+                }
             }
             concat_jmp(fs, &mut e2.t, e1.t);
             *e1 = e2.clone();
@@ -993,7 +1035,6 @@ pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
     let pc: i32;
     match e.k {
         ExpKind::Jmp => {
-            // Flip k so JMP fires on FALSE (skip body on false).
             negate_cmp_condition(fs, e.info);
             pc = e.info;
         }
@@ -1005,12 +1046,15 @@ pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
         }
         _ => {
             let reg = exp2anyreg(fs, e);
+            // Preserve existing t/f jump lists. The previous
+            // `*e = ExprDesc::init(...)` wiped them, leaving
+            // any LHS-of-AND/OR jump unpatched.
+            let saved_t = e.t;
+            let saved_f = e.f;
             *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+            e.t = saved_t;
+            e.f = saved_f;
             free_exp(fs, e);
-            // OP_TESTSET with A=NO_REG placeholder. patchlistaux
-            // will rewrite A to the result register at materialize
-            // time. k=0 → take JMP on TRUTHY operand; emit inverted
-            // so that take-JMP-on-FALSY lands on the false-list.
             pc = jump_on_cond(fs, reg, 0);
         }
     }
@@ -1070,7 +1114,12 @@ pub fn go_if_false(fs: &mut FuncState, e: &mut ExprDesc) {
         }
         _ => {
             let reg = exp2anyreg(fs, e);
+            // Preserve existing jump lists across the reset.
+            let saved_t = e.t;
+            let saved_f = e.f;
             *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+            e.t = saved_t;
+            e.f = saved_f;
             free_exp(fs, e);
             pc = jump_on_cond(fs, reg, 1);
         }

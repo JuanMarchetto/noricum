@@ -1228,6 +1228,18 @@ fn explist_ex(ls: &mut LexState, fs: &mut FuncState) -> (i32, bool) {
     if e.k == ExpKind::Call {
         lcode::set_returns(fs, &mut e, -1);
         (n, true)
+    } else if e.k == ExpKind::VarArg {
+        // Last expression is `...`. Patch OP_VARARG's A to the
+        // current freereg (where the first extra arg should land)
+        // and its C to 0 (MULTRET) so the VM streams every extra
+        // onto the stack. Don't bump freereg — the downstream
+        // code_call_multret uses B=0 to consume "up to top".
+        let reg = fs.freereg;
+        let pc = e.info as usize;
+        let instr = &mut fs.proto.code[pc];
+        *instr = (*instr & !(0xFF << 7)) | ((reg as u32) << 7);
+        *instr = (*instr & !(0xFFu32 << 24)) | (0u32 << 24);
+        (n, true)
     } else {
         lcode::exp2nextreg(fs, &mut e);
         (n, false)
