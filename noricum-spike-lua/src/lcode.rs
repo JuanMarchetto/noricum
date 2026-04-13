@@ -299,7 +299,12 @@ fn discharge_to_reg(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
         }
         ExpKind::KInt => {
             let n = e.ival;
-            if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
+            // OP_LOADI uses sBx (17-bit signed biased). Anything
+            // outside that narrow window must go through the
+            // constant pool.
+            let max_sbx = OFFSET_sBx as i64;
+            let min_sbx = -(OFFSET_sBx as i64);
+            if n >= min_sbx && n <= max_sbx {
                 emit_abx(
                     fs,
                     OpCode::OP_LOADI,

@@ -265,17 +265,56 @@ unsafe extern "C" fn math_modf(state: *mut LuaState) -> std::os::raw::c_int {
     2
 }
 
-// Simple PRNG state (xorshift64).
-static mut RNG_STATE: u64 = 0x9E3779B97F4A7C15;
+// xoshiro256** PRNG state — same algorithm as C Lua 5.4's lmathlib.c
+// `nextrand`. Four 64-bit lanes; output is a rotation of a scaled
+// middle lane so the low bits have full period.
+static mut RNG_STATE: [u64; 4] = [
+    0x180EC6D33CFD0ABA,
+    0xD5A61266F0C9392C,
+    0xA9582618E03FC9AA,
+    0x39ABDC4529B1661C,
+];
+
+#[inline]
+fn rotl(x: u64, k: u32) -> u64 {
+    (x << k) | (x >> (64u32 - k))
+}
 
 fn rng_next() -> u64 {
     unsafe {
-        let mut x = RNG_STATE;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        RNG_STATE = x;
-        x
+        let result = rotl(RNG_STATE[1].wrapping_mul(5), 7).wrapping_mul(9);
+        let t = RNG_STATE[1] << 17;
+        RNG_STATE[2] ^= RNG_STATE[0];
+        RNG_STATE[3] ^= RNG_STATE[1];
+        RNG_STATE[1] ^= RNG_STATE[2];
+        RNG_STATE[0] ^= RNG_STATE[3];
+        RNG_STATE[2] ^= t;
+        RNG_STATE[3] = rotl(RNG_STATE[3], 45);
+        result
+    }
+}
+
+/// Seed the xoshiro256** state from two 64-bit words. Matches C Lua's
+/// `setseed` — four lanes filled via a SplitMix64 stream off the two
+/// seeds so a zero seed still bootstraps a non-zero state.
+fn rng_seed(n1: u64, n2: u64) {
+    let mut s0: u64 = n1;
+    let mut s1: u64 = 0xFF;
+    let mut s2: u64 = n2;
+    let mut s3: u64 = 0;
+    for _ in 0..16 {
+        let result = rotl(s1.wrapping_mul(5u64), 7).wrapping_mul(9u64);
+        let _ = result;
+        let t = s1 << 17;
+        s2 ^= s0;
+        s3 ^= s1;
+        s1 ^= s2;
+        s0 ^= s3;
+        s2 ^= t;
+        s3 = rotl(s3, 45);
+    }
+    unsafe {
+        RNG_STATE = [s0, s1, s2, s3];
     }
 }
 
@@ -310,11 +349,27 @@ unsafe extern "C" fn math_random(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn math_randomseed(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
-    let seed = state.to_integer_x(1).unwrap_or(0) as u64;
-    unsafe {
-        RNG_STATE = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
-    }
-    0
+    let top = state.get_top() as i32;
+    let (n1, n2) = if top == 0 {
+        // No seed: derive from time + address. Matches C Lua's fallback.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        (nanos, state as *const LuaState as usize as u64)
+    } else if top == 1 {
+        (state.to_integer_x(1).unwrap_or(0) as u64, 0)
+    } else {
+        (
+            state.to_integer_x(1).unwrap_or(0) as u64,
+            state.to_integer_x(2).unwrap_or(0) as u64,
+        )
+    };
+    rng_seed(n1, n2);
+    // Lua 5.4 randomseed returns the two seeds used.
+    state.push_integer(n1 as i64);
+    state.push_integer(n2 as i64);
+    2
 }
 
 unsafe extern "C" fn math_tointeger(state: *mut LuaState) -> std::os::raw::c_int {
