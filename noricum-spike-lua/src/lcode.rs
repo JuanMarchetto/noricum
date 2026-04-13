@@ -614,6 +614,8 @@ pub fn prefix(fs: &mut FuncState, op: UnOpr, e: &mut ExprDesc, _line: i32) {
                 return;
             }
             let reg = exp2anyreg(fs, e);
+            *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+            free_exp(fs, e);
             let dest = fs.freereg;
             emit_abc(fs, OpCode::OP_UNM, dest as u32, reg as u32, 0, false);
             e.k = ExpKind::NonReloc;
@@ -626,6 +628,8 @@ pub fn prefix(fs: &mut FuncState, op: UnOpr, e: &mut ExprDesc, _line: i32) {
                 return;
             }
             let reg = exp2anyreg(fs, e);
+            *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+            free_exp(fs, e);
             let dest = fs.freereg;
             emit_abc(fs, OpCode::OP_BNOT, dest as u32, reg as u32, 0, false);
             e.k = ExpKind::NonReloc;
@@ -643,6 +647,8 @@ pub fn prefix(fs: &mut FuncState, op: UnOpr, e: &mut ExprDesc, _line: i32) {
                 }
                 _ => {
                     let reg = exp2anyreg(fs, e);
+                    *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+                    free_exp(fs, e);
                     let dest = fs.freereg;
                     emit_abc(
                         fs,
@@ -660,6 +666,14 @@ pub fn prefix(fs: &mut FuncState, op: UnOpr, e: &mut ExprDesc, _line: i32) {
         }
         UnOpr::Len => {
             let reg = exp2anyreg(fs, e);
+            // Free the operand's temp slot (if it's a temp above the
+            // nactvar boundary) so the result can occupy it. Without
+            // this, `print(#"hello")` emits LOADK at R(n), LEN result
+            // at R(n+1), leaves the LOADK occupying R(n), and the
+            // surrounding CALL reads args starting at R(n) instead
+            // of seeing the length at R(n+1).
+            *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+            free_exp(fs, e);
             let dest = fs.freereg;
             emit_abc(fs, OpCode::OP_LEN, dest as u32, reg as u32, 0, false);
             e.k = ExpKind::NonReloc;
