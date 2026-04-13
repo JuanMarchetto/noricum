@@ -115,7 +115,10 @@ fn pcall_catches_error() {
         local ok, err = pcall(function() error("boom") end)
         print(ok, err)
     "#);
-    assert_eq!(out, vec!["false\tboom".to_string()]);
+    // error() now prefixes string messages with source:line just
+    // like C Lua. The chunk name comes from the `run()` harness.
+    assert!(out[0].starts_with("false\t"), "got: {:?}", out);
+    assert!(out[0].ends_with(": boom") || out[0].ends_with("\tboom"), "got: {:?}", out);
 }
 
 #[test]

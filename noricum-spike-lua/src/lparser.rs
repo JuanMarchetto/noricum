@@ -291,6 +291,7 @@ pub fn parse(
 
     // Finalize proto.
     fs.proto.max_stack_size = fs.proto.max_stack_size.max(fs.freereg);
+    fs.proto.source = Some(name_handle);
 
     // Allocate on the heap.
     let gs = unsafe { &mut *ls.gs };
@@ -1052,6 +1053,34 @@ fn body(ls: &mut LexState, outer_fs: &mut FuncState, e: &mut ExprDesc, is_method
 
     inner_fs.proto.last_line_defined = ls.linenumber;
     inner_fs.proto.max_stack_size = inner_fs.proto.max_stack_size.max(inner_fs.freereg);
+    // Inner functions inherit their source from the chunk's main
+    // proto so debug.getinfo / error() / traceback can attribute
+    // lines to the right file.
+    inner_fs.proto.source = Some(ls.source_name);
+
+    // Ensure every upvalue inner referenced by `in_stack=false`
+    // (i.e., chained-through-outer) actually exists on outer's
+    // proto. The most common case is `_ENV` at slot 0 referenced
+    // from a global access deep in nested functions: each layer
+    // must hold the chain or OP_CLOSURE will index past the end
+    // of outer's lclosure.upvalues at runtime.
+    for inner_uv in &inner_fs.proto.upvalues {
+        if !inner_uv.in_stack {
+            let target = inner_uv.idx as usize;
+            while outer_fs.proto.upvalues.len() <= target {
+                let next_idx = outer_fs.proto.upvalues.len();
+                // The next gap-fill upvalue chains to the same
+                // outer-of-outer slot (typically _ENV at 0).
+                outer_fs.proto.upvalues.push(UpvalDesc {
+                    name: None,
+                    in_stack: false,
+                    idx: next_idx as u8,
+                    kind: 0,
+                });
+                outer_fs.nups += 1;
+            }
+        }
+    }
 
     // Allocate the inner proto on the heap.
     let inner_proto = {

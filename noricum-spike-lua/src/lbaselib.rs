@@ -137,23 +137,42 @@ unsafe extern "C" fn lua_assert(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
     if !state.to_boolean(1) {
         let top = state.get_top();
-        let msg = if top >= 2 {
-            match state.type_at(2) {
-                4 => {
-                    let bytes = state.to_lstring(2).unwrap_or(b"assertion failed!").to_vec();
-                    let h = state.global.new_string(&bytes, 0);
-                    TValue::ShortString(h)
+        if top >= 2 {
+            match state.value_at_public(2).unwrap_or(TValue::Nil) {
+                TValue::ShortString(_) | TValue::LongString(_) => {
+                    let bytes = state
+                        .to_lstring(2)
+                        .unwrap_or(b"assertion failed!")
+                        .to_vec();
+                    let final_bytes = if let Some(loc) = source_location_at_level(state, 1) {
+                        let mut b = loc.into_bytes();
+                        b.extend_from_slice(&bytes);
+                        b
+                    } else {
+                        bytes
+                    };
+                    let h = state.global.new_string(&final_bytes, 0);
+                    state.raise_error_value(TValue::ShortString(h));
+                    return 0;
                 }
-                _ => {
-                    let h = state.global.new_string(b"assertion failed!", 0);
-                    TValue::ShortString(h)
+                other => {
+                    // Non-string error values pass through unchanged
+                    // (numbers, tables, etc.) — matches C Lua.
+                    state.raise_error_value(other);
+                    return 0;
                 }
             }
+        }
+        let bytes = b"assertion failed!".to_vec();
+        let final_bytes = if let Some(loc) = source_location_at_level(state, 1) {
+            let mut b = loc.into_bytes();
+            b.extend_from_slice(&bytes);
+            b
         } else {
-            let h = state.global.new_string(b"assertion failed!", 0);
-            TValue::ShortString(h)
+            bytes
         };
-        state.raise_error_value(msg);
+        let h = state.global.new_string(&final_bytes, 0);
+        state.raise_error_value(TValue::ShortString(h));
         return 0;
     }
     state.get_top() as i32
@@ -162,34 +181,88 @@ unsafe extern "C" fn lua_assert(state: *mut LuaState) -> std::os::raw::c_int {
 unsafe extern "C" fn lua_error_fn(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
     let top = state.get_top();
+    // Optional second arg: level (default 1 = caller). Level > 0
+    // prepends "source:line: " to a string error using the call
+    // frame `level` levels above this `error` call.
+    let level = state.to_integer_x(2).unwrap_or(1);
     let v = if top >= 1 {
-        // Copy first arg into stack top, then raise.
-        match state.type_at(1) {
-            4 => {
+        // Pass the value through unchanged for non-string types.
+        // Strings get prefixed with the source location.
+        match state.value_at_public(1).unwrap_or(TValue::Nil) {
+            TValue::ShortString(_) | TValue::LongString(_) => {
                 let bytes = state.to_lstring(1).unwrap_or(b"error").to_vec();
-                let h = state.global.new_string(&bytes, 0);
-                TValue::ShortString(h)
-            }
-            3 => {
-                if let Some(i) = state.to_integer_x(1) {
-                    TValue::Integer(i)
-                } else if let Some(f) = state.to_number_x(1) {
-                    TValue::Number(f)
+                if level > 0 {
+                    if let Some(loc) = source_location_at_level(state, level as usize) {
+                        let mut prefixed = loc.into_bytes();
+                        prefixed.extend_from_slice(&bytes);
+                        let h = state.global.new_string(&prefixed, 0);
+                        TValue::ShortString(h)
+                    } else {
+                        let h = state.global.new_string(&bytes, 0);
+                        TValue::ShortString(h)
+                    }
                 } else {
-                    TValue::Nil
+                    let h = state.global.new_string(&bytes, 0);
+                    TValue::ShortString(h)
                 }
             }
-            0 => TValue::Nil,
-            _ => {
-                let h = state.global.new_string(b"error", 0);
-                TValue::ShortString(h)
-            }
+            other => other,
         }
     } else {
         TValue::Nil
     };
     state.raise_error_value(v);
     0
+}
+
+/// Return `"source:line: "` for the call frame `level` frames above
+/// the running C function. Level 1 = the immediate Lua caller of
+/// `error()`, matching C Lua's `lua_error` behavior.
+fn source_location_at_level(state: &LuaState, level: usize) -> Option<String> {
+    use crate::contract::TValue;
+    let thread = state.current_thread();
+    // Skip the C error() frame itself, then walk up `level` frames.
+    let frame = thread.frames.iter().rev().nth(level)?;
+    let func_val = thread.stack.get(frame.func as usize).copied()?;
+    let TValue::LuaClosure(h) = func_val else { return None };
+    let proto_h = state.global.heap.lclosure(h).proto;
+    let proto = state.global.heap.proto(proto_h);
+    let source_bytes = proto
+        .source
+        .map(|sh| state.global.heap.string(sh).bytes.clone())
+        .unwrap_or_else(|| b"?".to_vec());
+    let mut src = String::from_utf8_lossy(&source_bytes).to_string();
+    // Lua source convention: "@filename" → "filename"; "=name" → "name".
+    if src.starts_with('@') || src.starts_with('=') {
+        src.remove(0);
+    }
+    let pc = frame.saved_pc.saturating_sub(1) as i32;
+    let line = line_for_pc(proto, pc);
+    Some(format!("{}:{}: ", src, line))
+}
+
+fn line_for_pc(proto: &crate::contract::Proto, pc: i32) -> i32 {
+    if pc < 0 || proto.line_info.is_empty() {
+        return proto.line_defined;
+    }
+    let mut base_pc: i32 = -1;
+    let mut line: i32 = proto.line_defined;
+    for abs in &proto.abs_line_info {
+        if abs.pc <= pc {
+            base_pc = abs.pc;
+            line = abs.line;
+        } else {
+            break;
+        }
+    }
+    for i in (base_pc + 1)..=pc {
+        if let Some(&d) = proto.line_info.get(i as usize) {
+            if d as i8 != i8::MIN {
+                line += d as i8 as i32;
+            }
+        }
+    }
+    line
 }
 
 // ---- raw operations -------------------------------------------------------

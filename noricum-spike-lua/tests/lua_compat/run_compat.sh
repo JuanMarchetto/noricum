@@ -18,8 +18,8 @@ fail=0
 files=$(ls "$DIR"/*.lua | sort)
 for f in $files; do
   base=$(basename "$f" .lua)
-  out_c=$("$C"    "$f" 2>&1)
-  out_r=$("$RUST" "$f" 2>&1)
+  out_c=$(timeout 10 "$C"    "$f" 2>&1)
+  out_r=$(timeout 10 "$RUST" "$f" 2>&1)
   if [ "$out_c" = "$out_r" ]; then
     pass=$((pass+1))
     printf "  PASS  %s\n" "$base"
