@@ -551,6 +551,29 @@ pub struct Thread {
     /// the function returns. Replaces C Lua's longjmp-based
     /// `lua_error` with our Result-threading equivalent.
     pub pending_error: Option<LuaError>,
+    /// Set by `coroutine.yield`: values to hand back to whoever
+    /// resumed this thread. `invoke_c_function` sees this flag and
+    /// bails out of the normal result-transfer so the VM dispatch
+    /// loop can bubble a `LuaError::Yield` up to `resume`.
+    pub pending_yield: Option<Vec<TValue>>,
+    /// After a yield, the stack slot that resume values should be
+    /// copied to when the coroutine is resumed again — i.e., the
+    /// slot the original `yield` call occupied. Paired with
+    /// `yield_n_expected`.
+    pub yield_target_slot: Option<u32>,
+    /// Expected return count of the Lua-level call that invoked
+    /// `yield`. Resume pads/truncates the resume values to this
+    /// count before restarting the VM.
+    pub yield_n_expected: Option<i16>,
+    /// Whether this thread was created by `coroutine.create` (i.e.,
+    /// not the main thread). Main threads can't yield.
+    pub is_coroutine: bool,
+    /// Handle of the thread that invoked `resume` on us. Used by
+    /// `coroutine.running` and to switch back on yield/return.
+    pub resumer: Option<ThreadHandle>,
+    /// Set true once the coroutine body has returned or errored —
+    /// further `resume` calls are rejected as "cannot resume dead".
+    pub finished: bool,
 }
 
 /// Thread-local wrapper so [`Thread`] can `#[derive(Default)]`. Defaults
@@ -583,6 +606,10 @@ pub enum LuaError {
     Gc,
     /// Error raised while running an error handler.
     Handler,
+    /// Coroutine yield sentinel. Not a "real" error — bubbles up
+    /// through the VM dispatch loop until `coroutine.resume`
+    /// catches it and hands the values back to its caller.
+    Yield,
 }
 
 /// Convenience alias used throughout the crate.
@@ -596,6 +623,7 @@ impl LuaError {
             LuaError::Memory => ThreadStatus::MemoryError,
             LuaError::Gc => ThreadStatus::GcError,
             LuaError::Handler => ThreadStatus::HandlerError,
+            LuaError::Yield => ThreadStatus::Yield,
         }
     }
 }

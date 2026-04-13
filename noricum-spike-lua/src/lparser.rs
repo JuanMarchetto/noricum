@@ -1075,7 +1075,17 @@ fn block(ls: &mut LexState, fs: &mut FuncState) {
 /// Parse an expression list, leaving results in consecutive
 /// registers starting at `fs.freereg`. Returns number of
 /// expressions.
-fn explist(ls: &mut LexState, fs: &mut FuncState, ) -> i32 {
+fn explist(ls: &mut LexState, fs: &mut FuncState) -> i32 {
+    let (n, _multret) = explist_ex(ls, fs);
+    n
+}
+
+/// Parse an expression list and return `(count, multret_tail)`.
+/// If the last expression is a function call, it's left as a Call
+/// (not discharged) so the caller can decide whether to expand it
+/// to MULTRET (for function args, `return`, local lists) or clamp
+/// to one value (for middle positions in multi-assignment).
+fn explist_ex(ls: &mut LexState, fs: &mut FuncState) -> (i32, bool) {
     let mut n = 1;
     let mut e = ExprDesc::void();
     expr(ls, fs, &mut e);
@@ -1085,8 +1095,13 @@ fn explist(ls: &mut LexState, fs: &mut FuncState, ) -> i32 {
         expr(ls, fs, &mut e);
         n += 1;
     }
-    lcode::exp2nextreg(fs, &mut e);
-    n
+    if e.k == ExpKind::Call {
+        lcode::set_returns(fs, &mut e, -1);
+        (n, true)
+    } else {
+        lcode::exp2nextreg(fs, &mut e);
+        (n, false)
+    }
 }
 
 fn expr(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
@@ -1313,13 +1328,17 @@ fn suffixedexp(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
             t if t == b'(' as i32 => {
                 lcode::exp2nextreg(fs, e);
                 ls.next_token();
-                let nargs = if ls.t.token == b')' as i32 {
-                    0
+                let (nargs, multret) = if ls.t.token == b')' as i32 {
+                    (0, false)
                 } else {
-                    explist(ls, fs)
+                    explist_ex(ls, fs)
                 };
                 check_next(ls, b')' as i32);
-                lcode::code_call(fs, e, nargs);
+                if multret {
+                    lcode::code_call_multret(fs, e);
+                } else {
+                    lcode::code_call(fs, e, nargs);
+                }
             }
             t if t == b':' as i32 => {
                 // Method call: e:method(args) compiles to
@@ -1333,14 +1352,18 @@ fn suffixedexp(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
                 match ls.t.token {
                     tk if tk == b'(' as i32 => {
                         ls.next_token();
-                        let extra = if ls.t.token == b')' as i32 {
-                            0
+                        let (extra, multret) = if ls.t.token == b')' as i32 {
+                            (0, false)
                         } else {
-                            explist(ls, fs)
+                            explist_ex(ls, fs)
                         };
                         check_next(ls, b')' as i32);
                         // Add 1 for the implicit self arg.
-                        lcode::code_call(fs, e, extra + 1);
+                        if multret {
+                            lcode::code_call_multret(fs, e);
+                        } else {
+                            lcode::code_call(fs, e, extra + 1);
+                        }
                     }
                     tk if tk == b'{' as i32 => {
                         let mut tbl = ExprDesc::void();

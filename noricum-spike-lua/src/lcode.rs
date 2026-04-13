@@ -419,6 +419,26 @@ pub fn code_call(fs: &mut FuncState, e: &mut ExprDesc, nargs: i32) {
     fs.freereg = (func_reg + 1) as u8;
 }
 
+/// Variant of [`code_call`] used when the trailing arg is a
+/// MULTRET-expanded call (or `...`). The CALL opcode encodes B=0,
+/// which tells the VM "args = everything from A+1 up to the
+/// current top", so the extra returns from the previous call
+/// become arguments here.
+pub fn code_call_multret(fs: &mut FuncState, e: &mut ExprDesc) {
+    let func_reg = e.info as u32;
+    let pc = emit_abc(
+        fs,
+        OpCode::OP_CALL,
+        func_reg,
+        0, // B=0 → multret argument list
+        2, // 1 result by default
+        false,
+    );
+    e.k = ExpKind::Call;
+    e.info = pc;
+    fs.freereg = (func_reg + 1) as u8;
+}
+
 pub fn set_returns(fs: &mut FuncState, e: &mut ExprDesc, nresults: i32) {
     if e.k == ExpKind::Call {
         let instr = &mut fs.proto.code[e.info as usize];

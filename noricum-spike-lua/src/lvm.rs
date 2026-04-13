@@ -776,19 +776,24 @@ impl LuaState {
                     };
                     self.call_value(func_abs, n_args, n_results)?;
 
-                    // After the callee returns, restore the
-                    // caller's frame top so subsequent
-                    // instructions see their full register
-                    // window. The callee's results already sit
-                    // at R(A)..R(A + (n_results or actual)),
-                    // which is below this frame top.
-                    let caller_top = self
-                        .current_call_frame()
-                        .expect("after CALL: caller frame vanished")
-                        .top;
-                    if self.current_thread().top < caller_top {
-                        let thread = self.current_thread_mut();
-                        thread.top = caller_top;
+                    // After the callee returns: for regular calls
+                    // (n_results != MULTRET), restore the caller's
+                    // frame top so subsequent instructions see the
+                    // full register window. For MULTRET calls, the
+                    // surviving `top` marks the end of the expanded
+                    // return list and is consumed by the NEXT CALL
+                    // or SETLIST with B=0. We must NOT restore it
+                    // in that case or we'd pull garbage from the
+                    // register padding into the next arg list.
+                    if n_results != -1 {
+                        let caller_top = self
+                            .current_call_frame()
+                            .expect("after CALL: caller frame vanished")
+                            .top;
+                        if self.current_thread().top < caller_top {
+                            let thread = self.current_thread_mut();
+                            thread.top = caller_top;
+                        }
                     }
                 }
                 OP_TAILCALL_U8 => {

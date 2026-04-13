@@ -130,6 +130,10 @@ impl LuaState {
     /// Read the value at `idx` without panicking. Returns `None`
     /// when the index is out of range or zero.
     #[inline]
+    pub fn value_at_public(&self, idx: i32) -> Option<TValue> {
+        self.value_at(idx)
+    }
+
     fn value_at(&self, idx: i32) -> Option<TValue> {
         let slot = self.try_index_to_slot(idx)?;
         Some(self.current_thread().stack[slot as usize])

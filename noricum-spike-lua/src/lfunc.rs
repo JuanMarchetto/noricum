@@ -184,6 +184,12 @@ mod tests {
             frames: Vec::new(),
             open_upvals: Vec::new(),
             pending_error: None,
+            pending_yield: None,
+            yield_target_slot: None,
+            yield_n_expected: None,
+            is_coroutine: false,
+            resumer: None,
+            finished: false,
         }
     }
 

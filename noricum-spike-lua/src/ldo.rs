@@ -242,8 +242,32 @@ impl LuaState {
             return Err(err);
         }
 
+        // A C function that called `state.yield_values(...)` sets
+        // `pending_yield`. Pop its frame, remember the call site so
+        // `coroutine.resume` can deliver values here on the next
+        // resume, and bubble `LuaError::Yield` up to resume().
+        if self.current_thread().pending_yield.is_some() {
+            let _ = self.pop_call_frame();
+            let thread = self.current_thread_mut();
+            thread.yield_target_slot = Some(func_slot);
+            thread.yield_n_expected = Some(n_results);
+            // Trim the stack so yielded args don't linger past the
+            // call site. Values to return live on `pending_yield`.
+            thread.top = func_slot;
+            return Err(LuaError::Yield);
+        }
+
         self.finish_c_call(func_slot, n_returned, n_results);
         Ok(())
+    }
+
+    /// Called from `coroutine.yield` (a C function) to stash the
+    /// values that should flow back to `resume`. The Result-threading
+    /// equivalent of `lua_yield` — after setting the flag the C
+    /// function should return 0 and let invoke_c_function bubble
+    /// the yield up.
+    pub fn yield_values(&mut self, values: Vec<TValue>) {
+        self.current_thread_mut().pending_yield = Some(values);
     }
 
     // --- Stage 5.3 — protected calls ------------------------------
