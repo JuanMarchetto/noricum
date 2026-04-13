@@ -164,7 +164,20 @@ unsafe extern "C" fn co_resume(state: *mut LuaState) -> std::os::raw::c_int {
             co.yield_target_slot = None;
             co.yield_n_expected = None;
         }
-        state.execute()
+        // Re-enter execute() in a loop. Each execute() invocation
+        // returns when the topmost Lua frame's RETURN fires, but
+        // outer Lua frames may still be active (e.g., a wrapper
+        // function that called the yielding producer). Keep
+        // resuming until either a Yield/error bubbles up or the
+        // coroutine has no Lua frames left.
+        let mut last = Ok(());
+        while !state.current_thread().frames.is_empty() {
+            last = state.execute();
+            if last.is_err() {
+                break;
+            }
+        }
+        last
     };
 
     // Switch back to caller.
@@ -250,20 +263,24 @@ unsafe extern "C" fn co_status(state: *mut LuaState) -> std::os::raw::c_int {
         }
     };
     let cur = state.current_thread;
-    let s = state.global.heap.thread(handle).status.0;
+    let th = state.global.heap.thread(handle);
+    let finished = th.finished;
+    let s = th.status.0;
+    let frames_empty = th.frames.is_empty();
+    let top = th.top;
     let name = if handle == cur {
         "running"
+    } else if finished {
+        "dead"
     } else {
         match s {
             ThreadStatus::Ok => {
-                // Ok with no frames = fresh (suspended). Ok with frames
-                // should only appear transiently; treat as suspended.
-                if state.global.heap.thread(handle).frames.is_empty()
-                    && state.global.heap.thread(handle).top > 0
-                {
-                    "suspended"
-                } else {
+                // Ok with no frames AND non-empty stack = fresh (initial).
+                // Ok with frames means suspended after a yield.
+                if frames_empty && top == 0 {
                     "dead"
+                } else {
+                    "suspended"
                 }
             }
             ThreadStatus::Yield => "suspended",

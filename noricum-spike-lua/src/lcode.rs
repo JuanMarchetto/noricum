@@ -346,22 +346,20 @@ fn discharge_to_reg(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
             }
         }
         ExpKind::Jmp => {
-            // Comparison used as a value. The CMP+JMP at e.info is
-            // already in place: JMP fires when comparison is
-            // FALSE, fall-through means comparison was TRUE.
-            // Inline the LOADBOOL pair so the natural fall-through
-            // lands on LOADTRUE:
+            // Comparison used as a value. The CMP at e.info fires
+            // its JMP on TRUE-of-comparison (Lua convention with
+            // k=1). Layout:
             //   ...CMP/JMP (e.info) ...
-            //   LOADTRUE  R          ; cmp-matched (skipped JMP) lands here
-            //   JMP past_false       ; over the LOADFALSE
-            //   LOADFALSE R          ; e.info's JMP lands here
+            //   LOADFALSE R          ; cmp FALSE (fell through) lands here
+            //   JMP past_true        ; over the LOADTRUE
+            //   LOADTRUE  R          ; cmp's JMP target (TRUE)
             //   ...next code         ; the skip JMP lands here
             let cmp_jmp = e.info;
-            let _t_pc = emit_abc(fs, OpCode::OP_LOADTRUE, reg as u32, 0, 0, false);
+            let _f_pc = emit_abc(fs, OpCode::OP_LOADFALSE, reg as u32, 0, 0, false);
             let skip_jmp = emit_jump(fs);
-            let f_pc = emit_abc(fs, OpCode::OP_LOADFALSE, reg as u32, 0, 0, false);
-            fix_jump(fs, cmp_jmp, f_pc);
-            fix_jump(fs, skip_jmp, f_pc + 1);
+            let t_pc = emit_abc(fs, OpCode::OP_LOADTRUE, reg as u32, 0, 0, false);
+            fix_jump(fs, cmp_jmp, t_pc);
+            fix_jump(fs, skip_jmp, t_pc + 1);
             e.k = ExpKind::NonReloc;
             e.info = reg as i32;
             e.t = NO_JUMP;
@@ -894,13 +892,15 @@ fn code_comparison(
     // `true != 0` → skip). For Ne: skip JMP when values differ
     // (NE true) → emit OP_EQ with k=1 (so EQ-false makes
     // `false != 1` → skip).
-    let k = op == BinOpr::Ne;
+    // Lua invariant (lcode.c codecomp): emit CMP with k=1 for
+    // EQ/LT/LE so the JMP fires on TRUE-of-comparison; emit
+    // OP_EQ with k=0 for NE (so EQ-FALSE = NE-TRUE → take JMP).
+    // After this, `go_if_true` / `go_if_false` can read e.info
+    // as "jump fires when expression is TRUE" — the basis for
+    // the t/f-list dispatching they do.
+    let k = op != BinOpr::Ne;
     let _pc = emit_abc(fs, opcode, ra as u32, rb as u32, 0, k);
     let jmp = emit_jump(fs);
-    // Lua invariant: a fresh comparison stores the conditional
-    // jump in `e.info` only; t/f are NO_JUMP. go_if_true /
-    // go_if_false will read `info` and decide whether the jump
-    // belongs in the true-list or the false-list.
     e1.k = ExpKind::Jmp;
     e1.info = jmp;
     e1.t = NO_JUMP;
@@ -914,11 +914,13 @@ pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
     let pc: i32;
     match e.k {
         ExpKind::Jmp => {
-            // Already a conditional jump; e.f is the JMP that fires
-            // when the condition is false. Concat that into f-list.
-            // Lua sets `pc = e->u.info` here.
+            // The CMP+JMP fires on TRUE-of-cmp (per codecomp's
+            // k=1 convention). go_if_true wants a jump that fires
+            // on FALSE (so we skip the body when cond is false),
+            // so flip the cmp's k flag in place — Lua's
+            // negatecondition().
+            negate_cmp_condition(fs, e.info);
             pc = e.info;
-            // The Jmp's t-list is empty by construction.
         }
         ExpKind::True | ExpKind::KInt | ExpKind::KFlt | ExpKind::KStr | ExpKind::K => {
             // Always true; no jump needed.
@@ -937,9 +939,23 @@ pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
         }
     }
     concat_jmp(fs, &mut e.f, pc);
-    // True jumps (already in e.t) land here.
     patch_to_here(fs, e.t);
     e.t = NO_JUMP;
+}
+
+/// Flip the `k` flag on the CMP instruction immediately preceding
+/// the JMP at `jmp_pc`. After the flip, the JMP fires on the
+/// opposite truth value of the comparison. Mirrors C Lua's
+/// negatecondition().
+fn negate_cmp_condition(fs: &mut FuncState, jmp_pc: i32) {
+    if jmp_pc <= 0 {
+        return;
+    }
+    // CMP is at jmp_pc - 1.
+    let cmp_pc = (jmp_pc - 1) as usize;
+    let instr = &mut fs.proto.code[cmp_pc];
+    // k flag is bit 15.
+    *instr ^= 1u32 << 15;
 }
 
 pub fn go_if_false(fs: &mut FuncState, e: &mut ExprDesc) {

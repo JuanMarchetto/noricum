@@ -760,6 +760,10 @@ fn tv_to_string(state: &mut LuaState, idx: i32) -> String {
 /// Format a Lua float using `%.14g` semantics, adding a `.0` suffix
 /// when the output would otherwise look like an integer so the value
 /// survives a tostring/tonumber round-trip with type preserved.
+/// Format a Lua number using `%.17g` semantics — the same default
+/// Lua 5.5 uses (`LUAI_NUMFMT` in luaconf.h). 17 significant
+/// decimal digits is the minimum needed to round-trip every f64
+/// exactly; matches the C reference byte-for-byte.
 pub(crate) fn format_lua_number(f: f64) -> String {
     if f.is_nan() {
         return "nan".to_string();
@@ -767,15 +771,71 @@ pub(crate) fn format_lua_number(f: f64) -> String {
     if f.is_infinite() {
         return if f < 0.0 { "-inf" } else { "inf" }.to_string();
     }
-    let s = format!("{:.14e}", f);
-    // Use %g-equivalent via Rust's own shortest-repr when possible.
-    let mut s = format!("{}", f);
-    // If the result contains no '.', 'e', or 'n'/'i' (nan/inf), append .0
-    if !s.contains('.') && !s.contains('e') && !s.contains('E')
-        && !s.contains('n') && !s.contains('i') {
-        s.push_str(".0");
+    if f == 0.0 {
+        return if f.is_sign_negative() { "-0.0".to_string() } else { "0.0".to_string() };
+    }
+    let s = format_g(f, 17);
+    // Add a trailing ".0" if the output looks like an integer so
+    // tonumber(tostring(x)) preserves the float type.
+    if !s.contains('.') && !s.contains('e') && !s.contains('E') && !s.contains('n') && !s.contains('i') {
+        let mut with_dot = s;
+        with_dot.push_str(".0");
+        return with_dot;
     }
     s
+}
+
+/// `%.{prec}g` printf-style formatter for f64. Picks between %f
+/// and %e based on the exponent; strips trailing zeros from the
+/// mantissa in either case.
+fn format_g(f: f64, prec: usize) -> String {
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    let abs = f.abs();
+    let exp = abs.log10().floor() as i32;
+    if exp < -4 || exp >= prec as i32 {
+        // Scientific.
+        let raw = format!("{:.*e}", prec - 1, f);
+        normalize_exp_e(&raw)
+    } else {
+        // Fixed.
+        let f_prec = (prec as i32 - 1 - exp).max(0) as usize;
+        let raw = format!("{:.*}", f_prec, f);
+        strip_trailing_zeros(raw)
+    }
+}
+
+fn strip_trailing_zeros(mut s: String) -> String {
+    if s.contains('.') {
+        while s.ends_with('0') { s.pop(); }
+        if s.ends_with('.') { s.pop(); }
+    }
+    s
+}
+
+fn normalize_exp_e(raw: &str) -> String {
+    // Rust's {:e} gives "1.234e5" (no sign, no zero-pad). C %g gives
+    // "1.234e+05". Convert.
+    let Some(idx) = raw.find(|c| c == 'e' || c == 'E') else {
+        return raw.to_string();
+    };
+    let (mantissa, rest) = raw.split_at(idx);
+    let exp = &rest[1..];
+    let (sign, digits) = if let Some(d) = exp.strip_prefix('-') {
+        ("-", d)
+    } else if let Some(d) = exp.strip_prefix('+') {
+        ("+", d)
+    } else {
+        ("+", exp)
+    };
+    let mant_trim = strip_trailing_zeros(mantissa.to_string());
+    let pad: String = if digits.len() < 2 {
+        std::iter::repeat('0').take(2 - digits.len()).collect()
+    } else {
+        String::new()
+    };
+    format!("{}e{}{}{}", mant_trim, sign, pad, digits)
 }
 
 // ---- Tests ----------------------------------------------------------------

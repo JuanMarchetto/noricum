@@ -245,9 +245,21 @@ unsafe extern "C" fn math_pow(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn math_fmod(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
-    let a = state.to_number_x(1).unwrap_or(0.0);
-    let b = state.to_number_x(2).unwrap_or(1.0);
-    state.push_number(a % b);
+    // Lua 5.4 contract: int % int → int; otherwise float.
+    use crate::contract::TValue;
+    let a_tv = state.value_at_public(1).unwrap_or(TValue::Nil);
+    let b_tv = state.value_at_public(2).unwrap_or(TValue::Nil);
+    match (a_tv, b_tv) {
+        (TValue::Integer(ai), TValue::Integer(bi)) if bi != 0 => {
+            // C-style fmod for integers: signed remainder toward zero.
+            state.push_integer(ai % bi);
+        }
+        _ => {
+            let a = state.to_number_x(1).unwrap_or(0.0);
+            let b = state.to_number_x(2).unwrap_or(1.0);
+            state.push_number(a % b);
+        }
+    }
     1
 }
 
