@@ -1,4 +1,5 @@
 [workspace]
+members = [".", "ffi"]
 
 [package]
 name = "noricum-spike-lua"

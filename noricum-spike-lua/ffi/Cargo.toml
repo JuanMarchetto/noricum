@@ -1,0 +1,15 @@
+[package]
+name = "noricum-lua-ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "noricum_lua"
+path = "src/lib.rs"
+# cdylib produces a `.so`/`.dylib`/`.dll` suitable for linking from C.
+# rlib keeps the Rust-linkable form so Rust tests can use the shims.
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[dependencies]
+noricum-spike-lua = { path = ".." }

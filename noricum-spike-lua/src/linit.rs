@@ -22,6 +22,7 @@ pub fn open_libs(state: &mut LuaState) -> TableHandle {
     crate::lcorolib::open_coroutine(state, globals);
     crate::lutf8lib::open_utf8(state, globals);
     crate::loadlib::open_package(state, globals);
+    state.global.globals = Some(globals);
     globals
 }
 

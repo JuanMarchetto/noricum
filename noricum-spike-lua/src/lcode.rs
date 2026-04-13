@@ -858,13 +858,13 @@ pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
         }
         _ => {
             let reg = exp2anyreg(fs, e);
-            // OP_TEST R(A), k=0: skip next if R(A) is FALSE (not
-            // truthy). So when R(A) is truthy → fall through.
-            // Emit TEST with k=1: skip next if truthy → JMP runs
-            // when falsy. Actually Lua's convention: k=C flag,
-            // skip if (truthy != k). k=0 means skip when truthy,
-            // k=1 means skip when falsy. We want: skip JMP when
-            // truthy (continue into body), so k=0.
+            // After the value is consumed by OP_TEST it's dead; free
+            // the temp slot so the IF body's first emission reuses
+            // it. Without this, every `if expr then` leaks one
+            // register into the body, which compounds inside nested
+            // for loops (the inner FORPREP base ends up shifted).
+            *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+            free_exp(fs, e);
             emit_abc(fs, OpCode::OP_TEST, reg as u32, 0, 0, false);
             let jmp = emit_jump(fs);
             concat_jmp(fs, &mut e.f, jmp);

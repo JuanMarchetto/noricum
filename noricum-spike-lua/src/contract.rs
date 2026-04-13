@@ -723,6 +723,10 @@ pub struct GlobalState {
     pub registry: Option<TableHandle>,
     /// Main thread.
     pub main_thread: Option<ThreadHandle>,
+    /// Globals table (`_G` / `_ENV` root). Set by `linit::open_libs`
+    /// after it builds the table; the FFI layer uses this so
+    /// `lua_getglobal`/`lua_setglobal` and friends can reach it.
+    pub globals: Option<TableHandle>,
     /// String interning table: hash → list of short-string handles.
     pub string_intern: HashMap<u32, Vec<StringHandle>>,
     /// Hash seed used by `lstring::hash_bytes` for every string intern.
@@ -767,6 +771,14 @@ pub struct GlobalState {
     /// allocation triggers a `gc_step` and the counter is reset.
     /// Matches `global_State::GCdebt` in `lstate.h`.
     pub gc_debt: i64,
+}
+
+impl GlobalState {
+    /// Return the active globals table (`_G`), if one has been
+    /// installed by `linit::open_libs` / `lbaselib::open_base`.
+    pub fn globals_table(&self) -> Option<TableHandle> {
+        self.globals
+    }
 }
 
 /// The public VM handle. At the drop-in ABI boundary this is passed
