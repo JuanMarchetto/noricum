@@ -164,17 +164,52 @@ unsafe extern "C" fn tab_sort(state: *mut LuaState) -> std::os::raw::c_int {
         TValue::Table(h) => h,
         _ => return err(state, b"bad argument 1 to sort"),
     };
+    let has_cmp = state.type_at(2) == 6;
     let len = state.global.heap.table_len(table) as i64;
-    // Collect values.
     let mut values: Vec<TValue> = (1..=len)
         .map(|i| state.global.heap.table_get_int(table, i).unwrap_or(TValue::Nil))
         .collect();
-    // Default comparator: ascending numeric/string.
-    values.sort_by(|a, b| compare_tv(a, b, state).unwrap_or(std::cmp::Ordering::Equal));
+    if has_cmp {
+        // User-supplied comparator: insertion sort. O(n^2) but
+        // tolerates partial orderings without panicking and avoids
+        // the borrow-checker dance that std's sort_by would need.
+        let n = values.len();
+        for i in 1..n {
+            let mut j = i;
+            while j > 0 {
+                let a = values[j];
+                let b = values[j - 1];
+                if call_cmp(state, a, b) {
+                    values.swap(j, j - 1);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    } else {
+        values.sort_by(|a, b| compare_tv(a, b, state).unwrap_or(std::cmp::Ordering::Equal));
+    }
     for (i, v) in values.into_iter().enumerate() {
         state.global.table_set_int(table, (i as i64) + 1, v);
     }
     0
+}
+
+/// Invoke the user comparator at stack slot 2 with `(a, b)` and
+/// return whether the result is truthy.
+fn call_cmp(state: &mut LuaState, a: TValue, b: TValue) -> bool {
+    let base = state.frame_base_index().unwrap_or(0);
+    let pre_top = state.get_top() as u32;
+    let func_slot = base + pre_top;
+    state.push_value(2);
+    state.current_thread_mut().push(a);
+    state.current_thread_mut().push(b);
+    let _ = state.call_value(func_slot, 2, 1);
+    let result = state.to_boolean(-1);
+    let new_top = state.get_top() - 1;
+    state.set_top(new_top as i32);
+    result
 }
 
 fn compare_tv(a: &TValue, b: &TValue, state: &LuaState) -> Option<std::cmp::Ordering> {

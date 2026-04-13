@@ -578,10 +578,75 @@ fn assignment(ls: &mut LexState, fs: &mut FuncState, lhs: &mut ExprDesc, _nvars:
             ls.syntax_error("attempt to assign to const variable");
         }
     }
+    // Collect comma-separated LHS list. Lua's grammar:
+    //   varlist '=' explist
+    // The first var (`lhs`) is already parsed; pick up the rest.
+    let mut lhs_vec: Vec<ExprDesc> = vec![lhs.clone()];
+    while testnext(ls, b',' as i32) {
+        let mut next = ExprDesc::void();
+        suffixedexp(ls, fs, &mut next);
+        if next.k == ExpKind::Local {
+            let vidx = next.var.vidx as usize;
+            if vidx < fs.actvar.len() && fs.actvar[vidx].kind == VDKCONST {
+                ls.syntax_error("attempt to assign to const variable");
+            }
+        }
+        lhs_vec.push(next);
+    }
+    let nvars = lhs_vec.len();
     check_next(ls, b'=' as i32);
-    let mut rhs = ExprDesc::void();
-    expr(ls, fs, &mut rhs);
-    lcode::store_var(fs, lhs, &mut rhs);
+
+    if nvars == 1 {
+        let mut rhs = ExprDesc::void();
+        expr(ls, fs, &mut rhs);
+        lcode::store_var(fs, &mut lhs_vec[0], &mut rhs);
+        return;
+    }
+
+    // Multi-assign: collect RHS expressions, discharge into temps,
+    // then store-back into LHS in REVERSE order so an LHS that aliases
+    // one of the RHS slots gets the correct (already-saved) value.
+    let mut rhs_vec: Vec<ExprDesc> = Vec::new();
+    let temp_base = fs.freereg;
+    loop {
+        let mut e = ExprDesc::void();
+        expr(ls, fs, &mut e);
+        rhs_vec.push(e);
+        if !testnext(ls, b',' as i32) {
+            break;
+        }
+    }
+    let n_exprs = rhs_vec.len();
+    // Adjust RHS count to LHS count: if last RHS is a call and we
+    // need more values, expand it to fill; else discharge each.
+    for (i, e) in rhs_vec.iter_mut().enumerate() {
+        if i + 1 < n_exprs {
+            lcode::exp2nextreg(fs, e);
+        } else if e.k == ExpKind::Call && nvars > n_exprs {
+            let extra = (nvars - n_exprs + 1) as i32;
+            lcode::set_returns(fs, e, extra);
+            // freereg moves to func + extra automatically when the
+            // call's results land in the call slot.
+        } else {
+            lcode::exp2nextreg(fs, e);
+        }
+    }
+    // Pad with nil up to nvars.
+    for _ in n_exprs..nvars {
+        let mut nil_e = ExprDesc::init(ExpKind::Nil, 0);
+        lcode::exp2nextreg(fs, &mut nil_e);
+    }
+    // Drop extras if RHS exceeds LHS.
+    if n_exprs > nvars {
+        fs.freereg = temp_base + nvars as u8;
+    }
+    // Store from last LHS to first, pulling values from the temp
+    // slots starting at temp_base.
+    for i in (0..nvars).rev() {
+        let mut src = ExprDesc::init(ExpKind::NonReloc, (temp_base as i32) + i as i32);
+        lcode::store_var(fs, &mut lhs_vec[i], &mut src);
+    }
+    fs.freereg = temp_base;
 }
 
 fn ifstat(ls: &mut LexState, fs: &mut FuncState) {

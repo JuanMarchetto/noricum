@@ -209,44 +209,64 @@ unsafe extern "C" fn str_format(state: *mut LuaState) -> std::os::raw::c_int {
             b'%' => out.push(b'%'),
             b'd' | b'i' => {
                 let n = state.to_integer_x(arg_idx).unwrap_or(0);
-                out.extend_from_slice(
-                    &format_int_with_spec(&spec_str, n).into_bytes(),
-                );
+                let s = parse_spec(spec).format_int(n as i128);
+                out.extend_from_slice(s.as_bytes());
                 arg_idx += 1;
             }
             b'u' => {
                 let n = state.to_integer_x(arg_idx).unwrap_or(0) as u64;
-                out.extend_from_slice(format!("{}{}", spec_str, n).as_bytes());
+                let s = parse_spec(spec).format_int(n as i128);
+                out.extend_from_slice(s.as_bytes());
                 arg_idx += 1;
             }
             b'x' => {
                 let n = state.to_integer_x(arg_idx).unwrap_or(0) as u64;
-                out.extend_from_slice(format!("{:x}", n).as_bytes());
+                let s = parse_spec(spec).format_radix(n, 16, false);
+                out.extend_from_slice(s.as_bytes());
                 arg_idx += 1;
             }
             b'X' => {
                 let n = state.to_integer_x(arg_idx).unwrap_or(0) as u64;
-                out.extend_from_slice(format!("{:X}", n).as_bytes());
+                let s = parse_spec(spec).format_radix(n, 16, true);
+                out.extend_from_slice(s.as_bytes());
                 arg_idx += 1;
             }
             b'o' => {
                 let n = state.to_integer_x(arg_idx).unwrap_or(0) as u64;
-                out.extend_from_slice(format!("{:o}", n).as_bytes());
+                let s = parse_spec(spec).format_radix(n, 8, false);
+                out.extend_from_slice(s.as_bytes());
                 arg_idx += 1;
             }
-            b'f' | b'F' | b'g' | b'G' | b'e' | b'E' => {
+            b'f' | b'F' => {
                 let n = state.to_number_x(arg_idx).unwrap_or(0.0);
-                out.extend_from_slice(format!("{}", n).as_bytes());
+                let s = parse_spec(spec).format_float_f(n);
+                out.extend_from_slice(s.as_bytes());
+                arg_idx += 1;
+            }
+            b'g' | b'G' => {
+                let n = state.to_number_x(arg_idx).unwrap_or(0.0);
+                let s = parse_spec(spec).format_float_g(n, conv == b'G');
+                out.extend_from_slice(s.as_bytes());
+                arg_idx += 1;
+            }
+            b'e' | b'E' => {
+                let n = state.to_number_x(arg_idx).unwrap_or(0.0);
+                let s = parse_spec(spec).format_float_e(n, conv == b'E');
+                out.extend_from_slice(s.as_bytes());
                 arg_idx += 1;
             }
             b's' => {
-                if let Some(s) = state.to_lstring(arg_idx) {
-                    out.extend_from_slice(s);
+                let raw: Vec<u8> = if let Some(s) = state.to_lstring(arg_idx) {
+                    s.to_vec()
                 } else if let Some(n) = state.to_integer_x(arg_idx) {
-                    out.extend_from_slice(n.to_string().as_bytes());
+                    n.to_string().into_bytes()
                 } else if let Some(f) = state.to_number_x(arg_idx) {
-                    out.extend_from_slice(format!("{}", f).as_bytes());
-                }
+                    crate::lbaselib::format_lua_number(f).into_bytes()
+                } else {
+                    Vec::new()
+                };
+                let s = parse_spec(spec).format_str(&raw);
+                out.extend_from_slice(s.as_bytes());
                 arg_idx += 1;
             }
             b'c' => {
@@ -284,8 +304,273 @@ unsafe extern "C" fn str_format(state: *mut LuaState) -> std::os::raw::c_int {
 }
 
 fn format_int_with_spec(_spec: &str, n: i64) -> String {
-    // Minimal: ignore spec for now, emit decimal.
     n.to_string()
+}
+
+/// Parsed C-style printf format spec (everything between `%` and the
+/// conversion letter). Supports `[flags][width][.precision]`.
+#[derive(Default, Debug)]
+struct FmtSpec {
+    minus: bool,        // left-justify
+    plus: bool,         // explicit + for positives
+    space: bool,        // leading space for positives
+    zero: bool,         // zero-pad (overridden by minus)
+    hash: bool,         // alternate form
+    width: Option<usize>,
+    precision: Option<usize>,
+}
+
+fn parse_spec(spec: &[u8]) -> FmtSpec {
+    let mut s = FmtSpec::default();
+    let mut i = 0;
+    while i < spec.len() {
+        match spec[i] {
+            b'-' => s.minus = true,
+            b'+' => s.plus = true,
+            b' ' => s.space = true,
+            b'0' => s.zero = true,
+            b'#' => s.hash = true,
+            _ => break,
+        }
+        i += 1;
+    }
+    let mut width = 0usize;
+    let mut have_width = false;
+    while i < spec.len() && spec[i].is_ascii_digit() {
+        width = width * 10 + (spec[i] - b'0') as usize;
+        have_width = true;
+        i += 1;
+    }
+    if have_width { s.width = Some(width); }
+    if i < spec.len() && spec[i] == b'.' {
+        i += 1;
+        let mut prec = 0usize;
+        while i < spec.len() && spec[i].is_ascii_digit() {
+            prec = prec * 10 + (spec[i] - b'0') as usize;
+            i += 1;
+        }
+        s.precision = Some(prec);
+    }
+    s
+}
+
+impl FmtSpec {
+    fn pad(&self, body: String) -> String {
+        let Some(w) = self.width else { return body };
+        let body_len = body.chars().count();
+        if body_len >= w { return body }
+        let pad_n = w - body_len;
+        let pad_char = if self.zero && !self.minus { '0' } else { ' ' };
+        let pad: String = std::iter::repeat(pad_char).take(pad_n).collect();
+        if self.minus { format!("{}{}", body, pad) } else { format!("{}{}", pad, body) }
+    }
+
+    fn signed_prefix(&self, n: i128) -> &'static str {
+        if n < 0 { "-" }
+        else if self.plus { "+" }
+        else if self.space { " " }
+        else { "" }
+    }
+
+    fn format_int(&self, n: i128) -> String {
+        let prefix = self.signed_prefix(n);
+        let abs_str = (n.unsigned_abs()).to_string();
+        let body = if let Some(p) = self.precision {
+            // Precision sets minimum digit count; zero-pad disabled.
+            let pad_n = p.saturating_sub(abs_str.len());
+            let zeros: String = std::iter::repeat('0').take(pad_n).collect();
+            format!("{}{}{}", prefix, zeros, abs_str)
+        } else if self.zero && !self.minus && self.width.is_some() {
+            let w = self.width.unwrap();
+            let avail = w.saturating_sub(prefix.len());
+            let pad_n = avail.saturating_sub(abs_str.len());
+            let zeros: String = std::iter::repeat('0').take(pad_n).collect();
+            return format!("{}{}{}", prefix, zeros, abs_str);
+        } else {
+            format!("{}{}", prefix, abs_str)
+        };
+        if let Some(w) = self.width {
+            if body.chars().count() < w {
+                return self.pad(body);
+            }
+        }
+        body
+    }
+
+    fn format_radix(&self, n: u64, radix: u32, upper: bool) -> String {
+        let raw = match radix {
+            8 => format!("{:o}", n),
+            16 if upper => format!("{:X}", n),
+            16 => format!("{:x}", n),
+            _ => n.to_string(),
+        };
+        let prefix = if self.hash {
+            match radix {
+                16 if upper => "0X",
+                16 => "0x",
+                8 => "0",
+                _ => "",
+            }
+        } else { "" };
+        let body = if let Some(p) = self.precision {
+            let pad_n = p.saturating_sub(raw.len());
+            let zeros: String = std::iter::repeat('0').take(pad_n).collect();
+            format!("{}{}{}", prefix, zeros, raw)
+        } else if self.zero && !self.minus && self.width.is_some() {
+            let w = self.width.unwrap();
+            let avail = w.saturating_sub(prefix.len());
+            let pad_n = avail.saturating_sub(raw.len());
+            let zeros: String = std::iter::repeat('0').take(pad_n).collect();
+            return format!("{}{}{}", prefix, zeros, raw);
+        } else {
+            format!("{}{}", prefix, raw)
+        };
+        self.pad(body)
+    }
+
+    fn format_float_f(&self, n: f64) -> String {
+        let prec = self.precision.unwrap_or(6);
+        let prefix = if n.is_sign_negative() && !n.is_nan() {
+            "-"
+        } else if self.plus {
+            "+"
+        } else if self.space {
+            " "
+        } else {
+            ""
+        };
+        let abs = n.abs();
+        let body_num = format!("{:.*}", prec, abs);
+        let body = format!("{}{}", prefix, body_num);
+        self.pad_zero(body, prefix.len())
+    }
+
+    fn format_float_e(&self, n: f64, upper: bool) -> String {
+        let prec = self.precision.unwrap_or(6);
+        let prefix = if n.is_sign_negative() && !n.is_nan() {
+            "-"
+        } else if self.plus {
+            "+"
+        } else if self.space {
+            " "
+        } else {
+            ""
+        };
+        let abs = n.abs();
+        // Rust's {:e} doesn't exactly match C %e (no zero-padded exponent
+        // by default). Build manually for compatibility.
+        let raw = format!("{:.*e}", prec, abs);
+        let body_num = normalize_exp(&raw, upper);
+        let body = format!("{}{}", prefix, body_num);
+        self.pad_zero(body, prefix.len())
+    }
+
+    fn format_float_g(&self, n: f64, upper: bool) -> String {
+        // %g: use %e if exponent < -4 or >= precision, else %f, then
+        // strip trailing zeros (and trailing '.').
+        let prec = self.precision.unwrap_or(6).max(1);
+        if n == 0.0 || (!n.is_finite()) {
+            return self.format_float_f(n);
+        }
+        let abs = n.abs();
+        let exp = abs.log10().floor() as i32;
+        let body = if exp < -4 || exp >= prec as i32 {
+            let mut e = self.format_float_e(n, upper);
+            // Strip trailing zeros from mantissa.
+            e = strip_g_trailing(e);
+            e
+        } else {
+            let f_prec = (prec as i32 - 1 - exp).max(0) as usize;
+            let prefix = if n.is_sign_negative() {
+                "-"
+            } else if self.plus {
+                "+"
+            } else if self.space {
+                " "
+            } else {
+                ""
+            };
+            let raw = format!("{:.*}", f_prec, abs);
+            let trimmed = strip_g_trailing(raw);
+            format!("{}{}", prefix, trimmed)
+        };
+        self.pad_zero(body, 0)
+    }
+
+    fn format_str(&self, raw: &[u8]) -> String {
+        let s = String::from_utf8_lossy(raw).into_owned();
+        let s = if let Some(p) = self.precision {
+            s.chars().take(p).collect::<String>()
+        } else {
+            s
+        };
+        self.pad(s)
+    }
+
+    /// Final padding pass for formatted floats: handles width with
+    /// either zero-pad (after sign) or space-pad.
+    fn pad_zero(&self, body: String, prefix_len: usize) -> String {
+        let Some(w) = self.width else { return body };
+        let body_len = body.chars().count();
+        if body_len >= w { return body }
+        let pad_n = w - body_len;
+        if self.zero && !self.minus {
+            let zeros: String = std::iter::repeat('0').take(pad_n).collect();
+            // Insert zeros after the sign prefix.
+            let mut chars = body.chars();
+            let prefix: String = chars.by_ref().take(prefix_len).collect();
+            let rest: String = chars.collect();
+            format!("{}{}{}", prefix, zeros, rest)
+        } else {
+            self.pad(body)
+        }
+    }
+}
+
+fn normalize_exp(raw: &str, upper: bool) -> String {
+    // Rust's %e gives "1.234e5" with no sign on positive exponent
+    // and no zero-padding. C's %e gives "1.234e+05" (min 2-digit exp).
+    if let Some(idx) = raw.find(|c| c == 'e' || c == 'E') {
+        let (mantissa, exp) = raw.split_at(idx);
+        let exp = &exp[1..]; // drop 'e'
+        let (sign, digits) = if let Some(rest) = exp.strip_prefix('-') {
+            ("-", rest)
+        } else if let Some(rest) = exp.strip_prefix('+') {
+            ("+", rest)
+        } else {
+            ("+", exp)
+        };
+        let pad = if digits.len() < 2 {
+            "0".repeat(2 - digits.len())
+        } else {
+            String::new()
+        };
+        let e_char = if upper { 'E' } else { 'e' };
+        format!("{}{}{}{}{}", mantissa, e_char, sign, pad, digits)
+    } else {
+        raw.to_string()
+    }
+}
+
+fn strip_g_trailing(mut s: String) -> String {
+    // Only strip from the mantissa of %e output (before 'e') or the
+    // whole tail of %f output. Find any 'e'/'E' separator first.
+    let exp_split = s.find(|c| c == 'e' || c == 'E');
+    let (mant_end, tail) = if let Some(i) = exp_split {
+        (i, s.split_off(i))
+    } else {
+        (s.len(), String::new())
+    };
+    let mut m = s;
+    if m[..mant_end].contains('.') {
+        while m.ends_with('0') {
+            m.pop();
+        }
+        if m.ends_with('.') {
+            m.pop();
+        }
+    }
+    m + &tail
 }
 
 // ---- Lua-style pattern matching ------------------------------------------
@@ -684,17 +969,94 @@ unsafe extern "C" fn str_gsub(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
     let src = arg_bytes(state, 1).unwrap_or_default();
     let pat = arg_bytes(state, 2).unwrap_or_default();
-    let repl = arg_bytes(state, 3).unwrap_or_default();
     let max = state.to_integer_x(4).unwrap_or(-1);
     let max = if max < 0 { i64::MAX } else { max };
+
+    // Replacement type discriminator: function / table / string.
+    let repl_kind = state.type_at(3);
+    let repl_str = if repl_kind == 4 {
+        Some(arg_bytes(state, 3).unwrap_or_default())
+    } else {
+        None
+    };
+
     let mut out = Vec::new();
     let mut pos = 0usize;
     let mut count = 0i64;
     while pos <= src.len() && count < max {
         match pattern_find(&src, &pat, pos) {
-            Some((ms, me, _caps)) => {
+            Some((ms, me, caps)) => {
                 out.extend_from_slice(&src[pos..ms]);
-                out.extend_from_slice(&repl);
+                let matched = &src[ms..me];
+
+                let replacement: Vec<u8> = match repl_kind {
+                    4 => {
+                        // String replacement with %0, %1.. capture refs.
+                        let template = repl_str.as_ref().unwrap();
+                        expand_string_replacement(template, &src, ms, me, &caps)
+                    }
+                    5 => {
+                        // Table lookup keyed by the first capture (or
+                        // the whole match if no captures).
+                        let key = if caps.is_empty() {
+                            matched.to_vec()
+                        } else {
+                            let (cs, ce) = caps[0];
+                            src[cs..ce].to_vec()
+                        };
+                        // Push table[key] and read.
+                        state.push_value(3); // table
+                        let _ = state.push_lstring(&key);
+                        let _ = lua_rawget_via_state(state);
+                        let r = match state.value_at_public(-1) {
+                            Some(TValue::ShortString(_)) | Some(TValue::LongString(_)) => state
+                                .to_lstring(-1)
+                                .map(|s| s.to_vec())
+                                .unwrap_or_default(),
+                            Some(TValue::Nil) | Some(TValue::False) | None => matched.to_vec(),
+                            Some(_) => state
+                                .to_lstring(-1)
+                                .map(|s| s.to_vec())
+                                .unwrap_or_else(|| matched.to_vec()),
+                        };
+                        let new_top = state.get_top() - 1;
+                        state.set_top(new_top as i32);
+                        r
+                    }
+                    6 => {
+                        // Function callback: call with capture(s) — or
+                        // the full match if no captures — then take the
+                        // first returned value as the replacement.
+                        // call_value takes an ABSOLUTE stack slot; build
+                        // it from frame_base + current relative top.
+                        let base = state.frame_base_index().unwrap_or(0);
+                        let pre_top_abs = base + state.get_top() as u32;
+                        state.push_value(3); // function
+                        let n_args = if caps.is_empty() {
+                            let _ = state.push_lstring(matched);
+                            1
+                        } else {
+                            for (cs, ce) in &caps {
+                                let _ = state.push_lstring(&src[*cs..*ce]);
+                            }
+                            caps.len() as i32
+                        };
+                        let _ = state.call_value(pre_top_abs, n_args as u32, 1);
+                        let r = match state.value_at_public(-1) {
+                            Some(TValue::Nil) | Some(TValue::False) | None => matched.to_vec(),
+                            _ => state
+                                .to_lstring(-1)
+                                .map(|s| s.to_vec())
+                                .unwrap_or_else(|| matched.to_vec()),
+                        };
+                        let new_top = state.get_top() - 1;
+                        state.set_top(new_top as i32);
+                        r
+                    }
+                    _ => matched.to_vec(),
+                };
+
+                out.extend_from_slice(&replacement);
                 pos = if me == ms { me + 1 } else { me };
                 count += 1;
             }
@@ -704,9 +1066,71 @@ unsafe extern "C" fn str_gsub(state: *mut LuaState) -> std::os::raw::c_int {
     if pos < src.len() {
         out.extend_from_slice(&src[pos..]);
     }
-    state.push_string(&String::from_utf8_lossy(&out));
+    state.push_lstring(&out);
     state.push_integer(count);
     2
+}
+
+/// Expand `%0..%9` and `%%` capture references in a replacement
+/// template against the current match. `%0` (or `%` followed by
+/// any non-digit) yields the whole match; `%n` for n=1..9 yields
+/// the n-th capture.
+fn expand_string_replacement(
+    template: &[u8],
+    src: &[u8],
+    ms: usize,
+    me: usize,
+    caps: &[(usize, usize)],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(template.len());
+    let mut i = 0;
+    while i < template.len() {
+        let c = template[i];
+        if c == b'%' && i + 1 < template.len() {
+            let next = template[i + 1];
+            match next {
+                b'%' => {
+                    out.push(b'%');
+                    i += 2;
+                }
+                b'0' => {
+                    out.extend_from_slice(&src[ms..me]);
+                    i += 2;
+                }
+                b'1'..=b'9' => {
+                    let n = (next - b'0') as usize;
+                    if let Some((cs, ce)) = caps.get(n - 1) {
+                        out.extend_from_slice(&src[*cs..*ce]);
+                    }
+                    i += 2;
+                }
+                _ => {
+                    out.push(next);
+                    i += 2;
+                }
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn lua_rawget_via_state(state: &mut LuaState) -> i32 {
+    state.raw_get(-2);
+    // Remove the table that was at -2 (now at -2 again after the pop+push).
+    let top = state.get_top();
+    if top >= 2 {
+        // Move the result down over the table slot and trim.
+        let base = state.frame_base_index().unwrap_or(0) as usize;
+        let stack = &mut state.current_thread_mut().stack;
+        let result_idx = base + (top as usize) - 1;
+        let table_idx = base + (top as usize) - 2;
+        stack[table_idx] = stack[result_idx];
+        state.set_top((top - 1) as i32);
+    }
+    state.type_at(-1)
 }
 
 /// `string.concat(sep, t)` is NOT a standard Lua function (table.concat

@@ -384,16 +384,14 @@ unsafe extern "C" fn math_tointeger(state: *mut LuaState) -> std::os::raw::c_int
 
 unsafe extern "C" fn math_type(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
-    let tt = state.type_at(1);
-    if tt == 3 {
-        // Distinguish integer from float.
-        if state.to_integer_x(1).is_some() {
-            state.push_string("integer");
-        } else {
-            state.push_string("float");
-        }
-    } else {
-        state.push_nil();
+    // Inspect the actual TValue — to_integer_x would happily coerce
+    // a float with integer value (1.0 → 1) and report "integer" for
+    // what's really a float.
+    use crate::contract::TValue;
+    match state.value_at_public(1) {
+        Some(TValue::Integer(_)) => { let _ = state.push_string("integer"); }
+        Some(TValue::Number(_)) => { let _ = state.push_string("float"); }
+        _ => state.push_nil(),
     }
     1
 }
