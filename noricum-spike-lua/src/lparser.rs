@@ -506,44 +506,38 @@ fn localstat(ls: &mut LexState, fs: &mut FuncState) {
         .map(|(i, _)| fs.actvar[first_vidx + i].ridx)
         .collect();
     let n_values = if testnext(ls, b'=' as i32) {
-        // Collect all RHS expressions, then discharge with
-        // multi-return expansion on the last call so
-        // `local a, b, c = f()` captures all returns.
-        let mut exprs: Vec<ExprDesc> = Vec::new();
-        loop {
-            let mut e = ExprDesc::void();
-            expr(ls, fs, &mut e);
-            exprs.push(e);
-            if !testnext(ls, b',' as i32) {
-                break;
-            }
-        }
-        let n_exprs = exprs.len();
+        // Parse + discharge each expression in source order.
+        // Each `expr()` call may emit bytecode immediately (e.g.,
+        // a function call's CALL opcode), so we MUST discharge
+        // the previous expression before parsing the next, or
+        // the CALL's MULTRET results will overwrite the next
+        // discharge's target register.
+        //
+        // Strategy: parse the first expression, then loop. Each
+        // iteration: if there's a comma, discharge the buffered
+        // expression and parse the next; else stop.
+        let mut last_e = ExprDesc::void();
+        expr(ls, fs, &mut last_e);
+        let mut n_exprs: i32 = 1;
         let wanted = nvars as i32;
-        for (i, e) in exprs.iter_mut().enumerate() {
-            if i + 1 < n_exprs {
-                lcode::exp2nextreg(fs, e);
-            } else if e.k == ExpKind::Call && wanted > n_exprs as i32 {
-                // Last expression is a call, caller wants more
-                // values than we have — expand results.
-                let call_pc = e.info as usize;
-                let func_reg = ((fs.proto.code[call_pc] >> 7) & 0xFF) as u8;
-                let extra = wanted - (n_exprs as i32 - 1);
-                lcode::set_returns(fs, e, extra);
-                fs.freereg = func_reg + extra as u8;
-            } else {
-                lcode::exp2nextreg(fs, e);
-            }
+        while testnext(ls, b',' as i32) {
+            // Discharge the previous expression first so its
+            // bytecode lands BEFORE the next expression's emit.
+            lcode::exp2nextreg(fs, &mut last_e);
+            last_e = ExprDesc::void();
+            expr(ls, fs, &mut last_e);
+            n_exprs += 1;
         }
-        // If last was a multi-return call, we count nvars'
-        // worth of values (not n_exprs).
-        let last_is_expanded_call = n_exprs >= 1
-            && n_exprs < nvars
-            && exprs.last().map(|e| e.k == ExpKind::Call).unwrap_or(false);
-        if last_is_expanded_call {
+        if last_e.k == ExpKind::Call && wanted > n_exprs {
+            let call_pc = last_e.info as usize;
+            let func_reg = ((fs.proto.code[call_pc] >> 7) & 0xFF) as u8;
+            let extra = wanted - (n_exprs - 1);
+            lcode::set_returns(fs, &mut last_e, extra);
+            fs.freereg = func_reg + extra as u8;
             wanted
         } else {
-            n_exprs as i32
+            lcode::exp2nextreg(fs, &mut last_e);
+            n_exprs
         }
     } else {
         0
@@ -621,40 +615,35 @@ fn assignment(ls: &mut LexState, fs: &mut FuncState, lhs: &mut ExprDesc, _nvars:
         return;
     }
 
-    // Multi-assign: collect RHS expressions, discharge into temps,
-    // then store-back into LHS in REVERSE order so an LHS that aliases
-    // one of the RHS slots gets the correct (already-saved) value.
-    let mut rhs_vec: Vec<ExprDesc> = Vec::new();
+    // Multi-assign. Discharge each RHS expression in source order
+    // (NOT buffer-then-discharge, which emits later expressions'
+    // bytecode before the earlier expressions land in their slots
+    // and gets overwritten when the inner CALL's MULTRET fires).
     let temp_base = fs.freereg;
-    loop {
-        let mut e = ExprDesc::void();
-        expr(ls, fs, &mut e);
-        rhs_vec.push(e);
-        if !testnext(ls, b',' as i32) {
-            break;
-        }
+    let mut last_e = ExprDesc::void();
+    expr(ls, fs, &mut last_e);
+    let mut n_exprs: usize = 1;
+    while testnext(ls, b',' as i32) {
+        lcode::exp2nextreg(fs, &mut last_e);
+        last_e = ExprDesc::void();
+        expr(ls, fs, &mut last_e);
+        n_exprs += 1;
     }
-    let n_exprs = rhs_vec.len();
-    // Adjust RHS count to LHS count: if last RHS is a call and we
-    // need more values, expand it to fill; else discharge each.
-    for (i, e) in rhs_vec.iter_mut().enumerate() {
-        if i + 1 < n_exprs {
-            lcode::exp2nextreg(fs, e);
-        } else if e.k == ExpKind::Call && nvars > n_exprs {
-            let extra = (nvars - n_exprs + 1) as i32;
-            lcode::set_returns(fs, e, extra);
-            // freereg moves to func + extra automatically when the
-            // call's results land in the call slot.
-        } else {
-            lcode::exp2nextreg(fs, e);
-        }
+    // Trailing expression: expand if Call + want-more.
+    if last_e.k == ExpKind::Call && nvars > n_exprs {
+        let extra = (nvars - n_exprs + 1) as i32;
+        let call_pc = last_e.info as usize;
+        let func_reg = ((fs.proto.code[call_pc] >> 7) & 0xFF) as u8;
+        lcode::set_returns(fs, &mut last_e, extra);
+        fs.freereg = func_reg + extra as u8;
+    } else {
+        lcode::exp2nextreg(fs, &mut last_e);
     }
     // Pad with nil up to nvars.
     for _ in n_exprs..nvars {
         let mut nil_e = ExprDesc::init(ExpKind::Nil, 0);
         lcode::exp2nextreg(fs, &mut nil_e);
     }
-    // Drop extras if RHS exceeds LHS.
     if n_exprs > nvars {
         fs.freereg = temp_base + nvars as u8;
     }
@@ -1395,11 +1384,24 @@ fn constructor(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
     );
     lcode::reserve_regs(fs, 1);
 
-    let mut array_count: u32 = 0; // positional fields seen
-    let mut array_pending: u32 = 0; // positional fields awaiting SETLIST
+    let mut array_count: u32 = 0;
+    let mut array_pending: u32 = 0;
+    // When the LAST positional field is a Call or VarArg, we want
+    // its results to flow as MULTRET into SETLIST (B=0). Defer
+    // its discharge until we know it's actually last.
+    let mut deferred_multret = false;
+    let mut deferred_e = ExprDesc::void();
     while ls.t.token != b'}' as i32 {
+        if deferred_multret {
+            // We had a deferred multret expression but there's more
+            // content — discharge it as a single value first.
+            lcode::exp2nextreg(fs, &mut deferred_e);
+            array_count += 1;
+            array_pending += 1;
+            deferred_multret = false;
+            deferred_e = ExprDesc::void();
+        }
         if ls.t.token == b'[' as i32 {
-            // [expr] = expr
             ls.next_token();
             let mut key = ExprDesc::void();
             expr(ls, fs, &mut key);
@@ -1414,7 +1416,6 @@ fn constructor(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
         } else if ls.t.token == TK_NAME
             && peek_next_is_equals(ls)
         {
-            // name = expr
             let name = check_name(ls);
             check_next(ls, b'=' as i32);
             let mut val = ExprDesc::void();
@@ -1424,12 +1425,19 @@ fn constructor(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
             lcode::store_var(fs, &mut target, &mut val);
             fs.freereg = (reg + 1 + array_pending) as u8;
         } else {
-            // positional
+            // Positional. If this turns out to be the last entry
+            // AND it's a Call/VarArg, we'll emit SETLIST with B=0
+            // (MULTRET) so all returns become array elements.
             let mut val = ExprDesc::void();
             expr(ls, fs, &mut val);
-            lcode::exp2nextreg(fs, &mut val);
-            array_count += 1;
-            array_pending += 1;
+            if val.k == ExpKind::Call || val.k == ExpKind::VarArg {
+                deferred_e = val;
+                deferred_multret = true;
+            } else {
+                lcode::exp2nextreg(fs, &mut val);
+                array_count += 1;
+                array_pending += 1;
+            }
         }
         if !testnext(ls, b',' as i32) && !testnext(ls, b';' as i32) {
             break;
@@ -1437,8 +1445,40 @@ fn constructor(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
     }
     check_match(ls, b'}' as i32, b'{' as i32);
 
-    if array_pending > 0 {
-        // Emit SETLIST to move positional fields into the table.
+    if deferred_multret {
+        // Last positional was a Call/VarArg. Patch it to MULTRET
+        // and emit SETLIST with B=0 so the VM consumes everything
+        // up to top.
+        let target_reg = fs.freereg;
+        match deferred_e.k {
+            ExpKind::Call => {
+                lcode::set_returns(fs, &mut deferred_e, -1);
+            }
+            ExpKind::VarArg => {
+                let pc = deferred_e.info as usize;
+                let instr = &mut fs.proto.code[pc];
+                *instr = (*instr & !(0xFF << 7)) | ((target_reg as u32) << 7);
+                *instr = (*instr & !(0xFFu32 << 24)) | (0u32 << 24);
+            }
+            _ => {}
+        }
+        // Emit SETLIST with vB=0 (multret) and vC=0 (no offset).
+        // The earlier non-multret positional fields already sit at
+        // R(A+1)..R(A+array_count); the multret tail extends the
+        // top, and SETLIST consumes everything up to top.
+        lcode::emit(
+            fs,
+            crate::lopcodes::create_vabck(
+                crate::lopcodes::OpCode::OP_SETLIST,
+                reg,
+                0,
+                0,
+                false,
+            ),
+        );
+        let _ = array_count;
+        fs.freereg = (reg + 1) as u8;
+    } else if array_pending > 0 {
         lcode::emit(
             fs,
             crate::lopcodes::create_vabck(
