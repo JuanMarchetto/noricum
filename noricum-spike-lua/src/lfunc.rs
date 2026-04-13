@@ -190,6 +190,7 @@ mod tests {
             is_coroutine: false,
             resumer: None,
             finished: false,
+            tbc_stack: Vec::new(),
         }
     }
 

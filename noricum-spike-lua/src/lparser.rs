@@ -477,6 +477,15 @@ fn localstat(ls: &mut LexState, fs: &mut FuncState) {
     for (i, (_, kind)) in names.iter().enumerate() {
         fs.actvar[first_vidx + i].kind = *kind;
     }
+    // Any `<close>` local needs an OP_TBC after the initial value
+    // has been placed on its register. We emit after the RHS
+    // discharge below, so just remember the ridxes here.
+    let tbc_ridxes: Vec<u8> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, k))| *k == VDKTOCLOSE)
+        .map(|(i, _)| fs.actvar[first_vidx + i].ridx)
+        .collect();
     let n_values = if testnext(ls, b'=' as i32) {
         // Collect all RHS expressions, then discharge with
         // multi-return expansion on the last call so
@@ -530,6 +539,18 @@ fn localstat(ls: &mut LexState, fs: &mut FuncState) {
         fs.freereg = (fs.actvar.len() - (n_values as usize - nvars)) as u8;
     }
     adjust_locals(fs, nvars as i32);
+    // Emit OP_TBC A for each <close> local so the VM records the
+    // slot on the thread's tbc_stack. On block/function exit these
+    // get `__close`d in LIFO order.
+    for ridx in &tbc_ridxes {
+        lcode::emit_abc(fs, crate::lopcodes::OpCode::OP_TBC, *ridx as u32, 0, 0, false);
+    }
+    // Mark the enclosing block so its exit emits OP_CLOSE.
+    if !tbc_ridxes.is_empty() {
+        if let Some(bl) = fs.blocks.last_mut() {
+            bl.inside_tbc = true;
+        }
+    }
 }
 
 fn exprstat(ls: &mut LexState, fs: &mut FuncState) {
@@ -1063,10 +1084,22 @@ fn block(ls: &mut LexState, fs: &mut FuncState) {
         inside_tbc: false,
         breaks: Vec::new(),
     });
+    let block_start_nactvar = fs.nactvar;
     statlist(ls, fs);
     let bl = fs.blocks.pop().unwrap();
-    // Remove locals declared in this block.
+    // Emit OP_CLOSE at the first-slot-to-close so the VM runs
+    // `__close` on TBC locals and closes upvalues captured from
+    // this block before the registers are reused.
+    if bl.inside_tbc || bl.upval {
+        // A is the register of the first local declared in this
+        // block — i.e., the first ridx to close down to.
+        let close_level = block_start_nactvar as u32;
+        lcode::emit_abc(fs, crate::lopcodes::OpCode::OP_CLOSE, close_level, 0, 0, false);
+    }
+    // Remove locals declared in this block — both the active-var
+    // count AND the actvar Vec itself so new_local reuses slots.
     fs.nactvar = bl.nactvar;
+    fs.actvar.truncate(bl.nactvar as usize);
     fs.freereg = nvarstack(fs);
 }
 

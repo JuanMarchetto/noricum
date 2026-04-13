@@ -132,6 +132,9 @@ const OP_TFORLOOP_U8: u8 = OpCode::OP_TFORLOOP as u8;
 const OP_VARARG_U8: u8 = OpCode::OP_VARARG as u8;
 const OP_VARARGPREP_U8: u8 = OpCode::OP_VARARGPREP as u8;
 
+const OP_TBC_U8: u8 = OpCode::OP_TBC as u8;
+const OP_CLOSE_U8: u8 = OpCode::OP_CLOSE as u8;
+
 /// Maximum depth of metamethod chain walks for `__index` /
 /// `__newindex`. Matches `MAXTAGLOOP` in `lvm.c`.
 const MAX_TAG_LOOP: u32 = 2000;
@@ -1014,6 +1017,24 @@ impl LuaState {
                     let wanted = if c == 0 { None } else { Some(c - 1) };
                     self.get_varargs(base + a, wanted);
                 }
+                OP_TBC_U8 => {
+                    // Mark R(A) as a to-be-closed local: record its
+                    // absolute slot on the thread's tbc_stack. On
+                    // function return / block exit the slot's value
+                    // gets its `__close` metamethod invoked.
+                    let a = getarg_a(instruction) as u32;
+                    let slot = base + a;
+                    self.current_thread_mut().tbc_stack.push(slot);
+                }
+                OP_CLOSE_U8 => {
+                    // Close TBC locals and upvalues whose slot is
+                    // `>= base + A`. Used at block exit for locals
+                    // declared with `<close>` or captured as upvalues.
+                    let a = getarg_a(instruction) as u32;
+                    let level = base + a;
+                    self.close_tbc(level);
+                    self.close_upvalues(level);
+                }
                 _ => {
                     panic!(
                         "lvm: unimplemented opcode {} at pc {}",
@@ -1245,6 +1266,44 @@ impl LuaState {
         // Remove closed entries from open_upvals.
         let thread = self.current_thread_mut();
         thread.open_upvals.retain(|uv_h| !to_close.contains(uv_h));
+    }
+
+    /// Invoke `__close` metamethods on any to-be-closed locals
+    /// whose absolute stack slot is `>= level` — i.e., belong to
+    /// the scope being exited. Pops entries in LIFO order. Errors
+    /// raised by `__close` propagate; values whose metatable has
+    /// no `__close` are silently skipped (this tolerates the
+    /// common pattern of `<close>` on plain tables).
+    pub(crate) fn close_tbc(&mut self, level: u32) {
+        loop {
+            let (slot, value) = {
+                let thread = self.current_thread();
+                match thread.tbc_stack.last().copied() {
+                    Some(s) if s >= level => {
+                        let v = thread.stack.get(s as usize).copied().unwrap_or(TValue::Nil);
+                        (s, v)
+                    }
+                    _ => return,
+                }
+            };
+            self.current_thread_mut().tbc_stack.pop();
+            let mm = self
+                .global
+                .get_metamethod(value, crate::ltm::TagMethod::Close);
+            if matches!(mm, TValue::Nil) {
+                continue;
+            }
+            // Push mm, value, nil (err), and call with 2 args, 0 results.
+            let call_top = self.current_thread().top;
+            {
+                let thread = self.current_thread_mut();
+                thread.push(mm);
+                thread.push(value);
+                thread.push(TValue::Nil);
+            }
+            let _ = self.call_value(call_top, 2, 0);
+            let _ = slot;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1978,6 +2037,11 @@ impl LuaState {
         n_returned: u32,
         n_expected: i16,
     ) {
+        // Invoke `__close` on any to-be-closed locals whose slots
+        // live at or above `base` — i.e., belong to the frame we're
+        // leaving. Done BEFORE close_upvalues so `__close` can still
+        // see captured values as open upvalues.
+        self.close_tbc(base);
         // Close any open upvalues captured from this frame
         // BEFORE the frame's stack slots are reclaimed.
         self.close_upvalues(base);

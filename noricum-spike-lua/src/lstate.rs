@@ -72,6 +72,7 @@ impl LuaState {
             is_coroutine: false,
             resumer: None,
             finished: false,
+            tbc_stack: Vec::new(),
         });
         global.main_thread = Some(main_handle);
 

@@ -574,6 +574,11 @@ pub struct Thread {
     /// Set true once the coroutine body has returned or errored —
     /// further `resume` calls are rejected as "cannot resume dead".
     pub finished: bool,
+    /// Absolute stack slots of locals declared with `<close>`. On
+    /// function return or block exit, any entry `>= exit_level` is
+    /// popped in reverse order and its `__close` metamethod invoked
+    /// with `(value, err_or_nil)`.
+    pub tbc_stack: Vec<u32>,
 }
 
 /// Thread-local wrapper so [`Thread`] can `#[derive(Default)]`. Defaults
