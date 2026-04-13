@@ -167,6 +167,61 @@ impl Heap {
             .expect("TableHandle points to freed slot")
     }
 
+    /// Return handles for all currently-live tables. Used by the
+    /// weak-table drain pass in `collectgarbage` to iterate without
+    /// recursive mutable borrows.
+    pub fn all_table_handles(&self) -> Vec<TableHandle> {
+        self.tables
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                slot.as_ref()
+                    .map(|_| TableHandle::new(i as u32, self.generations_tables[i]))
+            })
+            .collect()
+    }
+
+    /// True when `handle` still refers to a live table slot —
+    /// generation matches and the slot is `Some`.
+    pub fn table_handle_alive(&self, handle: TableHandle) -> bool {
+        let slot = handle.slot as usize;
+        slot < self.tables.len()
+            && self.generations_tables[slot] == handle.generation
+            && self.tables[slot].is_some()
+    }
+
+    /// Liveness check for a [`crate::contract::UserDataHandle`].
+    pub fn userdata_handle_alive(&self, handle: crate::contract::UserDataHandle) -> bool {
+        let slot = handle.slot as usize;
+        slot < self.userdata.len()
+            && self.generations_userdata[slot] == handle.generation
+            && self.userdata[slot].is_some()
+    }
+
+    /// Liveness check for a [`crate::contract::ThreadHandle`].
+    pub fn thread_handle_alive(&self, handle: crate::contract::ThreadHandle) -> bool {
+        let slot = handle.slot as usize;
+        slot < self.threads.len()
+            && self.generations_threads[slot] == handle.generation
+            && self.threads[slot].is_some()
+    }
+
+    /// Liveness check for a [`crate::contract::LClosureHandle`].
+    pub fn lclosure_handle_alive(&self, handle: crate::contract::LClosureHandle) -> bool {
+        let slot = handle.slot as usize;
+        slot < self.lclosures.len()
+            && self.generations_lclosures[slot] == handle.generation
+            && self.lclosures[slot].is_some()
+    }
+
+    /// Liveness check for a [`crate::contract::CClosureHandle`].
+    pub fn cclosure_handle_alive(&self, handle: crate::contract::CClosureHandle) -> bool {
+        let slot = handle.slot as usize;
+        slot < self.cclosures.len()
+            && self.generations_cclosures[slot] == handle.generation
+            && self.cclosures[slot].is_some()
+    }
+
     pub fn free_table(&mut self, handle: TableHandle) {
         let slot = handle.slot as usize;
         assert_eq!(

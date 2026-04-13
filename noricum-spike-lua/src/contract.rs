@@ -397,6 +397,15 @@ pub struct Table {
     /// Bitmask caching "metamethod absent" flags so `ltm`'s fast path can
     /// short-circuit. Lua name: `flags`.
     pub meta_cache_flags: u8,
+    /// Weak-reference mode derived from `__mode` on the metatable:
+    /// bit 0 = weak keys, bit 1 = weak values. `0b11` means both
+    /// (aka `"kv"`), which turns the table into an ephemeron once
+    /// the GC supports it. Zero means strong (default).
+    pub weak_mode: u8,
+    /// True when this table's metatable has a `__gc` metamethod;
+    /// the GC routes the table through the finalization queue on
+    /// collection instead of freeing in place.
+    pub has_finalizer: bool,
 }
 
 /// Description of one upvalue in a [`Proto`] — name, location, kind.

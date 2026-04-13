@@ -592,6 +592,8 @@ impl LuaState {
             hash: std::collections::HashMap::with_capacity(nrec),
             metatable: None,
             meta_cache_flags: 0,
+            weak_mode: 0,
+            has_finalizer: false,
         };
         let handle = self.global.heap.alloc_table(t);
         self.current_thread_mut().push(TValue::Table(handle));

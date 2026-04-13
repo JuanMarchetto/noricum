@@ -238,6 +238,47 @@ unsafe extern "C" fn lua_setmetatable(state: *mut LuaState) -> std::os::raw::c_i
     // assigns it to t at `idx`. Push mt to top first.
     state.push_value(2);
     state.set_metatable(1);
+    // If we just installed a metatable with __mode or __gc, flag
+    // the target table so the GC can honor weak-reference or
+    // finalization semantics on its next cycle.
+    let t_val = state
+        .value_at_public(1)
+        .unwrap_or(crate::contract::TValue::Nil);
+    if let crate::contract::TValue::Table(th) = t_val {
+        let mt_opt = state.global.heap.table(th).metatable;
+        let (weak, has_gc) = if let Some(mt) = mt_opt {
+            let mode_k = state.global.new_string(b"__mode", 0);
+            let gc_k = state.global.new_string(b"__gc", 0);
+            let mode_v = state
+                .global
+                .heap
+                .table_get_shortstr(mt, mode_k)
+                .unwrap_or(crate::contract::TValue::Nil);
+            let gc_v = state
+                .global
+                .heap
+                .table_get_shortstr(mt, gc_k)
+                .unwrap_or(crate::contract::TValue::Nil);
+            let mut flags = 0u8;
+            if let crate::contract::TValue::ShortString(h)
+            | crate::contract::TValue::LongString(h) = mode_v
+            {
+                for b in &state.global.heap.string(h).bytes {
+                    match *b {
+                        b'k' => flags |= 0b01,
+                        b'v' => flags |= 0b10,
+                        _ => {}
+                    }
+                }
+            }
+            (flags, !matches!(gc_v, crate::contract::TValue::Nil))
+        } else {
+            (0, false)
+        };
+        let tbl = state.global.heap.table_mut(th);
+        tbl.weak_mode = weak;
+        tbl.has_finalizer = has_gc;
+    }
     state.push_value(1);
     1
 }
@@ -451,10 +492,146 @@ unsafe extern "C" fn lua_xpcall(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn lua_collectgarbage(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
-    // Minimal: accept any option, do nothing for now (no incremental
-    // driver wired from scripts), return 0.
-    state.push_integer(0);
+    let opt = state
+        .to_lstring(1)
+        .map(|s| s.to_vec())
+        .unwrap_or_else(|| b"collect".to_vec());
+    match opt.as_slice() {
+        b"collect" => {
+            // Run mark + sweep, then invoke any pending __gc
+            // metamethods and drop weak-table entries whose
+            // keys/values point to dead handles.
+            state.global.full_gc();
+            run_finalizers(state);
+            drain_weak_tables(state);
+            state.push_integer(0);
+        }
+        b"count" => {
+            // Approximate: no accurate byte count yet.
+            state.push_number(0.0);
+        }
+        b"stop" | b"restart" | b"step" | b"isrunning" => {
+            state.push_integer(0);
+        }
+        _ => state.push_integer(0),
+    }
     1
+}
+
+/// Invoke `__gc` on every table whose `has_finalizer` flag is set.
+/// In a full GC implementation this would only run for objects
+/// that just became unreachable; here we treat it as a best-effort
+/// "run finalizers now" trigger so programs that rely on explicit
+/// collectgarbage cycles behave sensibly.
+fn run_finalizers(state: &mut LuaState) {
+    use crate::contract::TValue;
+    let candidates: Vec<crate::contract::TableHandle> = state
+        .global
+        .heap
+        .all_table_handles()
+        .into_iter()
+        .filter(|h| state.global.heap.table(*h).has_finalizer)
+        .collect();
+    for h in candidates {
+        // Clear the flag before invoking so we don't re-enter on
+        // recursive collectgarbage calls from inside __gc itself.
+        state.global.heap.table_mut(h).has_finalizer = false;
+        let mm = state
+            .global
+            .get_metamethod(TValue::Table(h), crate::ltm::TagMethod::Gc);
+        if matches!(mm, TValue::Nil) {
+            continue;
+        }
+        let call_top = state.current_thread().top;
+        {
+            let thread = state.current_thread_mut();
+            thread.push(mm);
+            thread.push(TValue::Table(h));
+        }
+        let _ = state.call_value(call_top, 1, 0);
+    }
+}
+
+/// Walk every live table with `weak_mode != 0` and remove entries
+/// whose key (weak-k) or value (weak-v) is a handle pointing at a
+/// freed slot. This runs after the GC's mark+sweep so freed slots
+/// are already visible via the handle's generation-mismatch check.
+///
+/// Currently this drains entries whose value is a dead table/
+/// userdata/thread/closure handle. Extending to weak keys requires
+/// a second pass over the hash part — left for when the GC starts
+/// reporting its freed-handles list.
+fn drain_weak_tables(state: &mut LuaState) {
+    let handles: Vec<crate::contract::TableHandle> = state
+        .global
+        .heap
+        .all_table_handles()
+        .into_iter()
+        .filter(|h| state.global.heap.table(*h).weak_mode != 0)
+        .collect();
+    for h in handles {
+        let (mode, array_dead): (u8, Vec<usize>) = {
+            let t = state.global.heap.table(h);
+            let mut dead = Vec::new();
+            let mode = t.weak_mode;
+            if mode & 0b10 != 0 {
+                for (i, v) in t.array.iter().enumerate() {
+                    if is_dead_tvalue(&state.global.heap, v) {
+                        dead.push(i);
+                    }
+                }
+            }
+            (mode, dead)
+        };
+        {
+            let t = state.global.heap.table_mut(h);
+            for i in array_dead {
+                t.array[i] = crate::contract::TValue::Nil;
+            }
+        }
+        // Hash part drain: remove entries whose value (weak-v) or
+        // key (weak-k) is a dead handle.
+        let hash_dead: Vec<crate::contract::TableKey> = {
+            let t = state.global.heap.table(h);
+            t.hash
+                .iter()
+                .filter(|(k, v)| {
+                    let val_dead = (mode & 0b10) != 0 && is_dead_tvalue(&state.global.heap, v);
+                    let key_dead = (mode & 0b01) != 0 && is_dead_key(&state.global.heap, k);
+                    val_dead || key_dead
+                })
+                .map(|(k, _)| (*k).clone())
+                .collect()
+        };
+        let t = state.global.heap.table_mut(h);
+        for k in hash_dead {
+            t.hash.remove(&k);
+        }
+    }
+}
+
+fn is_dead_tvalue(heap: &crate::contract::Heap, v: &crate::contract::TValue) -> bool {
+    use crate::contract::TValue;
+    match v {
+        TValue::Table(h) => !heap.table_handle_alive(*h),
+        TValue::UserData(h) => !heap.userdata_handle_alive(*h),
+        TValue::Thread(h) => !heap.thread_handle_alive(*h),
+        TValue::LuaClosure(h) => !heap.lclosure_handle_alive(*h),
+        TValue::CClosure(h) => !heap.cclosure_handle_alive(*h),
+        _ => false,
+    }
+}
+
+fn is_dead_key(heap: &crate::contract::Heap, k: &crate::contract::TableKey) -> bool {
+    use crate::contract::TableKey;
+    match k {
+        TableKey::Table(h) => !heap.table_handle_alive(*h),
+        TableKey::UserData(h) => !heap.userdata_handle_alive(*h),
+        TableKey::Thread(h) => !heap.thread_handle_alive(*h),
+        TableKey::LuaClosure(h) => !heap.lclosure_handle_alive(*h),
+        TableKey::CClosure(h) => !heap.cclosure_handle_alive(*h),
+        _ => false,
+    }
 }
 
 // ---- Helpers --------------------------------------------------------------
