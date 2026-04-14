@@ -30,6 +30,7 @@ pub fn open_string(state: &mut LuaState, globals: TableHandle) -> TableHandle {
     register(state, string_t, "gmatch", str_gmatch);
     register(state, string_t, "gsub", str_gsub);
     register(state, string_t, "concat", str_concat_thin);
+    register(state, string_t, "dump", str_dump);
 
     // Install as `string` in globals.
     let name = state.global.new_string(b"string", 0);
@@ -1138,6 +1139,29 @@ fn lua_rawget_via_state(state: &mut LuaState) -> i32 {
 /// and tests can call it.
 unsafe extern "C" fn str_concat_thin(_state: *mut LuaState) -> std::os::raw::c_int {
     0
+}
+
+/// `string.dump(f[, strip])` — serialize a Lua function (`LClosure`)
+/// into the binary `.luac` format using `ldump`. Matches the C
+/// `str_dump` in lstrlib.c. C functions / closures with non-Lua
+/// targets raise an error.
+unsafe extern "C" fn str_dump(state: *mut LuaState) -> std::os::raw::c_int {
+    let state = unsafe { &mut *state };
+    let v = state.value_at_public(1).unwrap_or(TValue::Nil);
+    let proto = match v {
+        TValue::LuaClosure(h) => state.global.heap.lclosure(h).proto,
+        _ => {
+            let h = state
+                .global
+                .new_string(b"unable to dump given function", 0);
+            state.raise_error_value(TValue::ShortString(h));
+            return 0;
+        }
+    };
+    let strip = state.to_boolean(2);
+    let bytes = crate::ldump::dump(&state.global, proto, strip);
+    let _ = state.push_lstring(&bytes);
+    1
 }
 
 // ---- Tests ----------------------------------------------------------------

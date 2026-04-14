@@ -375,6 +375,29 @@ unsafe extern "C" fn load_string(state: *mut LuaState) -> std::os::raw::c_int {
             return 1;
         }
     };
+    // If the input starts with the Lua signature byte, treat it as
+    // pre-compiled .luac and route through lundump instead of the
+    // source-text parser.
+    if src_bytes.first().copied() == Some(0x1B) {
+        match crate::lundump::undump(&mut state.global, &src_bytes) {
+            Ok(closure) => {
+                // Bind _ENV (upvalue 0) to the calling chunk's
+                // globals so the bytecode-loaded function can see
+                // print, etc.
+                if let Some(uv) = state.global.heap.lclosure(closure).upvalues.first().copied() {
+                    state.global.heap.upval_mut(uv).state =
+                        crate::contract::UpValState::Closed(TValue::Table(globals));
+                }
+                state.current_thread_mut().push(TValue::LuaClosure(closure));
+                return 1;
+            }
+            Err(e) => {
+                state.push_nil();
+                state.push_string(&format!("load: bytecode error: {}", e));
+                return 2;
+            }
+        }
+    }
     // Wrap parse in catch_unwind since parser panics on syntax
     // errors (pending real error propagation). Silence the default
     // panic hook so the backtrace doesn't leak to stderr.

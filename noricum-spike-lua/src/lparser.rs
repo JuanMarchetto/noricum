@@ -1604,6 +1604,14 @@ fn suffixedexp(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
                 lcode::exp2nextreg(fs, &mut arg);
                 lcode::code_call(fs, e, 1);
             }
+            t if t == b'{' as i32 => {
+                // f{...} sugar — same as f({...})
+                lcode::exp2nextreg(fs, e);
+                let mut tbl = ExprDesc::void();
+                constructor(ls, fs, &mut tbl);
+                lcode::exp2nextreg(fs, &mut tbl);
+                lcode::code_call(fs, e, 1);
+            }
             _ => return,
         }
     }
