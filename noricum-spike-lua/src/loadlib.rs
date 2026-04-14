@@ -17,7 +17,11 @@ pub fn open_package(state: &mut LuaState, globals: TableHandle) -> TableHandle {
         .heap
         .alloc_table(crate::contract::Table::default());
 
-    // package.loaded — map of loaded modules.
+    // package.loaded — map of loaded modules. Pre-populate with
+    // every standard library that linit::open_libs already
+    // installed onto the globals table, so `require("string")`
+    // returns the existing library instead of trying to find a
+    // string.lua file.
     let loaded = state
         .global
         .heap
@@ -26,6 +30,21 @@ pub fn open_package(state: &mut LuaState, globals: TableHandle) -> TableHandle {
     state
         .global
         .table_set_shortstr(pkg, loaded_name, TValue::Table(loaded));
+    for lib in &[
+        "string", "math", "table", "os", "io", "debug",
+        "coroutine", "utf8",
+    ] {
+        let key = state.global.new_string(lib.as_bytes(), 0);
+        if let Some(v) = state.global.heap.table_get_shortstr(globals, key) {
+            state.global.table_set_shortstr(loaded, key, v);
+        }
+    }
+    // Also expose `_G` and `package` itself for require("_G") /
+    // require("package").
+    let g_key = state.global.new_string(b"_G", 0);
+    state.global.table_set_shortstr(loaded, g_key, TValue::Table(globals));
+    let pkg_key = state.global.new_string(b"package", 0);
+    state.global.table_set_shortstr(loaded, pkg_key, TValue::Table(pkg));
 
     // package.preload — map of pre-registered module loaders.
     let preload = state
