@@ -218,14 +218,35 @@ impl LuaState {
         rb: TValue,
         rc: TValue,
     ) -> LuaResult<Option<TValue>> {
-        if let Some(v) = raw_arith(op, &rb, &rc)? {
-            return Ok(Some(v));
+        match raw_arith(op, &rb, &rc) {
+            Ok(Some(v)) => return Ok(Some(v)),
+            Ok(None) => {}
+            Err(LuaError::Runtime(TValue::Nil)) => {
+                // int_idiv / int_mod signal "integer divide-by-zero"
+                // via Nil payload. Replace with a proper message so
+                // pcall/assert show "attempt to perform 'n//0'".
+                let msg = match op {
+                    ArithOp::Mod => "attempt to perform 'n%0'",
+                    _ => "attempt to perform 'n//0'",
+                };
+                return Err(self.make_lua_error(msg));
+            }
+            Err(e) => return Err(e),
         }
         let cb = coerce_to_numeric_value(&self.global, rb);
         let cc = coerce_to_numeric_value(&self.global, rc);
         if let (Some(b), Some(c)) = (cb, cc) {
-            if let Some(v) = raw_arith(op, &b, &c)? {
-                return Ok(Some(v));
+            match raw_arith(op, &b, &c) {
+                Ok(Some(v)) => return Ok(Some(v)),
+                Ok(None) => {}
+                Err(LuaError::Runtime(TValue::Nil)) => {
+                    let msg = match op {
+                        ArithOp::Mod => "attempt to perform 'n%0'",
+                        _ => "attempt to perform 'n//0'",
+                    };
+                    return Err(self.make_lua_error(msg));
+                }
+                Err(e) => return Err(e),
             }
         }
         Ok(None)
@@ -2260,9 +2281,7 @@ fn lua_raw_equals(a: &TValue, b: &TValue) -> Option<bool> {
     }
     match (a, b) {
         (TValue::Integer(i), TValue::Number(n))
-        | (TValue::Number(n), TValue::Integer(i)) => Some(
-            n.is_finite() && *n == (*i as f64) && n.floor() == *n,
-        ),
+        | (TValue::Number(n), TValue::Integer(i)) => Some(int_eq_float(*i, *n)),
         // Strings intern so identity ≡ value; not equal bit-for-bit
         // means not equal at the Lua level. `nil`/`bool` only compare
         // equal to themselves (handled by the top check). Numbers of
@@ -2312,6 +2331,27 @@ fn lua_raw_less_equal(a: &TValue, b: &TValue) -> Option<bool> {
 /// Precise i < f. Returns false on NaN. Mirrors C Lua's
 /// `LTintfloat`: convert i to float (lossy near i64 limits),
 /// compare; ties broken by comparing the integer part of f against i.
+/// Precise int-float equality. Mirrors C Lua's `luaV_equalobj` + the
+/// integer/float coercion check: `i == f` is true iff `f` is exactly
+/// representable as an integer AND that integer equals `i`. Casting
+/// `i` to `f64` directly collapses adjacent i64 values near the i64
+/// boundary (maxint-1, maxint, maxint+2^k all hit the same double)
+/// so we compare through the float's integer projection instead.
+fn int_eq_float(i: i64, f: f64) -> bool {
+    if !f.is_finite() || f.fract() != 0.0 {
+        return false;
+    }
+    // f is an integer-valued finite float. Convert via the C-Lua
+    // safe path: f must be in i64 range, then compare as integers.
+    if f >= 9223372036854775808.0 {
+        return false;
+    }
+    if f < -9223372036854775808.0 {
+        return false;
+    }
+    (f as i64) == i
+}
+
 fn int_less_than_float(i: i64, f: f64) -> bool {
     if f.is_nan() {
         return false;

@@ -438,6 +438,8 @@ fn num_arith(op: ArithOp, a: LuaNumber, b: LuaNumber) -> LuaNumber {
 ///   non-zero.
 fn int_idiv(m: LuaInteger, n: LuaInteger) -> LuaResult<LuaInteger> {
     if n == 0 {
+        // Nil-payload sentinel; VM dispatcher rewrites it into a
+        // proper "attempt to perform 'n//0'" string with source:line.
         return Err(LuaError::Runtime(TValue::Nil));
     }
     if n == -1 {

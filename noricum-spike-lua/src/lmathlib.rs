@@ -265,31 +265,31 @@ unsafe extern "C" fn math_fmod(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn math_modf(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
+    // Match C Lua: when arg is already an integer, return (arg, 0.0)
+    // without conversion. Only float inputs decompose into a float
+    // integer-part and float fractional-part.
+    if state.is_integer(1) {
+        let v = state.value_at_public(1).unwrap_or(TValue::Integer(0));
+        state.push_value(1);
+        let _ = v;
+        state.push_number(0.0);
+        return 2;
+    }
     let x = state.to_number_x(1).unwrap_or(0.0);
     // C standard: modf(inf, &i) → i=inf, returns 0; modf(NaN, &i) →
-    // i=NaN, returns NaN. Lua's lmathlib relies on this: math.modf
-    // on infinity must return (inf, 0.0). Naive `x - x.trunc()` gives
-    // (inf, NaN) because inf - inf = NaN. Special-case the
-    // non-finite paths to match C semantics.
+    // i=NaN, returns NaN. Naive `x - x.trunc()` gives (inf, NaN)
+    // because inf - inf = NaN. Special-case the non-finite paths.
     let (int_part, frac_part) = if x.is_nan() {
         (f64::NAN, f64::NAN)
     } else if x.is_infinite() {
         (x, 0.0)
     } else {
-        let ip = x.trunc();
-        (ip, x - ip)
+        let ip = if x < 0.0 { x.ceil() } else { x.floor() };
+        let fp = if x == ip { 0.0 } else { x - ip };
+        (ip, fp)
     };
-    // Push the integer part as an integer when it's exactly
-    // representable in i64; otherwise as a float (C Lua does the same
-    // via lua_Integer round-trip check).
-    if int_part.is_finite()
-        && int_part >= i64::MIN as f64
-        && int_part <= i64::MAX as f64
-    {
-        state.push_integer(int_part as i64);
-    } else {
-        state.push_number(int_part);
-    }
+    // Integer part returned as FLOAT (matches C Lua's lua_pushnumber).
+    state.push_number(int_part);
     state.push_number(frac_part);
     2
 }
