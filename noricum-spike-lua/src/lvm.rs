@@ -1654,6 +1654,22 @@ impl LuaState {
         a: TValue,
         b: TValue,
     ) -> LuaResult<bool> {
+        // String equality-by-value. Our short-string interning table
+        // is best-effort, not canonical: two ShortString handles can
+        // carry the same bytes (a new_string call during GC growth,
+        // a pcall's formatted error vs. a literal, etc.). Compare
+        // string contents by value before any other decision.
+        let str_bytes = |v: &TValue| -> Option<&[u8]> {
+            match v {
+                TValue::ShortString(h) | TValue::LongString(h) => {
+                    Some(self.global.heap.string(*h).bytes.as_slice())
+                }
+                _ => None,
+            }
+        };
+        if let (Some(ba), Some(bb)) = (str_bytes(&a), str_bytes(&b)) {
+            return Ok(ba == bb);
+        }
         if let Some(decided) = lua_raw_equals(&a, &b) {
             return Ok(decided);
         }
@@ -2282,6 +2298,12 @@ fn lua_raw_equals(a: &TValue, b: &TValue) -> Option<bool> {
     match (a, b) {
         (TValue::Integer(i), TValue::Number(n))
         | (TValue::Number(n), TValue::Integer(i)) => Some(int_eq_float(*i, *n)),
+        // Long strings are NOT interned, so two separate handles can
+        // carry the same bytes. Compare by value — return `None` so
+        // the caller (which holds &GlobalState) does the byte check.
+        (TValue::LongString(_), TValue::LongString(_))
+        | (TValue::ShortString(_), TValue::LongString(_))
+        | (TValue::LongString(_), TValue::ShortString(_)) => None,
         // Strings intern so identity ≡ value; not equal bit-for-bit
         // means not equal at the Lua level. `nil`/`bool` only compare
         // equal to themselves (handled by the top check). Numbers of

@@ -178,7 +178,8 @@ unsafe extern "C" fn str_char(state: *mut LuaState) -> std::os::raw::c_int {
     for i in 1..=top {
         let v = state.to_integer_x(i).unwrap_or(0);
         if !(0..=255).contains(&v) {
-            let h = state.global.new_string(b"bad argument to 'char'", 0);
+            let msg = format!("bad argument #{} to 'char' (value out of range)", i);
+            let h = state.global.new_string(msg.as_bytes(), 0);
             state.raise_error_value(TValue::ShortString(h));
             return 0;
         }

@@ -179,7 +179,7 @@ unsafe extern "C" fn require(state: *mut LuaState) -> std::os::raw::c_int {
         .new_string(modname_bytes.as_slice(), state.global.hash_seed);
 
     // Look up package.loaded[modname].
-    let (loaded_h, _path_str) = {
+    let (loaded_h, _path_str, _cpath_str) = {
         let env_upv = state.global.heap.lclosure(match state.current_thread().stack[0] {
             TValue::LuaClosure(h) => h,
             _ => {
@@ -235,9 +235,32 @@ unsafe extern "C" fn require(state: *mut LuaState) -> std::os::raw::c_int {
                 String::from_utf8_lossy(&state.global.heap.string(h).bytes)
                     .to_string()
             }
-            _ => String::new(),
+            Some(TValue::Nil) | None => String::new(),
+            _ => {
+                let err_h = state
+                    .global
+                    .new_string(b"'package.path' must be a string", 0);
+                state.raise_error_value(TValue::ShortString(err_h));
+                return 0;
+            }
         };
-        (loaded, path_str)
+        let cpath_name = state.global.new_string(b"cpath", 0);
+        let cpath_val = state.global.heap.table_get_shortstr(pkg, cpath_name);
+        let cpath_str = match cpath_val {
+            Some(TValue::ShortString(h)) | Some(TValue::LongString(h)) => {
+                String::from_utf8_lossy(&state.global.heap.string(h).bytes)
+                    .to_string()
+            }
+            Some(TValue::Nil) | None => String::new(),
+            _ => {
+                let err_h = state
+                    .global
+                    .new_string(b"'package.cpath' must be a string", 0);
+                state.raise_error_value(TValue::ShortString(err_h));
+                return 0;
+            }
+        };
+        (loaded, path_str, cpath_str)
     };
 
     // Check cache.
@@ -305,22 +328,44 @@ unsafe extern "C" fn require(state: *mut LuaState) -> std::os::raw::c_int {
             .collect()
     };
     let mut content: Option<Vec<u8>> = None;
-    let mut last_err = String::new();
+    let mut tried: Vec<String> = Vec::new();
     for p in &search_paths {
         match std::fs::read(p) {
             Ok(c) => {
                 content = Some(c);
                 break;
             }
-            Err(e) => {
-                last_err = format!("'{}': {}", p, e);
+            Err(_) => {
+                tried.push(format!("\tno file '{}'", p));
+            }
+        }
+    }
+    if content.is_none() {
+        // Append cpath attempts to the error trace so the message
+        // shape matches C Lua's ll_require output.
+        let cpath_candidates: Vec<String> = _cpath_str
+            .split(';')
+            .filter(|p| !p.is_empty())
+            .map(|p| p.replace('?', &modname_sub))
+            .collect();
+        for p in &cpath_candidates {
+            if !std::path::Path::new(p).exists() {
+                tried.push(format!("\tno file '{}'", p));
             }
         }
     }
     let content = match content {
         Some(c) => c,
         None => {
-            let err = format!("module '{}' not found: {}", modname_str, last_err);
+            // Match C Lua's ll_require error shape: "module 'X' not
+            // found:\n\tno field package.preload['X']\n\tno file ...".
+            let mut err = format!("module '{}' not found:", modname_str);
+            err.push('\n');
+            err.push_str(&format!("\tno field package.preload['{}']", modname_str));
+            for line in &tried {
+                err.push('\n');
+                err.push_str(line);
+            }
             let h = state.global.new_string(err.as_bytes(), 0);
             state.raise_error_value(TValue::ShortString(h));
             return 0;
