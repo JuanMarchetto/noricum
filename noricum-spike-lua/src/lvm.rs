@@ -161,7 +161,76 @@ pub(crate) fn tonumber_coerce(v: &TValue) -> Option<f64> {
     }
 }
 
+/// Coerce a TValue (number or numeric string) into the canonical
+/// numeric TValue for arithmetic. Returns `None` for non-numeric or
+/// for strings that don't parse. Mirrors `l_strton` + `tonumber`.
+///
+/// Integer strings produce `TValue::Integer`; everything else
+/// (floats, integer-valued floats written like "3.0", scientific
+/// notation, hex literals like "0x10") produces `TValue::Number`.
+pub(crate) fn coerce_to_numeric_value(
+    gs: &crate::contract::GlobalState,
+    v: TValue,
+) -> Option<TValue> {
+    match v {
+        TValue::Integer(_) | TValue::Number(_) => Some(v),
+        TValue::ShortString(h) | TValue::LongString(h) => {
+            let bytes = &gs.heap.string(h).bytes;
+            let s = std::str::from_utf8(bytes).ok()?.trim();
+            if s.is_empty() {
+                return None;
+            }
+            // Try integer first, then float. Match Lua's lua_strton
+            // semantics: integer literal (decimal or hex) → Integer;
+            // anything else → Number.
+            if let Some(stripped) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                if let Ok(i) = i64::from_str_radix(stripped, 16) {
+                    return Some(TValue::Integer(i));
+                }
+                if let Some(neg_stripped) = s.strip_prefix("-0x").or_else(|| s.strip_prefix("-0X")) {
+                    if let Ok(i) = i64::from_str_radix(neg_stripped, 16) {
+                        return Some(TValue::Integer(i.wrapping_neg()));
+                    }
+                }
+            }
+            if let Ok(i) = s.parse::<i64>() {
+                return Some(TValue::Integer(i));
+            }
+            if let Ok(f) = s.parse::<f64>() {
+                return Some(TValue::Number(f));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 impl LuaState {
+    /// Try arithmetic on `rb op rc`, with Lua-standard string-to-number
+    /// coercion as a fallback before reporting "no result". Mirrors
+    /// `luaV_arith`'s dispatch: try the raw op first; if that yields
+    /// `None` (one or both operands non-numeric), try coercing strings
+    /// to numbers and retry; only if that also fails return `None` so
+    /// the caller can fall through to a metamethod.
+    pub(crate) fn try_arith_with_string_coercion(
+        &mut self,
+        op: ArithOp,
+        rb: TValue,
+        rc: TValue,
+    ) -> LuaResult<Option<TValue>> {
+        if let Some(v) = raw_arith(op, &rb, &rc)? {
+            return Ok(Some(v));
+        }
+        let cb = coerce_to_numeric_value(&self.global, rb);
+        let cc = coerce_to_numeric_value(&self.global, rc);
+        if let (Some(b), Some(c)) = (cb, cc) {
+            if let Some(v) = raw_arith(op, &b, &c)? {
+                return Ok(Some(v));
+            }
+        }
+        Ok(None)
+    }
+
     /// Build a `LuaError::Runtime` carrying a formatted error
     /// message as a short string interned on the heap. This
     /// replaces the old `LuaError::Runtime(TValue::Nil)` stubs.
@@ -1195,14 +1264,11 @@ impl LuaState {
         let c = getarg_c(instruction) as u32;
         let rb = self.current_thread().stack[(base + b) as usize];
         let rc = self.current_thread().stack[(base + c) as usize];
-        let result = raw_arith(op, &rb, &rc)?;
-        match result {
-            Some(v) => {
-                self.current_thread_mut().stack[(base + a) as usize] = v;
-                Ok(())
-            }
-            None => self.try_binary_metamethod(op, rb, rc, base + a),
+        if let Some(v) = self.try_arith_with_string_coercion(op, rb, rc)? {
+            self.current_thread_mut().stack[(base + a) as usize] = v;
+            return Ok(());
         }
+        self.try_binary_metamethod(op, rb, rc, base + a)
     }
 
     /// K-variant arithmetic dispatcher — R(A) := R(B) op K[C].
@@ -1220,14 +1286,11 @@ impl LuaState {
         let c = getarg_c(instruction) as usize;
         let rb = self.current_thread().stack[(base + b) as usize];
         let rc = self.constant_at(func_slot, c);
-        let result = raw_arith(op, &rb, &rc)?;
-        match result {
-            Some(v) => {
-                self.current_thread_mut().stack[(base + a) as usize] = v;
-                Ok(())
-            }
-            None => self.try_binary_metamethod(op, rb, rc, base + a),
+        if let Some(v) = self.try_arith_with_string_coercion(op, rb, rc)? {
+            self.current_thread_mut().stack[(base + a) as usize] = v;
+            return Ok(());
         }
+        self.try_binary_metamethod(op, rb, rc, base + a)
     }
 
     /// I-variant arithmetic dispatcher — R(A) := R(B) op sC
@@ -1245,14 +1308,11 @@ impl LuaState {
         let sc = getarg_sc(instruction) as i64;
         let rb = self.current_thread().stack[(base + b) as usize];
         let immediate = TValue::Integer(sc);
-        let result = raw_arith(op, &rb, &immediate)?;
-        match result {
-            Some(v) => {
-                self.current_thread_mut().stack[(base + a) as usize] = v;
-                Ok(())
-            }
-            None => self.try_binary_metamethod(op, rb, immediate, base + a),
+        if let Some(v) = self.try_arith_with_string_coercion(op, rb, immediate)? {
+            self.current_thread_mut().stack[(base + a) as usize] = v;
+            return Ok(());
         }
+        self.try_binary_metamethod(op, rb, immediate, base + a)
     }
 
     /// Unary arithmetic dispatcher — R(A) := op R(B). Follows
@@ -1269,16 +1329,13 @@ impl LuaState {
         let a = getarg_a(instruction) as u32;
         let b = getarg_b(instruction) as u32;
         let rb = self.current_thread().stack[(base + b) as usize];
-        let result = raw_arith(op, &rb, &rb)?;
-        match result {
-            Some(v) => {
-                self.current_thread_mut().stack[(base + a) as usize] = v;
-                Ok(())
-            }
-            // Unary metamethods (__unm, __bnot) also receive two
-            // operand slots in C Lua — the operand is duplicated.
-            None => self.try_binary_metamethod(op, rb, rb, base + a),
+        if let Some(v) = self.try_arith_with_string_coercion(op, rb, rb)? {
+            self.current_thread_mut().stack[(base + a) as usize] = v;
+            return Ok(());
         }
+        // Unary metamethods (__unm, __bnot) also receive two
+        // operand slots in C Lua — the operand is duplicated.
+        self.try_binary_metamethod(op, rb, rb, base + a)
     }
 
     // ------------------------------------------------------------------
