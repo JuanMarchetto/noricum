@@ -787,6 +787,13 @@ impl LuaState {
                         let skip = (step > 0 && init > limit)
                             || (step < 0 && init < limit);
                         if skip {
+                            // C Lua semantics: jump to FORLOOP, which
+                            // will see no remaining iterations and
+                            // exit normally. The patched Bx encodes
+                            // (label_after_body - (forprep_pc + 1)),
+                            // i.e. body_len. VM adds Bx + 1 because
+                            // savedpc was already advanced past the
+                            // FORPREP at fetch time.
                             let frame_mut = self
                                 .current_thread_mut()
                                 .frames
@@ -816,6 +823,7 @@ impl LuaState {
                         thread.stack[(base + a + 1) as usize] = TValue::Number(fl);
                         thread.stack[(base + a + 2) as usize] = TValue::Number(fs);
                         if skip {
+                            // Same as integer branch above.
                             let frame_mut = thread
                                 .frames
                                 .last_mut()
