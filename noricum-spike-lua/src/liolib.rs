@@ -39,6 +39,13 @@ fn next_id() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Default-output / default-input ids used by `io.write` /
+/// `io.read` when called without an explicit file handle. Set by
+/// `io.output(...)` / `io.input(...)`. Initial values point at
+/// stdout (2) and stdin (1) — the classic Unix defaults.
+static DEFAULT_OUTPUT_ID: AtomicU64 = AtomicU64::new(2);
+static DEFAULT_INPUT_ID: AtomicU64 = AtomicU64::new(1);
+
 fn encode_id(id: u64) -> Vec<u8> {
     id.to_le_bytes().to_vec()
 }
@@ -74,6 +81,9 @@ pub fn open_io(state: &mut LuaState, globals: TableHandle) -> TableHandle {
     register(state, t, "close", io_close);
     register(state, t, "lines", io_lines);
     register(state, t, "flush", io_flush);
+    register(state, t, "output", io_output);
+    register(state, t, "input", io_input);
+    register(state, t, "type", io_type);
 
     let file_mt = install_file_metatable(state);
     set_file_mt(file_mt);
@@ -173,8 +183,38 @@ unsafe extern "C" fn io_write(state: *mut LuaState) -> std::os::raw::c_int {
     for i in 1..=top {
         append_tv_as_bytes(state, i, &mut buf);
     }
-    let _ = std::io::stdout().write_all(&buf);
+    let id = DEFAULT_OUTPUT_ID.load(Ordering::Relaxed);
+    write_to_id(id, &buf);
     0
+}
+
+/// Write `buf` to the file-handle identified by `id` in the
+/// process-wide registry. Handles stdout/stderr inline; for opened
+/// files locates the entry, writes, and re-inserts.
+fn write_to_id(id: u64, buf: &[u8]) {
+    if id == 2 {
+        let _ = std::io::stdout().write_all(buf);
+        return;
+    }
+    if id == 3 {
+        let _ = std::io::stderr().write_all(buf);
+        return;
+    }
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = reg.remove(&id) {
+        let new_entry = match entry {
+            FileEntry::Write(mut f) => {
+                let _ = f.write_all(buf);
+                FileEntry::Write(f)
+            }
+            FileEntry::ReadWrite(mut f) => {
+                let _ = f.write_all(buf);
+                FileEntry::ReadWrite(f)
+            }
+            other => other,
+        };
+        reg.insert(id, new_entry);
+    }
 }
 
 unsafe extern "C" fn io_open(state: *mut LuaState) -> std::os::raw::c_int {
@@ -251,6 +291,92 @@ unsafe extern "C" fn io_flush(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
     let _ = std::io::stdout().flush();
     state.push_boolean(true);
+    1
+}
+
+/// `io.output([file])` — set or read the default output. Accepts
+/// either a filename (opens it for writing and uses that) or a file
+/// handle userdata (uses it directly). With no argument, returns the
+/// current default-output handle.
+unsafe extern "C" fn io_output(state: *mut LuaState) -> std::os::raw::c_int {
+    let state = unsafe { &mut *state };
+    set_default_stream(state, /*is_output=*/ true)
+}
+
+/// `io.input([file])` — same shape as `io.output`, but for the
+/// default input.
+unsafe extern "C" fn io_input(state: *mut LuaState) -> std::os::raw::c_int {
+    let state = unsafe { &mut *state };
+    set_default_stream(state, /*is_output=*/ false)
+}
+
+fn set_default_stream(state: &mut LuaState, is_output: bool) -> std::os::raw::c_int {
+    let top = state.get_top();
+    let cell = if is_output { &DEFAULT_OUTPUT_ID } else { &DEFAULT_INPUT_ID };
+    if top == 0 {
+        // Read current default — push a fresh userdata that wraps
+        // the existing id (good enough for callers that only check
+        // truthiness or pass it around).
+        let id = cell.load(Ordering::Relaxed);
+        push_file_handle(state, id);
+        return 1;
+    }
+    if let Some(path_bytes) = state.to_lstring(1).map(|s| s.to_vec()) {
+        let p = String::from_utf8_lossy(&path_bytes).to_string();
+        let mode = if is_output { "w" } else { "r" };
+        let (read, write, append, truncate, create) = classify_mode(mode);
+        let mut opts = OpenOptions::new();
+        opts.read(read)
+            .write(write)
+            .append(append)
+            .truncate(truncate)
+            .create(create);
+        let file = match opts.open(&p) {
+            Ok(f) => f,
+            Err(e) => {
+                let msg = format!("{}: {}", p, e);
+                let h = state.global.new_string(msg.as_bytes(), 0);
+                state.raise_error_value(crate::contract::TValue::ShortString(h));
+                return 0;
+            }
+        };
+        let id = next_id();
+        let entry = if is_output {
+            FileEntry::Write(file)
+        } else {
+            FileEntry::Read(BufReader::new(file))
+        };
+        registry().lock().unwrap_or_else(|e| e.into_inner()).insert(id, entry);
+        cell.store(id, Ordering::Relaxed);
+        push_file_handle(state, id);
+        return 1;
+    }
+    // Userdata case: extract the id and store it as the default.
+    if let Some(id) = userdata_id(state, 1) {
+        cell.store(id, Ordering::Relaxed);
+    }
+    state.push_value(1);
+    1
+}
+
+/// Wrap an existing file id in a fresh userdata + file metatable so
+/// the caller can use it as a Lua file handle.
+fn push_file_handle(state: &mut LuaState, id: u64) {
+    let v = make_file_userdata(state, id);
+    state.current_thread_mut().push(v);
+}
+
+/// `io.type(x)` — returns "file" if x is a file handle (open), or
+/// "closed file" if closed, or nil otherwise. Cheap shim — we don't
+/// distinguish open vs closed here, so report "file" for any handle
+/// userdata.
+unsafe extern "C" fn io_type(state: *mut LuaState) -> std::os::raw::c_int {
+    let state = unsafe { &mut *state };
+    if userdata_id(state, 1).is_some() {
+        state.push_string("file");
+    } else {
+        state.push_nil();
+    }
     1
 }
 
