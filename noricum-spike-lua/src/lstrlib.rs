@@ -76,7 +76,7 @@ unsafe extern "C" fn str_upper(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
     let bytes = arg_bytes(state, 1).unwrap_or_default();
     let out: Vec<u8> = bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
-    state.push_string(&String::from_utf8_lossy(&out));
+    let _ = state.push_lstring(&out);
     1
 }
 
@@ -84,7 +84,7 @@ unsafe extern "C" fn str_lower(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
     let bytes = arg_bytes(state, 1).unwrap_or_default();
     let out: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-    state.push_string(&String::from_utf8_lossy(&out));
+    let _ = state.push_lstring(&out);
     1
 }
 
@@ -92,7 +92,7 @@ unsafe extern "C" fn str_reverse(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
     let bytes = arg_bytes(state, 1).unwrap_or_default();
     let out: Vec<u8> = bytes.into_iter().rev().collect();
-    state.push_string(&String::from_utf8_lossy(&out));
+    let _ = state.push_lstring(&out);
     1
 }
 
@@ -108,7 +108,7 @@ unsafe extern "C" fn str_rep(state: *mut LuaState) -> std::os::raw::c_int {
         }
         out.extend_from_slice(&bytes);
     }
-    state.push_string(&String::from_utf8_lossy(&out));
+    let _ = state.push_lstring(&out);
     1
 }
 
@@ -184,7 +184,7 @@ unsafe extern "C" fn str_char(state: *mut LuaState) -> std::os::raw::c_int {
         }
         buf.push(v as u8);
     }
-    state.push_string(&String::from_utf8_lossy(&buf));
+    let _ = state.push_lstring(&buf);
     1
 }
 
@@ -316,7 +316,7 @@ unsafe extern "C" fn str_format(state: *mut LuaState) -> std::os::raw::c_int {
             }
         }
     }
-    state.push_string(&String::from_utf8_lossy(&out));
+    let _ = state.push_lstring(&out);
     1
 }
 
@@ -824,7 +824,21 @@ unsafe extern "C" fn str_find(state: *mut LuaState) -> std::os::raw::c_int {
     let init = state.to_integer_x(3).unwrap_or(1);
     let plain = state.to_boolean(4);
     let len = src.len() as i64;
-    let start = normalize_index(init, len).max(1) as usize - 1;
+    // Honor C Lua's out-of-range init: when init > #s + 1, find
+    // returns nil without scanning. Without this, find('', '', 2)
+    // returned (2, 1) instead of nil.
+    let init_norm = if init < 0 {
+        (len + init + 1).max(1)
+    } else if init == 0 {
+        1
+    } else {
+        init
+    };
+    if init_norm > len + 1 {
+        state.push_nil();
+        return 1;
+    }
+    let start = (init_norm - 1) as usize;
     if plain {
         // Plain literal find.
         if pat.is_empty() {
@@ -850,7 +864,7 @@ unsafe extern "C" fn str_find(state: *mut LuaState) -> std::os::raw::c_int {
             state.push_integer(me as i64);
             for (cs, ce) in &caps {
                 let slice = &src[*cs..*ce];
-                state.push_string(&String::from_utf8_lossy(slice));
+                let _ = state.push_lstring(slice);
             }
             2 + caps.len() as i32
         }
@@ -871,11 +885,11 @@ unsafe extern "C" fn str_match(state: *mut LuaState) -> std::os::raw::c_int {
     match pattern_find(&src, &pat, start) {
         Some((ms, me, caps)) => {
             if caps.is_empty() {
-                state.push_string(&String::from_utf8_lossy(&src[ms..me]));
+                let _ = state.push_lstring(&src[ms..me]);
                 1
             } else {
                 for (cs, ce) in &caps {
-                    state.push_string(&String::from_utf8_lossy(&src[*cs..*ce]));
+                    let _ = state.push_lstring(&src[*cs..*ce]);
                 }
                 caps.len() as i32
             }
@@ -957,12 +971,12 @@ unsafe extern "C" fn gmatch_iter(state: *mut LuaState) -> std::os::raw::c_int {
                 crate::contract::TValue::Integer(new_pos as i64);
             if caps.is_empty() {
                 let slice = &s[ms..me];
-                state.push_string(&String::from_utf8_lossy(slice));
+                let _ = state.push_lstring(slice);
                 1
             } else {
                 for (cs, ce) in &caps {
                     let slice = &s[*cs..*ce];
-                    state.push_string(&String::from_utf8_lossy(slice));
+                    let _ = state.push_lstring(slice);
                 }
                 caps.len() as i32
             }
