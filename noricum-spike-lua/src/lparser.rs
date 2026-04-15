@@ -229,6 +229,16 @@ pub fn parse_with_env(
     source_name: &[u8],
     globals: crate::contract::TableHandle,
 ) -> crate::contract::LClosureHandle {
+    // Shebang support: scripts starting with `#!` (common for
+    // command-line Lua tools like fennel) need the first line
+    // skipped before the lexer sees it — `#` is not a valid Lua
+    // token. Match C Lua's luaL_loadfilex behaviour.
+    let source = if source.starts_with(b"#") {
+        let nl = source.iter().position(|&b| b == b'\n').unwrap_or(source.len());
+        &source[nl..]
+    } else {
+        source
+    };
     let closure = parse(state, source, source_name);
     // Bind the _ENV upvalue (index 0) to `globals`.
     let env_uv = state.global.heap.alloc_upval(crate::contract::UpVal {

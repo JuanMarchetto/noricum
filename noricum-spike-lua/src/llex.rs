@@ -24,7 +24,6 @@ pub enum Reserved {
     TkFalse,
     TkFor,
     TkFunction,
-    TkGlobal,
     TkGoto,
     TkIf,
     TkIn,
@@ -65,7 +64,6 @@ pub const TK_END: i32 = Reserved::TkEnd as i32;
 pub const TK_FALSE: i32 = Reserved::TkFalse as i32;
 pub const TK_FOR: i32 = Reserved::TkFor as i32;
 pub const TK_FUNCTION: i32 = Reserved::TkFunction as i32;
-pub const TK_GLOBAL: i32 = Reserved::TkGlobal as i32;
 pub const TK_GOTO: i32 = Reserved::TkGoto as i32;
 pub const TK_IF: i32 = Reserved::TkIf as i32;
 pub const TK_IN: i32 = Reserved::TkIn as i32;
@@ -99,7 +97,7 @@ pub const NUM_RESERVED: usize = (TK_WHILE - FIRST_RESERVED + 1) as usize;
 
 const RESERVED_WORDS: [&str; NUM_RESERVED] = [
     "and", "break", "do", "else", "elseif", "end", "false", "for",
-    "function", "global", "goto", "if", "in", "local", "nil", "not",
+    "function", "goto", "if", "in", "local", "nil", "not",
     "or", "repeat", "return", "then", "true", "until", "while",
 ];
 

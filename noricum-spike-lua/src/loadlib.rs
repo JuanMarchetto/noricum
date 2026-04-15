@@ -236,6 +236,49 @@ unsafe extern "C" fn require(state: *mut LuaState) -> std::os::raw::c_int {
         return 1;
     }
 
+    // Check package.preload[modname] — an explicit loader function
+    // registered by the host (or by the module itself for submodules,
+    // e.g., fennel.lua stashing sub-modules into preload).
+    let preload_h = {
+        let pkg_name = state.global.new_string(b"package", 0);
+        let globals_opt = state.global.globals_table();
+        let pkg = globals_opt
+            .and_then(|g| state.global.heap.table_get_shortstr(g, pkg_name))
+            .and_then(|v| if let TValue::Table(t) = v { Some(t) } else { None });
+        pkg.and_then(|p| {
+            let pkey = state.global.new_string(b"preload", 0);
+            state.global.heap.table_get_shortstr(p, pkey).and_then(|v| {
+                if let TValue::Table(t) = v { Some(t) } else { None }
+            })
+        })
+    };
+    if let Some(preload) = preload_h {
+        if let Some(loader) = state.global.heap.table_get_shortstr(preload, modname_h) {
+            if !matches!(loader, TValue::Nil) {
+                // Call loader(modname) and cache the result.
+                let base = state.frame_base_index().unwrap_or(0);
+                let top_before = state.current_thread().top;
+                state.current_thread_mut().push(loader);
+                state.current_thread_mut().push(TValue::ShortString(modname_h));
+                let _ = state.call_value(top_before, 1, 1);
+                // Cache.
+                let result = state
+                    .current_thread()
+                    .stack
+                    .get((base + state.get_top() as u32 - 1) as usize)
+                    .copied()
+                    .unwrap_or(TValue::Nil);
+                let cached = if matches!(result, TValue::Nil) {
+                    TValue::True
+                } else {
+                    result
+                };
+                state.global.table_set_shortstr(loaded_h, modname_h, cached);
+                return 1;
+            }
+        }
+    }
+
     // Walk package.path, substituting `?` for the module name
     // with dots converted to path separators. First match wins.
     let modname_sub = modname_str.replace('.', "/");
