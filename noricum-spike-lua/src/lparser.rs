@@ -1593,8 +1593,16 @@ fn peek_next_is_equals(ls: &mut LexState) -> bool {
 }
 
 fn suffixedexp(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
+    // Snap current_line to the line of the upcoming expression so any
+    // instructions emitted during this parse use the right line in
+    // proto.line_info. Without this, emit() keeps using the line of
+    // the enclosing statement's opening keyword and debug.getinfo
+    // reports the wrong line for calls that straddle a `\z` newline
+    // jump or any multi-line expression.
+    fs.current_line = ls.linenumber;
     primaryexp(ls, fs, e);
     loop {
+        fs.current_line = ls.linenumber;
         match ls.t.token {
             t if t == b'.' as i32 => {
                 ls.next_token();

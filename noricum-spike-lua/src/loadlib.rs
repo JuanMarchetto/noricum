@@ -74,6 +74,16 @@ pub fn open_package(state: &mut LuaState, globals: TableHandle) -> TableHandle {
         .global
         .table_set_shortstr(pkg, cpath_key, TValue::ShortString(cpath_val));
 
+    // package.config — directory separator, template separator,
+    // template character, executable character, igmark. Five lines
+    // matching the C Lua defaults on POSIX. attrib.lua expects this
+    // exact 5-line string.
+    let config_key = state.global.new_string(b"config", 0);
+    let config_val = state.global.new_string(b"/\n;\n?\n!\n-\n", 0);
+    state
+        .global
+        .table_set_shortstr(pkg, config_key, TValue::ShortString(config_val));
+
     // package.searchpath
     register(state, pkg, "searchpath", pkg_searchpath);
     // package.loadlib — opens a C library and returns a function.

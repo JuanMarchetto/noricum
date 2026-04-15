@@ -118,15 +118,28 @@ unsafe extern "C" fn str_sub(state: *mut LuaState) -> std::os::raw::c_int {
     let len = bytes.len() as i64;
     let i = state.to_integer_x(2).unwrap_or(1);
     let j = state.to_integer_x(3).unwrap_or(-1);
-    let start = normalize_index(i, len).max(1);
-    let end = normalize_index(j, len).min(len);
+    let start = posrelat(i, len).max(1);
+    let end = posrelat(j, len).min(len);
     if start > end {
-        state.push_string("");
+        let _ = state.push_lstring(b"");
         return 1;
     }
     let slice = &bytes[(start - 1) as usize..end as usize];
-    state.push_string(&String::from_utf8_lossy(slice));
+    let _ = state.push_lstring(slice);
     1
+}
+
+/// Port of C Lua's `posrelat`: convert a possibly-negative position
+/// into an absolute one without clamping at 1. start/end clamping
+/// happens at the call site so `string.sub(s, 0, 0)` returns "".
+fn posrelat(pos: i64, len: i64) -> i64 {
+    if pos >= 0 {
+        pos
+    } else if (-pos) > len {
+        0
+    } else {
+        len + pos + 1
+    }
 }
 
 fn normalize_index(i: i64, len: i64) -> i64 {
