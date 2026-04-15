@@ -441,6 +441,50 @@ impl<'a> LexState<'a> {
                             let h2 = self.hex_digit();
                             Some(h1 << 4 | h2)
                         }
+                        c if c == b'u' as i32 => {
+                            // \u{XXXX} — Unicode code point escape.
+                            // Up to 8 hex digits; values up to
+                            // 0x7FFFFFFF (Lua's extended UTF-8).
+                            self.next();
+                            if self.current != b'{' as i32 {
+                                self.lex_error("missing '{' in \\u{xxxx}");
+                            }
+                            self.next();
+                            let mut cp: u32 = 0;
+                            let mut count = 0;
+                            while self.current >= 0
+                                && (self.current as u8).is_ascii_hexdigit()
+                            {
+                                let d = self.hex_digit() as u32;
+                                cp = cp.checked_shl(4).and_then(|v| v.checked_add(d))
+                                    .unwrap_or_else(|| {
+                                        self.lex_error("UTF-8 value too large")
+                                    });
+                                count += 1;
+                                if count > 8 {
+                                    self.lex_error("UTF-8 value too large");
+                                }
+                            }
+                            if count == 0 {
+                                self.lex_error("hexadecimal digit expected");
+                            }
+                            if self.current != b'}' as i32 {
+                                self.lex_error("missing '}' in \\u{xxxx}");
+                            }
+                            self.next();
+                            if cp > 0x7FFFFFFF {
+                                self.lex_error("UTF-8 value too large");
+                            }
+                            // Emit the code point as Lua's extended
+                            // UTF-8 (up to 6 bytes for code points
+                            // beyond U+10FFFF). Replaces the saved
+                            // '\\' with the encoded bytes.
+                            self.buff.pop();
+                            for b in encode_utf8_extended(cp) {
+                                self.save(b);
+                            }
+                            None
+                        }
                         c if c == b'z' as i32 => {
                             self.buff.pop(); // remove '\\'
                             self.next(); // skip 'z'
@@ -696,6 +740,36 @@ impl<'a> LexState<'a> {
     pub fn syntax_error(&self, msg: &str) -> ! {
         self.lex_error(msg);
     }
+}
+
+/// Encode a Unicode code point as Lua's extended UTF-8: standard
+/// 1..4-byte forms for U+0000 .. U+10FFFF, and Lua's 5- and 6-byte
+/// extensions for code points up to 0x7FFFFFFF (matching luaO_utf8esc
+/// in C Lua's lobject.c).
+pub(crate) fn encode_utf8_extended(cp: u32) -> Vec<u8> {
+    if cp < 0x80 {
+        return vec![cp as u8];
+    }
+    // Pick the smallest form that fits.
+    let (n, lead_mask): (usize, u8) = if cp < 0x800 {
+        (2, 0xC0)
+    } else if cp < 0x10000 {
+        (3, 0xE0)
+    } else if cp < 0x200000 {
+        (4, 0xF0)
+    } else if cp < 0x4000000 {
+        (5, 0xF8)
+    } else {
+        (6, 0xFC)
+    };
+    let mut buf = vec![0u8; n];
+    let mut x = cp;
+    for i in (1..n).rev() {
+        buf[i] = 0x80 | ((x & 0x3F) as u8);
+        x >>= 6;
+    }
+    buf[0] = lead_mask | (x as u8);
+    buf
 }
 
 // ---------------------------------------------------------------------------
