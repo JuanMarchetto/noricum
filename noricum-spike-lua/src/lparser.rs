@@ -168,6 +168,12 @@ pub struct FuncState {
     pub pc: i32,
     pub lasttarget: i32,
     pub previousline: i32,
+    /// Line of the next instruction to be emitted. The parser updates
+    /// this from `LexState::lastline` (the line of the most-recently
+    /// consumed token) at each statement boundary so `lcode::emit`
+    /// can write a signed-byte delta into `proto.line_info`. Mirrors
+    /// `fs->ls->lastline` in `luaK_code`'s call to `savelineinfo`.
+    pub current_line: i32,
     pub nk: i32,
     pub np: i32,
     pub first_local: usize,
@@ -199,6 +205,7 @@ impl FuncState {
             pc: 0,
             lasttarget: 0,
             previousline: 0,
+            current_line: 1,
             nk: 0,
             np: 0,
             first_local: 0,
@@ -276,9 +283,14 @@ pub fn parse(
         breaks: Vec::new(),
     });
 
-    // Add _ENV upvalue (index 0).
+    // Add _ENV upvalue (index 0). Naming it "_ENV" lets `singlevar`
+    // resolve a literal `_ENV` identifier as upvalue 0 (matching C
+    // Lua) instead of falling back to GETTABUP(0, "_ENV") and finding
+    // nil. Without the name, scripts that read or reassign _ENV
+    // (events.lua, sandboxed module loaders, etc.) see nil.
+    let env_name_h = state.global.new_string(b"_ENV", 0);
     fs.proto.upvalues.push(UpvalDesc {
-        name: None,
+        name: Some(env_name_h),
         in_stack: true,
         idx: 0,
         kind: 0,
@@ -334,6 +346,12 @@ fn block_follow(ls: &LexState, with_until: bool) -> bool {
 }
 
 fn statement(ls: &mut LexState, fs: &mut FuncState) {
+    // Stamp the line of the next emit so runtime errors and
+    // debug.getinfo report the correct source line. Lua tracks
+    // this via fs->ls->lastline; ours uses ls.linenumber, which
+    // is the line of the upcoming token (sufficient for statement
+    // boundaries — sub-expression line drift is acceptable).
+    fs.current_line = ls.linenumber;
     match ls.t.token {
         TK_IF => ifstat(ls, fs),
         TK_WHILE => whilestat(ls, fs),
@@ -1698,7 +1716,7 @@ fn primaryexp(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
     }
 }
 
-fn singlevar(_ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc, name: StringHandle) {
+fn singlevar(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc, name: StringHandle) {
     // Search locals.
     for i in (0..fs.nactvar as usize).rev() {
         let av = &fs.actvar[i];
@@ -1709,7 +1727,8 @@ fn singlevar(_ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc, name: Str
             return;
         }
     }
-    // Search existing upvalues (already captured).
+    // Search existing upvalues (already captured) — including the
+    // pre-registered "_ENV" at slot 0.
     for i in 0..fs.nups as usize {
         let uv = &fs.proto.upvalues[i];
         if uv.name == Some(name) {
@@ -1733,17 +1752,19 @@ fn singlevar(_ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc, name: Str
             return;
         }
     }
-    // Fall back: global via _ENV[name]. Convention: _ENV lives at
-    // upvalue slot 0. The main chunk pre-registers it; nested
-    // functions chain through by referencing the outer's
-    // upvalue 0 when they lack a local binding.
+    // Fall back: global via _ENV[name]. _ENV lives at upvalue slot 0
+    // by convention; the main chunk pre-registers it in
+    // `parse_with_env`. Nested functions whose enclosing scope has
+    // no _ENV upvalue (rare — only when synthesized) get a fresh
+    // chained one with name "_ENV" so subsequent lookups find it.
+    let env_name = unsafe { (*ls.gs).new_string(b"_ENV", 0) };
     let env_idx: i32 = if !fs.proto.upvalues.is_empty()
-        && fs.proto.upvalues[0].name.is_none()
+        && is_env_upval(&fs.proto.upvalues[0], env_name)
     {
         0
     } else {
         fs.proto.upvalues.push(UpvalDesc {
-            name: None,
+            name: Some(env_name),
             in_stack: false,
             idx: 0,
             kind: 0,
@@ -1760,8 +1781,8 @@ fn singlevar(_ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc, name: Str
     lcode::indexed(fs, e, &mut key);
 }
 
-fn is_env_upval(u: &UpvalDesc) -> bool {
-    u.name.is_none() && !u.in_stack && u.idx == 0
+fn is_env_upval(u: &UpvalDesc, env_name: StringHandle) -> bool {
+    u.name == Some(env_name)
 }
 
 // ---- Operator mapping ------------------------------------------------------

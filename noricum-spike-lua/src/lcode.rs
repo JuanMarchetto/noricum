@@ -39,8 +39,38 @@ pub enum UnOpr {
 pub fn emit(fs: &mut FuncState, i: u32) -> i32 {
     let pc = fs.pc;
     fs.proto.code.push(i);
+    save_line_info(fs);
     fs.pc += 1;
     pc
+}
+
+/// Append a line-info entry for the instruction about to be appended.
+/// Mirrors `savelineinfo` in lcode.c: store a signed-byte delta from
+/// `previousline` to `current_line`. When the delta exceeds the range
+/// of `i8`, push an absolute checkpoint into `abs_line_info` and
+/// store the sentinel `i8::MIN` in `line_info`.
+fn save_line_info(fs: &mut FuncState) {
+    let line = fs.current_line;
+    let prev = fs.previousline;
+    let delta = line - prev;
+    // First entry, or out-of-range delta: emit an absolute checkpoint
+    // and write the sentinel into the per-instruction delta vector.
+    let needs_abs = !(-128..=127).contains(&delta) ||
+        // Lua 5.4 also flushes an abs entry every MAXIWTHABS (~128)
+        // instructions to bound the cost of a debug.getinfo lookup.
+        // We skip that periodic flush — it's a perf optimization for
+        // debug-info reads, not correctness.
+        false;
+    if needs_abs {
+        fs.proto.abs_line_info.push(crate::contract::AbsLineInfo {
+            pc: fs.pc,
+            line,
+        });
+        fs.proto.line_info.push(i8::MIN);
+    } else {
+        fs.proto.line_info.push(delta as i8);
+    }
+    fs.previousline = line;
 }
 
 pub fn emit_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool) -> i32 {

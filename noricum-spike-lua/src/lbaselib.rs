@@ -105,6 +105,30 @@ unsafe extern "C" fn lua_print(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn lua_tostring(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
+    // Honour __tostring metamethod: if defined, call it with the
+    // value as the only argument and use whatever it returns
+    // (which must be a string per Lua spec; we don't enforce that
+    // here — bad returns just propagate as-is).
+    let v = state.value_at_public(1).unwrap_or(crate::contract::TValue::Nil);
+    // __tostring isn't on the fast-method table in C Lua either —
+    // it's looked up by name on the metatable. Mirror that.
+    let mt = state.global.metatable_for_value(v);
+    let mm = if let Some(mt_h) = mt {
+        let k = state.global.new_string(b"__tostring", 0);
+        state.global.heap.table_get_shortstr(mt_h, k).unwrap_or(crate::contract::TValue::Nil)
+    } else {
+        crate::contract::TValue::Nil
+    };
+    if !matches!(mm, crate::contract::TValue::Nil) {
+        // Push mm + value, call with 1 arg expecting 1 result.
+        let base = state.get_top();
+        state.current_thread_mut().push(mm);
+        state.current_thread_mut().push(v);
+        let func_abs = state.frame_base_index().unwrap_or(0) + base as u32;
+        let _ = state.call_value(func_abs, 1, 1);
+        // Result is at top of stack — leave it there for the return.
+        return 1;
+    }
     let s = tv_to_string(state, 1);
     state.push_string(&s);
     1
@@ -349,6 +373,34 @@ unsafe extern "C" fn lua_rawset(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn lua_setmetatable(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
+    // Refuse if the existing metatable defines __metatable — Lua's
+    // metatable-protection rule. Raise a typed error so pcall sees
+    // false; callers without pcall propagate the error normally.
+    let t_val = state
+        .value_at_public(1)
+        .unwrap_or(crate::contract::TValue::Nil);
+    if let crate::contract::TValue::Table(th) = t_val {
+        // Intern the lookup key BEFORE fetching the metatable handle.
+        // new_string may run a GC step which can shuffle handle slots;
+        // doing it in this order means `existing_mt` is read after any
+        // such reshuffling and stays valid for the table_get_shortstr
+        // call below.
+        let key_h = state.global.new_string(b"__metatable", 0);
+        if let Some(existing_mt) = state.global.heap.table(th).metatable {
+            let field = state
+                .global
+                .heap
+                .table_get_shortstr(existing_mt, key_h)
+                .unwrap_or(crate::contract::TValue::Nil);
+            if !matches!(field, crate::contract::TValue::Nil) {
+                let msg = state
+                    .global
+                    .new_string(b"cannot change a protected metatable", 0);
+                state.raise_error_value(crate::contract::TValue::ShortString(msg));
+                return 0;
+            }
+        }
+    }
     // Input: t at 1, mt at 2. set_metatable pops top (mt) and
     // assigns it to t at `idx`. Push mt to top first.
     state.push_value(2);
@@ -402,6 +454,25 @@ unsafe extern "C" fn lua_getmetatable(state: *mut LuaState) -> std::os::raw::c_i
     let state = unsafe { &mut *state };
     if !state.get_metatable(1) {
         state.push_nil();
+        return 1;
+    }
+    // Honour __metatable: if the metatable defines a __metatable
+    // field, return THAT instead of the real metatable. This is
+    // Lua's metatable-protection convention (so a sandbox can hide
+    // its real metatable from untrusted code).
+    let mt = state.value_at_public(-1);
+    if let Some(crate::contract::TValue::Table(mt_h)) = mt {
+        let key_h = state.global.new_string(b"__metatable", 0);
+        if let Some(field) = state.global.heap.table_get_shortstr(mt_h, key_h) {
+            if !matches!(field, crate::contract::TValue::Nil) {
+                // Replace the metatable on the stack top with the
+                // __metatable field's value: pop the metatable,
+                // push the field.
+                state.set_top(state.get_top() - 1);
+                state.current_thread_mut().push(field);
+                return 1;
+            }
+        }
     }
     1
 }

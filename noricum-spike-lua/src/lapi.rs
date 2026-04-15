@@ -698,16 +698,15 @@ impl LuaState {
 
     /// If the value at `idx` has a metatable, push it onto the
     /// stack and return `true`; otherwise return `false` and
-    /// leave the stack unchanged. Matches `lua_getmetatable`.
+    /// leave the stack unchanged. Matches `lua_getmetatable`,
+    /// including the per-type fallback to `G->mt[type]` for
+    /// non-table/userdata values (so `getmetatable("")` returns
+    /// the string library's metatable).
     pub fn get_metatable(&mut self, idx: i32) -> bool {
         let Some(v) = self.value_at(idx) else {
             return false;
         };
-        let mt = match v {
-            TValue::Table(h) => self.global.heap.table(h).metatable,
-            TValue::UserData(h) => self.global.heap.userdata_get(h).metatable,
-            _ => None,
-        };
+        let mt = self.global.metatable_for_value(v);
         match mt {
             Some(mt_handle) => {
                 self.current_thread_mut().push(TValue::Table(mt_handle));

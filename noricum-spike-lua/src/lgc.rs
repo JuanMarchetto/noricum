@@ -378,6 +378,17 @@ impl GlobalState {
         for s in interned {
             self.enqueue_root(AnyHandle::String(s));
         }
+        // Per-type metatables (`G->mt[]` in C Lua). Strings install
+        // a metatable here at open_string() time so `("x"):method()`
+        // works; without rooting it the GC frees the table on the
+        // first sweep and any subsequent string method lookup walks
+        // a stale TableHandle. Same holds for any future numeric /
+        // boolean metatable a host might install.
+        let basic_mts: Vec<TableHandle> =
+            self.basic_mt.iter().copied().flatten().collect();
+        for mt in basic_mts {
+            self.enqueue_root(AnyHandle::Table(mt));
+        }
 
         self.gc_state = GcState::Propagate;
     }
