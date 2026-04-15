@@ -830,8 +830,20 @@ pub fn prefix(fs: &mut FuncState, op: UnOpr, e: &mut ExprDesc, _line: i32) {
     discharge_vars(fs, e);
     match op {
         UnOpr::Minus => {
+            // Constant-fold both numeric kinds. Without the KFlt fold,
+            // `-1.5` allocates a temp register for the LOADK + OP_UNM
+            // pair, which then disturbs the register assignment of any
+            // surrounding expression. The most visible breakage was
+            // `3.5 // -(1.5)` returning -1.5 because the compiler's
+            // freereg accounting placed the IDIV result one slot
+            // above where the caller (e.g. an OP_CALL argument list)
+            // expected it.
             if e.k == ExpKind::KInt {
                 e.ival = -e.ival;
+                return;
+            }
+            if e.k == ExpKind::KFlt {
+                e.nval = -e.nval;
                 return;
             }
             let reg = exp2anyreg(fs, e);
