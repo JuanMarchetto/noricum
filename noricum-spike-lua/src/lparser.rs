@@ -1027,8 +1027,15 @@ fn fornum(ls: &mut LexState, fs: &mut FuncState, loop_var: StringHandle) {
         back_offset,
     );
 
-    // Patch FORPREP to jump past body + FORLOOP.
-    let skip_offset = (fs.pc - forprep_pc - 1) as u32;
+    // Patch FORPREP. Bx encodes the offset from the instruction
+    // AFTER FORPREP to the position immediately AFTER the body
+    // (i.e. AT the FORLOOP). The VM adds Bx + 1 on a skip, landing
+    // at FORLOOP which detects 0 iterations and exits cleanly.
+    // Mirrors fixforjump(prep, label_after_body) in C Lua's lparser.
+    //
+    // body_len = fs.pc - (forprep_pc + 1) - 1   (subtract 1 to
+    // exclude the FORLOOP we just emitted).
+    let skip_offset = (fs.pc - forprep_pc - 2) as u32;
     let instr = &mut fs.proto.code[forprep_pc as usize];
     // Replace Bx. Bx is bits 15..31 (17 bits).
     *instr = (*instr & 0x7FFF) | (skip_offset << 15);
