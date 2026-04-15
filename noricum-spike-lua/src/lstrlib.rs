@@ -586,23 +586,12 @@ struct MatchCtx<'a> {
 }
 
 fn match_class(c: u8, class: u8) -> bool {
-    match class.to_ascii_lowercase() {
-        b'a' => c.is_ascii_alphabetic(),
-        b'c' => c.is_ascii_control(),
-        b'd' => c.is_ascii_digit(),
-        b'l' => c.is_ascii_lowercase(),
-        b'p' => c.is_ascii_punctuation(),
-        b's' => c.is_ascii_whitespace(),
-        b'u' => c.is_ascii_uppercase(),
-        b'w' => c.is_ascii_alphanumeric(),
-        b'x' => c.is_ascii_hexdigit(),
-        _ => c == class,
-    };
-    // Negation for uppercase class letter (e.g. %A = not %a).
     let r = match class.to_ascii_lowercase() {
         b'a' => c.is_ascii_alphabetic(),
         b'c' => c.is_ascii_control(),
         b'd' => c.is_ascii_digit(),
+        // %g — printable except whitespace (matches isgraph()).
+        b'g' => c.is_ascii_graphic(),
         b'l' => c.is_ascii_lowercase(),
         b'p' => c.is_ascii_punctuation(),
         b's' => c.is_ascii_whitespace(),
