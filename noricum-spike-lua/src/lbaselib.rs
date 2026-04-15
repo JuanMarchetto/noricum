@@ -136,6 +136,11 @@ unsafe extern "C" fn lua_tostring(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn lua_type(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
+    if state.get_top() < 1 {
+        let h = state.global.new_string(b"bad argument #1 to 'type' (value expected)", 0);
+        state.raise_error_value(TValue::ShortString(h));
+        return 0;
+    }
     let name = tv_type_name(state, 1);
     state.push_string(name);
     1
