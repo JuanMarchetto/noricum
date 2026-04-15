@@ -480,9 +480,17 @@ unsafe extern "C" fn lua_ipairs(state: *mut LuaState) -> std::os::raw::c_int {
 
 unsafe extern "C" fn lua_next(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
-    // If the caller didn't pass a key argument, treat it as nil so
-    // `next_key` starts from the beginning rather than popping the
-    // table and trying to look it up as a key.
+    // Argument 1 must be a table — raise a typed error instead of
+    // panicking, otherwise hosts that call `next` with a function or
+    // other non-table (e.g. fennel's `utils.hook` chain) crash the
+    // whole interpreter instead of seeing a catchable Lua error.
+    if !matches!(state.value_at_public(1), Some(crate::contract::TValue::Table(_))) {
+        let msg = state
+            .global
+            .new_string(b"bad argument #1 to 'next' (table expected)", 0);
+        state.raise_error_value(crate::contract::TValue::ShortString(msg));
+        return 0;
+    }
     if state.get_top() < 2 {
         state.push_nil();
     }

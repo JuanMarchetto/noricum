@@ -166,7 +166,51 @@ impl LuaState {
     /// message as a short string interned on the heap. This
     /// replaces the old `LuaError::Runtime(TValue::Nil)` stubs.
     fn make_lua_error(&mut self, msg: &str) -> LuaError {
-        LuaError::Runtime(make_error_string(&mut self.global, msg))
+        // Prepend "source:line: " if we can recover it from the
+        // current call frame. Matches Lua's luaG_runerror wording
+        // so errors inside third-party code (e.g. fennel) tell the
+        // reader WHERE the problem is, not just WHAT.
+        let prefixed = self.source_line_prefix().map(|p| format!("{p}{msg}"));
+        let final_msg = prefixed.as_deref().unwrap_or(msg);
+        LuaError::Runtime(make_error_string(&mut self.global, final_msg))
+    }
+
+    /// Look up the current frame's source name + line (from the
+    /// proto's line_info) and format it as "source:line: " for
+    /// error prefixing. Returns None if the frame info isn't
+    /// available.
+    fn source_line_prefix(&self) -> Option<String> {
+        let frame = self.current_call_frame()?;
+        let pc = frame.saved_pc.saturating_sub(1) as i32;
+        let closure_h = match self.current_thread().stack[frame.func as usize] {
+            TValue::LuaClosure(h) => h,
+            _ => return None,
+        };
+        let proto_h = self.global.heap.lclosure(closure_h).proto;
+        let proto = self.global.heap.proto(proto_h);
+        // Inline luaG_getfuncline: walk abs_line_info checkpoints +
+        // relative deltas. Matches ldblib::line_for_pc.
+        let mut base_pc: i32 = -1;
+        let mut line: i32 = proto.line_defined;
+        for abs in &proto.abs_line_info {
+            if abs.pc <= pc {
+                base_pc = abs.pc;
+                line = abs.line;
+            } else {
+                break;
+            }
+        }
+        for i in (base_pc + 1)..=pc {
+            if let Some(&d) = proto.line_info.get(i as usize) {
+                if d as i8 != i8::MIN {
+                    line += d as i8 as i32;
+                }
+            }
+        }
+        let src = proto.source.as_ref()?;
+        let src_str = String::from_utf8_lossy(&self.global.heap.string(*src).bytes).to_string();
+        let src_clean = src_str.strip_prefix('@').unwrap_or(&src_str);
+        Some(format!("{src_clean}:{line}: "))
     }
 }
 
@@ -1851,9 +1895,12 @@ impl LuaState {
                         .global
                         .get_metamethod(target, TagMethod::Index);
                     if matches!(tm, TValue::Nil) {
-                        return Err(self.make_lua_error(
-                            "attempt to index a non-table value",
-                        ));
+                        let tn = target.type_name();
+                        let msg = format!(
+                            "attempt to index a {} value",
+                            tn
+                        );
+                        return Err(self.make_lua_error(&msg));
                     }
                     if Self::is_callable(tm) {
                         return self.call_index_metamethod(
@@ -1913,9 +1960,12 @@ impl LuaState {
                         .global
                         .get_metamethod(target, TagMethod::NewIndex);
                     if matches!(tm, TValue::Nil) {
-                        return Err(self.make_lua_error(
-                            "attempt to index a non-table value",
-                        ));
+                        let tn = target.type_name();
+                        let msg = format!(
+                            "attempt to index a {} value",
+                            tn
+                        );
+                        return Err(self.make_lua_error(&msg));
                     }
                     if Self::is_callable(tm) {
                         return self.call_newindex_metamethod(
