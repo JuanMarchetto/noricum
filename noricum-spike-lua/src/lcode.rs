@@ -547,7 +547,19 @@ pub fn exp2nextreg_at(fs: &mut FuncState, e: &mut ExprDesc, reg: u8) {
 pub fn exp2anyreg(fs: &mut FuncState, e: &mut ExprDesc) -> u8 {
     discharge_vars(fs, e);
     if e.k == ExpKind::NonReloc {
-        return e.info as u8;
+        if e.t == NO_JUMP && e.f == NO_JUMP {
+            return e.info as u8;
+        }
+        // NonReloc carrying t/f jump lists from a short-circuit
+        // chain (and/or/comparison). Materialize the lists into the
+        // existing register so the value is correct regardless of
+        // which control-flow path produced it. Without this, an
+        // expression like `(1 or false) == true` left a TESTSET
+        // with A=NO_REG dangling and the VM crashed indexing
+        // R[255]. Mirrors C Lua's luaK_exp2anyreg branching.
+        let reg = e.info as u8;
+        materialize_jump_lists(fs, e, reg);
+        return reg;
     }
     exp2nextreg(fs, e);
     e.info as u8
@@ -1104,17 +1116,18 @@ pub fn go_if_true(fs: &mut FuncState, e: &mut ExprDesc) {
             negate_cmp_condition(fs, e.info);
             pc = e.info;
         }
-        ExpKind::True | ExpKind::KInt | ExpKind::KFlt | ExpKind::KStr | ExpKind::K => {
-            pc = NO_JUMP;
-        }
         ExpKind::Nil | ExpKind::False => {
             pc = emit_jump(fs);
         }
         _ => {
+            // Constants, locals, and other producers all go through
+            // the TESTSET path. Folding KInt/KFlt/KStr to NO_JUMP
+            // here was wrong for `value AND x`: when value is truthy
+            // the result must be x, when falsy the result must be
+            // value (with TESTSET copying value to the destination).
+            // Emitting nothing meant the materialized fall-back was
+            // a literal `true`/`false`, not the original value.
             let reg = exp2anyreg(fs, e);
-            // Preserve existing t/f jump lists. The previous
-            // `*e = ExprDesc::init(...)` wiped them, leaving
-            // any LHS-of-AND/OR jump unpatched.
             let saved_t = e.t;
             let saved_f = e.f;
             *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
@@ -1175,12 +1188,13 @@ pub fn go_if_false(fs: &mut FuncState, e: &mut ExprDesc) {
         ExpKind::Nil | ExpKind::False => {
             pc = NO_JUMP;
         }
-        ExpKind::True | ExpKind::KInt | ExpKind::KFlt | ExpKind::KStr | ExpKind::K => {
-            pc = emit_jump(fs);
-        }
         _ => {
+            // All non-falsy producers route through TESTSET so the
+            // original VALUE (not a coerced boolean) is what survives
+            // when the OR short-circuits. Folding the literal-truthy
+            // cases to an unconditional JMP made `1 or X` evaluate
+            // to `true` instead of `1`.
             let reg = exp2anyreg(fs, e);
-            // Preserve existing jump lists across the reset.
             let saved_t = e.t;
             let saved_f = e.f;
             *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
