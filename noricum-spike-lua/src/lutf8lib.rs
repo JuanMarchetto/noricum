@@ -155,6 +155,9 @@ unsafe extern "C" fn utf8_offset(state: *mut LuaState) -> std::os::raw::c_int {
     let n = state.to_integer_x(2).unwrap_or(0);
     let i = state.to_integer_x(3).unwrap_or(if n >= 0 { 1 } else { bytes.len() as i64 + 1 });
     let mut pos = (i - 1) as isize;
+    // C Lua's `utf8.offset` returns nil when n cannot be reached in
+    // either direction (instead of clamping). Track exhaustion and
+    // push nil if the requested character wasn't found.
     if n > 0 {
         let mut remaining = n - 1;
         while remaining > 0 && (pos as usize) < bytes.len() {
@@ -165,8 +168,11 @@ unsafe extern "C" fn utf8_offset(state: *mut LuaState) -> std::os::raw::c_int {
                 break;
             }
         }
+        if remaining > 0 {
+            state.push_nil();
+            return 1;
+        }
     } else if n < 0 {
-        // Walk backwards.
         let mut remaining = -n;
         while remaining > 0 && pos > 0 {
             pos -= 1;
@@ -174,6 +180,10 @@ unsafe extern "C" fn utf8_offset(state: *mut LuaState) -> std::os::raw::c_int {
                 pos -= 1;
             }
             remaining -= 1;
+        }
+        if remaining > 0 {
+            state.push_nil();
+            return 1;
         }
     }
     state.push_integer((pos + 1) as i64);
