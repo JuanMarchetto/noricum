@@ -266,9 +266,26 @@ unsafe extern "C" fn math_fmod(state: *mut LuaState) -> std::os::raw::c_int {
 unsafe extern "C" fn math_modf(state: *mut LuaState) -> std::os::raw::c_int {
     let state = unsafe { &mut *state };
     let x = state.to_number_x(1).unwrap_or(0.0);
-    let int_part = x.trunc();
-    let frac_part = x - int_part;
-    if int_part >= i64::MIN as f64 && int_part <= i64::MAX as f64 {
+    // C standard: modf(inf, &i) → i=inf, returns 0; modf(NaN, &i) →
+    // i=NaN, returns NaN. Lua's lmathlib relies on this: math.modf
+    // on infinity must return (inf, 0.0). Naive `x - x.trunc()` gives
+    // (inf, NaN) because inf - inf = NaN. Special-case the
+    // non-finite paths to match C semantics.
+    let (int_part, frac_part) = if x.is_nan() {
+        (f64::NAN, f64::NAN)
+    } else if x.is_infinite() {
+        (x, 0.0)
+    } else {
+        let ip = x.trunc();
+        (ip, x - ip)
+    };
+    // Push the integer part as an integer when it's exactly
+    // representable in i64; otherwise as a float (C Lua does the same
+    // via lua_Integer round-trip check).
+    if int_part.is_finite()
+        && int_part >= i64::MIN as f64
+        && int_part <= i64::MAX as f64
+    {
         state.push_integer(int_part as i64);
     } else {
         state.push_number(int_part);

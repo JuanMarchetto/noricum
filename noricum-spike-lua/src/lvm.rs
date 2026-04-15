@@ -2273,18 +2273,115 @@ fn lua_raw_equals(a: &TValue, b: &TValue) -> Option<bool> {
 /// `Ok(Some(bool))` for decidable cases, `Ok(None)` to signal
 /// "needs __lt metamethod", `Err` never in this path.
 fn lua_raw_less_than(a: &TValue, b: &TValue) -> Option<bool> {
-    if let (Some(na), Some(nb)) = (to_number_ns(a), to_number_ns(b)) {
-        return Some(na < nb);
+    match (a, b) {
+        // Same-domain comparisons stay precise.
+        (TValue::Integer(i1), TValue::Integer(i2)) => Some(i1 < i2),
+        (TValue::Number(f1), TValue::Number(f2)) => {
+            if f1.is_nan() || f2.is_nan() { Some(false) } else { Some(f1 < f2) }
+        }
+        // Cross-domain: must avoid losing precision when the integer
+        // is near i64::MIN/MAX (where the float promotion would
+        // collapse adjacent integers onto the same f64). Mirrors
+        // C Lua's LTintfloat / LTfloatint helpers.
+        (TValue::Integer(i), TValue::Number(f)) => Some(int_less_than_float(*i, *f)),
+        (TValue::Number(f), TValue::Integer(i)) => Some(float_less_than_int(*f, *i)),
+        _ => None,
     }
-    None
 }
 
-/// Raw `<=` check — same shape as [`lua_raw_less_than`].
 fn lua_raw_less_equal(a: &TValue, b: &TValue) -> Option<bool> {
-    if let (Some(na), Some(nb)) = (to_number_ns(a), to_number_ns(b)) {
-        return Some(na <= nb);
+    match (a, b) {
+        (TValue::Integer(i1), TValue::Integer(i2)) => Some(i1 <= i2),
+        (TValue::Number(f1), TValue::Number(f2)) => {
+            if f1.is_nan() || f2.is_nan() { Some(false) } else { Some(f1 <= f2) }
+        }
+        (TValue::Integer(i), TValue::Number(f)) => Some(int_le_float(*i, *f)),
+        (TValue::Number(f), TValue::Integer(i)) => Some(float_le_int(*f, *i)),
+        _ => None,
     }
-    None
+}
+
+/// Precise i < f. Returns false on NaN. Mirrors C Lua's
+/// `LTintfloat`: convert i to float (lossy near i64 limits),
+/// compare; ties broken by comparing the integer part of f against i.
+fn int_less_than_float(i: i64, f: f64) -> bool {
+    if f.is_nan() {
+        return false;
+    }
+    // Fast path: f outside i64 range — answer is determined by sign.
+    if f >= 9223372036854775808.0 {
+        return true;
+    }
+    if f < -9223372036854775808.0 {
+        return false;
+    }
+    // f fits in i64 range; truncate and compare. If f is non-integer,
+    // use the truncated comparison and adjust by sign of fractional
+    // part (Lua's logic).
+    let fi = f.trunc() as i64;
+    if i < fi { true }
+    else if i > fi { false }
+    else {
+        // i == truncated(f); the answer is "i < f" which is true iff
+        // f has a positive fractional part.
+        f > (fi as f64) || (f - (fi as f64)) > 0.0
+    }
+}
+
+fn float_less_than_int(f: f64, i: i64) -> bool {
+    if f.is_nan() {
+        return false;
+    }
+    if f >= 9223372036854775808.0 {
+        return false;
+    }
+    if f < -9223372036854775808.0 {
+        return true;
+    }
+    let fi = f.trunc() as i64;
+    if fi < i { true }
+    else if fi > i { false }
+    else {
+        // fi == i; answer is "f < i" which is true iff f has a
+        // negative fractional part.
+        (f - (fi as f64)) < 0.0
+    }
+}
+
+fn int_le_float(i: i64, f: f64) -> bool {
+    if f.is_nan() {
+        return false;
+    }
+    if f >= 9223372036854775808.0 {
+        return true;
+    }
+    if f < -9223372036854775808.0 {
+        return false;
+    }
+    let fi = f.trunc() as i64;
+    if i < fi { true }
+    else if i > fi { false }
+    else {
+        f >= (fi as f64) && (f - (fi as f64)) >= 0.0
+    }
+}
+
+fn float_le_int(f: f64, i: i64) -> bool {
+    if f.is_nan() {
+        return false;
+    }
+    if f >= 9223372036854775808.0 {
+        return false;
+    }
+    if f < -9223372036854775808.0 {
+        return true;
+    }
+    let fi = f.trunc() as i64;
+    if fi < i { true }
+    else if fi > i { false }
+    else {
+        (f - (fi as f64)) <= 0.0
+    }
 }
 
 #[cfg(test)]
