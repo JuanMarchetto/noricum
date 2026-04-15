@@ -976,14 +976,35 @@ impl LuaState {
                     return Ok(());
                 }
                 OP_SETLIST_U8 => {
-                    // R(A)[vC+i] := R(A+i), 1 <= i <= vB.
-                    // vB == 0 means "up to top".
-                    // vC is the base offset (0-based in the
-                    // instruction, but array indices are 1-based
-                    // at the Lua level).
+                    // R(A)[nelems+i] := R(A+i), 1 <= i <= vB.
+                    // vB == 0 means MULTRET (consume up to top).
+                    // vC carries `nelems` — the cumulative count of
+                    // array entries committed BEFORE this chunk.
+                    // When k=1 the following OP_EXTRAARG carries the
+                    // high bits of nelems (so we can index past 255).
+                    // Mirrors `OP_SETLIST` in lvm.c.
                     let a = getarg_a(instruction) as u32;
                     let vb = crate::lopcodes::getarg_vb(instruction) as u32;
-                    let vc = crate::lopcodes::getarg_vc(instruction) as u32;
+                    let mut nelems = crate::lopcodes::getarg_vc(instruction) as u32;
+                    let k = crate::lopcodes::getarg_k(instruction);
+                    if k {
+                        // Combine high bits from the following EXTRAARG
+                        // and skip past it so the next iteration doesn't
+                        // re-dispatch a stray EXTRAARG.
+                        let frame = self.current_call_frame()
+                            .expect("SETLIST: frame vanished");
+                        let pc = frame.saved_pc as usize;
+                        let proto_h = self.global.heap.lclosure(
+                            match self.current_thread().stack[frame.func as usize] {
+                                TValue::LuaClosure(h) => h,
+                                _ => unreachable!("SETLIST: frame func is not LuaClosure"),
+                            }
+                        ).proto;
+                        let extraarg = self.global.heap.proto(proto_h).code[pc];
+                        let ax = crate::lopcodes::getarg_ax(extraarg) as u32;
+                        nelems |= ax << 8;
+                        self.skip_next_instruction();
+                    }
                     let table_handle = match self.current_thread().stack[(base + a) as usize] {
                         TValue::Table(h) => h,
                         _ => return Err(self.make_lua_error(
@@ -999,7 +1020,7 @@ impl LuaState {
                     for i in 1..=n {
                         let v = self.current_thread().stack[(base + a + i) as usize];
                         self.global
-                            .table_set_int(table_handle, (vc + i) as i64, v);
+                            .table_set_int(table_handle, (nelems + i) as i64, v);
                     }
                     if vb == 0 {
                         let caller_top = self

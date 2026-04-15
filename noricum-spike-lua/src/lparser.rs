@@ -1447,6 +1447,15 @@ fn constructor(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
                 lcode::exp2nextreg(fs, &mut val);
                 array_count += 1;
                 array_pending += 1;
+                // Flush every LFIELDS_PER_FLUSH positionals — SETLIST
+                // can hold at most 255 entries in its 8-bit B field
+                // (and matching the C reference's chunking keeps
+                // bytecode size reasonable for >50-entry constructors).
+                if array_pending >= LFIELDS_PER_FLUSH {
+                    emit_setlist_chunk(fs, reg, array_pending, array_count);
+                    fs.freereg = (reg + 1) as u8;
+                    array_pending = 0;
+                }
             }
         }
         if !testnext(ls, b',' as i32) && !testnext(ls, b';' as i32) {
@@ -1472,38 +1481,78 @@ fn constructor(ls: &mut LexState, fs: &mut FuncState, e: &mut ExprDesc) {
             }
             _ => {}
         }
-        // Emit SETLIST with vB=0 (multret) and vC=0 (no offset).
-        // The earlier non-multret positional fields already sit at
-        // R(A+1)..R(A+array_count); the multret tail extends the
-        // top, and SETLIST consumes everything up to top.
-        lcode::emit(
-            fs,
-            crate::lopcodes::create_vabck(
-                crate::lopcodes::OpCode::OP_SETLIST,
-                reg,
-                0,
-                0,
-                false,
-            ),
-        );
-        let _ = array_count;
+        // Multret tail. C is the offset of where these entries land;
+        // entries already-flushed sit below at indices 1..array_count,
+        // so the new multret tail starts at array_count + 1.
+        emit_setlist_chunk(fs, reg, 0, array_count);
         fs.freereg = (reg + 1) as u8;
     } else if array_pending > 0 {
-        lcode::emit(
-            fs,
-            crate::lopcodes::create_vabck(
-                crate::lopcodes::OpCode::OP_SETLIST,
-                reg,
-                array_pending,
-                0,
-                false,
-            ),
-        );
+        emit_setlist_chunk(fs, reg, array_pending, array_count);
         fs.freereg = (reg + 1) as u8;
-        let _ = array_count;
     }
 
     *e = ExprDesc::init(ExpKind::NonReloc, reg as i32);
+}
+
+/// Lua's `LFIELDS_PER_FLUSH` (lparser.h). Constructor entries are
+/// flushed into the table via `OP_SETLIST` in chunks of this size
+/// so the 8-bit B field never overflows and the runtime stays
+/// byte-compatible with C Lua's chunking.
+const LFIELDS_PER_FLUSH: u32 = 50;
+
+/// Emit one OP_SETLIST instruction. Mirrors `luaK_setlist` in lcode.c
+/// exactly: `B = tostore` (entries in this chunk; 0 = MULTRET tail
+/// reading up to top), `C = nelems` (cumulative count of entries
+/// already committed BEFORE this chunk). The VM computes the final
+/// indices as `nelems+1..nelems+tostore` (or `nelems+1..nelems+top-base-1`
+/// for MULTRET).
+///
+/// When `nelems > 255` an OP_EXTRAARG is appended carrying the high
+/// bits and the SETLIST is emitted with `k=1`.
+///
+/// Arguments:
+///   `base` — register holding the table being filled (= A).
+///   `count` — number of entries in this chunk; 0 means MULTRET tail.
+///   `total_so_far` — cumulative count of array entries committed
+///     INCLUDING this chunk (so entries committed BEFORE = total - count).
+fn emit_setlist_chunk(
+    fs: &mut FuncState,
+    base: u32,
+    count: u32,
+    total_so_far: u32,
+) {
+    let nelems_before = total_so_far.saturating_sub(count);
+    if nelems_before <= 0xFF {
+        lcode::emit(
+            fs,
+            crate::lopcodes::create_vabck(
+                crate::lopcodes::OpCode::OP_SETLIST,
+                base,
+                count,
+                nelems_before,
+                false,
+            ),
+        );
+    } else {
+        lcode::emit(
+            fs,
+            crate::lopcodes::create_vabck(
+                crate::lopcodes::OpCode::OP_SETLIST,
+                base,
+                count,
+                nelems_before & 0xFF,
+                true,
+            ),
+        );
+        lcode::emit(
+            fs,
+            crate::lopcodes::create_abx(
+                crate::lopcodes::OpCode::OP_EXTRAARG,
+                0,
+                nelems_before >> 8,
+            ),
+        );
+    }
 }
 
 /// Peek whether the token *after* the current TK_NAME is `=`.
