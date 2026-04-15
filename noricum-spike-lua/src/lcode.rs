@@ -550,16 +550,18 @@ pub fn exp2anyreg(fs: &mut FuncState, e: &mut ExprDesc) -> u8 {
         if e.t == NO_JUMP && e.f == NO_JUMP {
             return e.info as u8;
         }
-        // NonReloc carrying t/f jump lists from a short-circuit
-        // chain (and/or/comparison). Materialize the lists into the
-        // existing register so the value is correct regardless of
-        // which control-flow path produced it. Without this, an
-        // expression like `(1 or false) == true` left a TESTSET
-        // with A=NO_REG dangling and the VM crashed indexing
-        // R[255]. Mirrors C Lua's luaK_exp2anyreg branching.
+        // NonReloc with pending t/f jump lists. If the existing
+        // register is a TEMP (above nvarstack) we can materialize
+        // the lists into it and reuse the slot. If it's a LOCAL,
+        // we cannot scribble over the user's named variable —
+        // route through exp2nextreg to get a fresh slot.
+        // Mirrors C Lua's `luaK_exp2anyreg` local-check.
         let reg = e.info as u8;
-        materialize_jump_lists(fs, e, reg);
-        return reg;
+        if reg >= nvarstack(fs) {
+            materialize_jump_lists(fs, e, reg);
+            return reg;
+        }
+        // Fall through: allocate a new slot and discharge there.
     }
     exp2nextreg(fs, e);
     e.info as u8
@@ -967,6 +969,14 @@ pub fn posfix(fs: &mut FuncState, op: BinOpr, e1: &mut ExprDesc, e2: &mut ExprDe
                 let target = e1.info as u8;
                 if target >= nvarstack(fs) {
                     discharge_to_reg(fs, e2, target);
+                    // The OR/AND short-circuit result lives at
+                    // `target`. go_if_true freed that slot when it
+                    // was just the LHS literal/temp; now that the
+                    // RHS occupies it too, push freereg back above
+                    // it so subsequent expressions don't clobber.
+                    if target + 1 > fs.freereg {
+                        fs.freereg = target + 1;
+                    }
                 }
             }
             concat_jmp(fs, &mut e2.f, e1.f);
@@ -978,6 +988,9 @@ pub fn posfix(fs: &mut FuncState, op: BinOpr, e1: &mut ExprDesc, e2: &mut ExprDe
                 let target = e1.info as u8;
                 if target >= nvarstack(fs) {
                     discharge_to_reg(fs, e2, target);
+                    if target + 1 > fs.freereg {
+                        fs.freereg = target + 1;
+                    }
                 }
             }
             concat_jmp(fs, &mut e2.t, e1.t);
