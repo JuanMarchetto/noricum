@@ -1013,12 +1013,17 @@ fn code_arith(fs: &mut FuncState, op: BinOpr, e1: &mut ExprDesc, e2: &mut ExprDe
             return;
         }
     }
-    let r1 = exp2anyreg(fs, e1);
+    // Discharge e2 BEFORE e1 so e1's temp ends up topmost — mirrors
+    // C Lua's `codebinexpval`. If we discharged e1 first and e2 was
+    // already on the stack below, e1 would sit above e2 and the
+    // max-first free-order below would strand e2's slot as a hole,
+    // pushing the result one slot too high (breaking call arg
+    // contiguity and nested expressions like `1 << (x - 1)`).
     let r2 = exp2anyreg(fs, e2);
-    // Free operand temps BEFORE allocating the result slot so
-    // the result reuses the topmost of the freed slots.
-    free_exp(fs, e2);
-    free_exp(fs, e1);
+    let r1 = exp2anyreg(fs, e1);
+    // Free both temps in max-first order so `freereg` collapses
+    // correctly regardless of which operand ended up on top.
+    free_exps_max_first(fs, e1, e2);
     let dest = fs.freereg;
     emit_abc(
         fs,
@@ -1031,6 +1036,21 @@ fn code_arith(fs: &mut FuncState, op: BinOpr, e1: &mut ExprDesc, e2: &mut ExprDe
     e1.k = ExpKind::NonReloc;
     e1.info = dest as i32;
     reserve_regs(fs, 1);
+}
+
+/// Port of C Lua's `freeexps`: free both operand temps, topmost
+/// first, so freereg collapses in the correct order. Silently
+/// skips operands that aren't temps (locals, constants, etc.).
+fn free_exps_max_first(fs: &mut FuncState, e1: &ExprDesc, e2: &ExprDesc) {
+    let r1 = if e1.k == ExpKind::NonReloc { e1.info } else { -1 };
+    let r2 = if e2.k == ExpKind::NonReloc { e2.info } else { -1 };
+    let (hi, lo) = if r1 > r2 { (r1, r2) } else { (r2, r1) };
+    if hi >= 0 {
+        free_reg(fs, hi as u8);
+    }
+    if lo >= 0 {
+        free_reg(fs, lo as u8);
+    }
 }
 
 fn fold_int(op: BinOpr, a: LuaInteger, b: LuaInteger) -> Option<LuaInteger> {

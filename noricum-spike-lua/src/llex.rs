@@ -292,7 +292,10 @@ impl<'a> LexState<'a> {
     fn parse_lua_integer(s: &str) -> Option<LuaInteger> {
         let s = s.trim();
         if s.starts_with("0x") || s.starts_with("0X") {
-            i64::from_str_radix(&s[2..], 16).ok()
+            // Lua 5.4 accepts any 64-bit hex pattern. Parse through
+            // u64 so values ≥ 2^63 wrap to their two's-complement
+            // i64 representation (e.g. 0xFFFFFFFFFFFFFFFF → -1).
+            u64::from_str_radix(&s[2..], 16).ok().map(|u| u as i64)
         } else {
             s.parse::<i64>().ok()
         }

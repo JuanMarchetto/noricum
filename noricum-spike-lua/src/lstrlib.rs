@@ -31,6 +31,9 @@ pub fn open_string(state: &mut LuaState, globals: TableHandle) -> TableHandle {
     register(state, string_t, "gsub", str_gsub);
     register(state, string_t, "concat", str_concat_thin);
     register(state, string_t, "dump", str_dump);
+    register(state, string_t, "pack", str_pack);
+    register(state, string_t, "unpack", str_unpack);
+    register(state, string_t, "packsize", str_packsize);
 
     // Install as `string` in globals.
     let name = state.global.new_string(b"string", 0);
@@ -1150,6 +1153,540 @@ unsafe extern "C" fn str_dump(state: *mut LuaState) -> std::os::raw::c_int {
     let strip = state.to_boolean(2);
     let bytes = crate::ldump::dump(&state.global, proto, strip);
     let _ = state.push_lstring(&bytes);
+    1
+}
+
+// ---- string.pack / string.unpack / string.packsize -----------------------
+//
+// Lua 5.4 binary pack DSL. Format codes mirror `lstrlib.c::str_pack`:
+// b/B (i8/u8), h/H (i16/u16), i/I[n] (n-byte int, default 4), l/L (i64/u64),
+// j/J (lua_Integer i64 / lua_Unsigned u64), T (size_t u64), f (f32),
+// d/n (f64), s[n] (length-prefixed string, default prefix is size_t),
+// z (zero-terminated string), c[n] (fixed n-byte string), x (padding byte),
+// Xop (align to op's size), ` ` (ignored), < > = (endianness), ![n]
+// (max alignment).
+
+const NATIVE_INT_SIZE: usize = 4;
+const NATIVE_SIZE_T: usize = 8;
+const NATIVE_MAX_ALIGN: usize = 8;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum PackEndian {
+    Little,
+    Big,
+}
+
+const NATIVE_ENDIAN: PackEndian = if cfg!(target_endian = "little") {
+    PackEndian::Little
+} else {
+    PackEndian::Big
+};
+
+struct PackHeader {
+    endian: PackEndian,
+    max_align: usize,
+}
+
+impl PackHeader {
+    fn new() -> Self {
+        Self {
+            endian: NATIVE_ENDIAN,
+            max_align: NATIVE_MAX_ALIGN,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum PackOp {
+    Int { size: usize, signed: bool },
+    Float,
+    Double,
+    Char(usize),          // c[n]: fixed bytes (n required)
+    String(usize),        // s[n]: length prefix of n bytes
+    ZeroStr,              // z
+    Padding,              // x
+    Align(usize),         // X op: align to size
+    Done,
+}
+
+fn pack_err(state: &mut LuaState, msg: &str) {
+    let h = state.global.new_string(msg.as_bytes(), 0);
+    state.raise_error_value(TValue::ShortString(h));
+}
+
+fn parse_opt_size(fmt: &[u8], pos: &mut usize, default: usize, max: usize) -> Result<usize, ()> {
+    let mut have_digit = false;
+    let mut n: usize = 0;
+    while *pos < fmt.len() && fmt[*pos].is_ascii_digit() {
+        n = n.saturating_mul(10).saturating_add((fmt[*pos] - b'0') as usize);
+        *pos += 1;
+        have_digit = true;
+        if n > max {
+            return Err(());
+        }
+    }
+    Ok(if have_digit { n } else { default })
+}
+
+fn next_op(
+    fmt: &[u8],
+    pos: &mut usize,
+    header: &mut PackHeader,
+) -> Result<(Option<PackOp>, usize), String> {
+    while *pos < fmt.len() {
+        let c = fmt[*pos];
+        *pos += 1;
+        match c {
+            b' ' => continue,
+            b'<' => {
+                header.endian = PackEndian::Little;
+                continue;
+            }
+            b'>' => {
+                header.endian = PackEndian::Big;
+                continue;
+            }
+            b'=' => {
+                header.endian = NATIVE_ENDIAN;
+                continue;
+            }
+            b'!' => {
+                let n = parse_opt_size(fmt, pos, NATIVE_MAX_ALIGN, 16)
+                    .map_err(|_| "integral size out of limits".to_string())?;
+                if n == 0 {
+                    return Err("integral size out of limits".into());
+                }
+                header.max_align = n;
+                continue;
+            }
+            b'b' => return Ok((Some(PackOp::Int { size: 1, signed: true }), 1)),
+            b'B' => return Ok((Some(PackOp::Int { size: 1, signed: false }), 1)),
+            b'h' => return Ok((Some(PackOp::Int { size: 2, signed: true }), 2)),
+            b'H' => return Ok((Some(PackOp::Int { size: 2, signed: false }), 2)),
+            b'i' | b'I' => {
+                let sz = parse_opt_size(fmt, pos, NATIVE_INT_SIZE, 16)
+                    .map_err(|_| "integral size out of limits".to_string())?;
+                if sz == 0 {
+                    return Err("integral size (0) out of limits".into());
+                }
+                return Ok((
+                    Some(PackOp::Int { size: sz, signed: c == b'i' }),
+                    sz,
+                ));
+            }
+            b'l' => return Ok((Some(PackOp::Int { size: 8, signed: true }), 8)),
+            b'L' => return Ok((Some(PackOp::Int { size: 8, signed: false }), 8)),
+            b'j' => return Ok((Some(PackOp::Int { size: 8, signed: true }), 8)),
+            b'J' => return Ok((Some(PackOp::Int { size: 8, signed: false }), 8)),
+            b'T' => return Ok((Some(PackOp::Int { size: NATIVE_SIZE_T, signed: false }), NATIVE_SIZE_T)),
+            b'f' => return Ok((Some(PackOp::Float), 4)),
+            b'd' | b'n' => return Ok((Some(PackOp::Double), 8)),
+            b'c' => {
+                let n = parse_opt_size(fmt, pos, usize::MAX, usize::MAX / 2)
+                    .map_err(|_| "string length out of limits".to_string())?;
+                if n == usize::MAX {
+                    return Err("missing size for format option 'c'".into());
+                }
+                return Ok((Some(PackOp::Char(n)), 1));
+            }
+            b's' => {
+                let sz = parse_opt_size(fmt, pos, NATIVE_SIZE_T, 16)
+                    .map_err(|_| "integral size out of limits".to_string())?;
+                if sz == 0 {
+                    return Err("integral size (0) out of limits".into());
+                }
+                return Ok((Some(PackOp::String(sz)), sz));
+            }
+            b'z' => return Ok((Some(PackOp::ZeroStr), 1)),
+            b'x' => return Ok((Some(PackOp::Padding), 1)),
+            b'X' => {
+                // Peek at next op's size for alignment (without consuming args).
+                let mut probe_pos = *pos;
+                let (probe_op, probe_sz) = next_op(fmt, &mut probe_pos, &mut header.clone())
+                    .map_err(|e| e)?;
+                if probe_op.is_none() {
+                    return Err("invalid next option for 'X'".into());
+                }
+                *pos = probe_pos;
+                return Ok((Some(PackOp::Align(probe_sz)), 1));
+            }
+            _ => {
+                return Err(format!("invalid format option '{}'", c as char));
+            }
+        }
+    }
+    Ok((None, 0))
+}
+
+impl Clone for PackHeader {
+    fn clone(&self) -> Self {
+        Self {
+            endian: self.endian,
+            max_align: self.max_align,
+        }
+    }
+}
+
+fn align_padding(total: usize, size: usize, max_align: usize) -> usize {
+    let a = size.min(max_align).max(1);
+    if a <= 1 {
+        return 0;
+    }
+    // Only power-of-two alignments are honored.
+    if a & (a - 1) != 0 {
+        return 0;
+    }
+    let rem = total & (a - 1);
+    if rem == 0 { 0 } else { a - rem }
+}
+
+fn pack_int(out: &mut Vec<u8>, value: u64, size: usize, endian: PackEndian, signed: bool, src_is_signed: bool) -> Result<(), String> {
+    // Range check (approximates C's check; for now we just truncate).
+    if size > 8 {
+        // Extend with sign/zero bits.
+        let mut bytes = [0u8; 16];
+        let sign_ext = if signed && src_is_signed && (value as i64) < 0 { 0xFFu8 } else { 0 };
+        for i in 0..8 {
+            bytes[i] = ((value >> (i * 8)) & 0xFF) as u8;
+        }
+        for b in bytes.iter_mut().skip(8).take(size - 8) {
+            *b = sign_ext;
+        }
+        match endian {
+            PackEndian::Little => out.extend_from_slice(&bytes[..size]),
+            PackEndian::Big => {
+                for i in (0..size).rev() {
+                    out.push(bytes[i]);
+                }
+            }
+        }
+        return Ok(());
+    }
+    let mut buf = [0u8; 8];
+    for i in 0..size {
+        buf[i] = ((value >> (i * 8)) & 0xFF) as u8;
+    }
+    // Overflow check: for signed, the value must fit in `size` bytes
+    // using two's complement. For unsigned, top bytes must be zero.
+    if size < 8 {
+        let mask: u64 = if size == 0 { 0 } else { !0u64 >> (64 - size * 8) };
+        if signed {
+            let sign_bit = 1u64 << (size * 8 - 1);
+            let signed_min_mask = !mask;
+            let v_signed = value as i64;
+            let fits = if src_is_signed && v_signed < 0 {
+                (value | mask) == !0u64 && (value & sign_bit) != 0
+            } else {
+                value & signed_min_mask == 0 && (value & sign_bit) == 0
+            };
+            if !fits {
+                return Err(format!("integer overflow: {} does not fit in {} bytes", value as i64, size));
+            }
+        } else if value & !mask != 0 {
+            return Err(format!("unsigned overflow"));
+        }
+    }
+    match endian {
+        PackEndian::Little => out.extend_from_slice(&buf[..size]),
+        PackEndian::Big => {
+            for i in (0..size).rev() {
+                out.push(buf[i]);
+            }
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "C" fn str_pack(state: *mut LuaState) -> std::os::raw::c_int {
+    let state = unsafe { &mut *state };
+    let fmt = arg_bytes(state, 1).unwrap_or_default();
+    let mut header = PackHeader::new();
+    let mut pos = 0usize;
+    let mut out: Vec<u8> = Vec::new();
+    let mut arg_idx: i32 = 2;
+    loop {
+        let op = match next_op(&fmt, &mut pos, &mut header) {
+            Ok((Some(op), _)) => op,
+            Ok((None, _)) => break,
+            Err(e) => {
+                pack_err(state, &e);
+                return 0;
+            }
+        };
+        let size = match op {
+            PackOp::Int { size, .. } => size,
+            PackOp::Float => 4,
+            PackOp::Double => 8,
+            PackOp::Char(n) => n,
+            PackOp::String(n) => n,
+            PackOp::ZeroStr | PackOp::Padding => 1,
+            PackOp::Align(sz) => sz,
+            PackOp::Done => break,
+        };
+        let pad = align_padding(out.len(), size, header.max_align);
+        for _ in 0..pad {
+            out.push(0);
+        }
+        match op {
+            PackOp::Int { size, signed } => {
+                let n = state.to_integer_x(arg_idx).unwrap_or(0);
+                if let Err(e) = pack_int(&mut out, n as u64, size, header.endian, signed, true) {
+                    pack_err(state, &e);
+                    return 0;
+                }
+                arg_idx += 1;
+            }
+            PackOp::Float => {
+                let n = state.to_number_x(arg_idx).unwrap_or(0.0) as f32;
+                let bits = n.to_bits();
+                let bytes = match header.endian {
+                    PackEndian::Little => bits.to_le_bytes(),
+                    PackEndian::Big => bits.to_be_bytes(),
+                };
+                out.extend_from_slice(&bytes);
+                arg_idx += 1;
+            }
+            PackOp::Double => {
+                let n = state.to_number_x(arg_idx).unwrap_or(0.0);
+                let bits = n.to_bits();
+                let bytes = match header.endian {
+                    PackEndian::Little => bits.to_le_bytes(),
+                    PackEndian::Big => bits.to_be_bytes(),
+                };
+                out.extend_from_slice(&bytes);
+                arg_idx += 1;
+            }
+            PackOp::Char(n) => {
+                let s = state.to_lstring(arg_idx).map(|b| b.to_vec()).unwrap_or_default();
+                if s.len() > n {
+                    pack_err(state, "string longer than given size");
+                    return 0;
+                }
+                out.extend_from_slice(&s);
+                for _ in s.len()..n {
+                    out.push(0);
+                }
+                arg_idx += 1;
+            }
+            PackOp::String(sz) => {
+                let s = state.to_lstring(arg_idx).map(|b| b.to_vec()).unwrap_or_default();
+                let max: u64 = if sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)) - 1 };
+                if (s.len() as u64) > max {
+                    pack_err(state, "string does not fit in given size");
+                    return 0;
+                }
+                if let Err(e) =
+                    pack_int(&mut out, s.len() as u64, sz, header.endian, false, false)
+                {
+                    pack_err(state, &e);
+                    return 0;
+                }
+                out.extend_from_slice(&s);
+                arg_idx += 1;
+            }
+            PackOp::ZeroStr => {
+                let s = state.to_lstring(arg_idx).map(|b| b.to_vec()).unwrap_or_default();
+                if s.contains(&0) {
+                    pack_err(state, "string contains zeros");
+                    return 0;
+                }
+                out.extend_from_slice(&s);
+                out.push(0);
+                arg_idx += 1;
+            }
+            PackOp::Padding => out.push(0),
+            PackOp::Align(_) => { /* alignment already applied via pad */ }
+            PackOp::Done => break,
+        }
+    }
+    let _ = state.push_lstring(&out);
+    1
+}
+
+fn unpack_int(buf: &[u8], size: usize, endian: PackEndian, signed: bool) -> i64 {
+    let mut val: u64 = 0;
+    match endian {
+        PackEndian::Little => {
+            for i in 0..size.min(8) {
+                val |= (buf[i] as u64) << (i * 8);
+            }
+        }
+        PackEndian::Big => {
+            for i in 0..size.min(8) {
+                val = (val << 8) | (buf[i] as u64);
+            }
+        }
+    }
+    if signed && size < 8 {
+        let sign_bit = 1u64 << (size * 8 - 1);
+        if val & sign_bit != 0 {
+            let ext = !0u64 << (size * 8);
+            val |= ext;
+        }
+    }
+    val as i64
+}
+
+unsafe extern "C" fn str_unpack(state: *mut LuaState) -> std::os::raw::c_int {
+    let state = unsafe { &mut *state };
+    let fmt = arg_bytes(state, 1).unwrap_or_default();
+    let data = arg_bytes(state, 2).unwrap_or_default();
+    let init = state.to_integer_x(3).unwrap_or(1);
+    let mut header = PackHeader::new();
+    let mut pos = 0usize;
+    let mut data_pos: usize = if init >= 1 { (init - 1) as usize } else { 0 };
+    let mut nret: i32 = 0;
+    loop {
+        let op = match next_op(&fmt, &mut pos, &mut header) {
+            Ok((Some(op), _)) => op,
+            Ok((None, _)) => break,
+            Err(e) => {
+                pack_err(state, &e);
+                return 0;
+            }
+        };
+        let size = match op {
+            PackOp::Int { size, .. } => size,
+            PackOp::Float => 4,
+            PackOp::Double => 8,
+            PackOp::Char(n) => n,
+            PackOp::String(n) => n,
+            PackOp::ZeroStr | PackOp::Padding => 1,
+            PackOp::Align(sz) => sz,
+            PackOp::Done => break,
+        };
+        let pad = align_padding(data_pos, size, header.max_align);
+        data_pos += pad;
+        match op {
+            PackOp::Int { size, signed } => {
+                if data_pos + size > data.len() {
+                    pack_err(state, "data string too short");
+                    return 0;
+                }
+                let v = unpack_int(&data[data_pos..data_pos + size], size, header.endian, signed);
+                state.push_integer(v);
+                nret += 1;
+                data_pos += size;
+            }
+            PackOp::Float => {
+                if data_pos + 4 > data.len() {
+                    pack_err(state, "data string too short");
+                    return 0;
+                }
+                let mut b = [0u8; 4];
+                b.copy_from_slice(&data[data_pos..data_pos + 4]);
+                let bits = match header.endian {
+                    PackEndian::Little => u32::from_le_bytes(b),
+                    PackEndian::Big => u32::from_be_bytes(b),
+                };
+                state.push_number(f32::from_bits(bits) as f64);
+                nret += 1;
+                data_pos += 4;
+            }
+            PackOp::Double => {
+                if data_pos + 8 > data.len() {
+                    pack_err(state, "data string too short");
+                    return 0;
+                }
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&data[data_pos..data_pos + 8]);
+                let bits = match header.endian {
+                    PackEndian::Little => u64::from_le_bytes(b),
+                    PackEndian::Big => u64::from_be_bytes(b),
+                };
+                state.push_number(f64::from_bits(bits));
+                nret += 1;
+                data_pos += 8;
+            }
+            PackOp::Char(n) => {
+                if data_pos + n > data.len() {
+                    pack_err(state, "data string too short");
+                    return 0;
+                }
+                let _ = state.push_lstring(&data[data_pos..data_pos + n]);
+                nret += 1;
+                data_pos += n;
+            }
+            PackOp::String(sz) => {
+                if data_pos + sz > data.len() {
+                    pack_err(state, "data string too short");
+                    return 0;
+                }
+                let len = unpack_int(&data[data_pos..data_pos + sz], sz, header.endian, false)
+                    as usize;
+                data_pos += sz;
+                if data_pos + len > data.len() {
+                    pack_err(state, "data string too short");
+                    return 0;
+                }
+                let _ = state.push_lstring(&data[data_pos..data_pos + len]);
+                nret += 1;
+                data_pos += len;
+            }
+            PackOp::ZeroStr => {
+                let start = data_pos;
+                while data_pos < data.len() && data[data_pos] != 0 {
+                    data_pos += 1;
+                }
+                if data_pos >= data.len() {
+                    pack_err(state, "unfinished string for format 'z'");
+                    return 0;
+                }
+                let _ = state.push_lstring(&data[start..data_pos]);
+                nret += 1;
+                data_pos += 1; // skip the zero
+            }
+            PackOp::Padding => {
+                if data_pos >= data.len() {
+                    pack_err(state, "data string too short");
+                    return 0;
+                }
+                data_pos += 1;
+            }
+            PackOp::Align(_) => { /* already applied */ }
+            PackOp::Done => break,
+        }
+    }
+    state.push_integer((data_pos + 1) as i64);
+    nret + 1
+}
+
+unsafe extern "C" fn str_packsize(state: *mut LuaState) -> std::os::raw::c_int {
+    let state = unsafe { &mut *state };
+    let fmt = arg_bytes(state, 1).unwrap_or_default();
+    let mut header = PackHeader::new();
+    let mut pos = 0usize;
+    let mut total: usize = 0;
+    loop {
+        let op = match next_op(&fmt, &mut pos, &mut header) {
+            Ok((Some(op), _)) => op,
+            Ok((None, _)) => break,
+            Err(e) => {
+                pack_err(state, &e);
+                return 0;
+            }
+        };
+        let size = match op {
+            PackOp::Int { size, .. } => size,
+            PackOp::Float => 4,
+            PackOp::Double => 8,
+            PackOp::Char(n) => n,
+            PackOp::Padding => 1,
+            PackOp::Align(sz) => sz,
+            PackOp::String(_) | PackOp::ZeroStr => {
+                pack_err(state, "variable-size format in packsize");
+                return 0;
+            }
+            PackOp::Done => break,
+        };
+        let pad = align_padding(total, size, header.max_align);
+        total = total.saturating_add(pad);
+        match op {
+            PackOp::Align(_) => { /* alignment only */ }
+            _ => total = total.saturating_add(size),
+        }
+    }
+    state.push_integer(total as i64);
     1
 }
 
