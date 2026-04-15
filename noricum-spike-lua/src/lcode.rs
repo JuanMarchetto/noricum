@@ -523,6 +523,30 @@ pub fn exp2anyreg(fs: &mut FuncState, e: &mut ExprDesc) -> u8 {
     e.info as u8
 }
 
+/// Like `exp2anyreg` but also materializes any pending t/f jump lists
+/// into the target register. Use when the caller needs a value — not
+/// just a register address — from an expression that may have come
+/// through `and`/`or`/comparison short-circuiting. The plain
+/// `exp2anyreg` silently drops unmaterialized jump lists for
+/// expressions whose kind is already `NonReloc`, which leaves JMPs
+/// with NO_JUMP (-1) targets and produces infinite loops at runtime.
+pub fn exp2anyreg_materialized(fs: &mut FuncState, e: &mut ExprDesc) -> u8 {
+    discharge_vars(fs, e);
+    if e.k == ExpKind::NonReloc && e.t == NO_JUMP && e.f == NO_JUMP {
+        return e.info as u8;
+    }
+    if e.k == ExpKind::NonReloc {
+        // Already in a register; materialize jumps into THAT register
+        // instead of allocating a fresh one so we stay fused with
+        // whatever produced the NonReloc.
+        let reg = e.info as u8;
+        materialize_jump_lists(fs, e, reg);
+        return reg;
+    }
+    exp2nextreg(fs, e);
+    e.info as u8
+}
+
 // ---- Code generation helpers -----------------------------------------------
 
 pub fn code_return(fs: &mut FuncState, first: i32, nret: i32) {
@@ -631,7 +655,7 @@ pub fn store_var(fs: &mut FuncState, var: &mut ExprDesc, val: &mut ExprDesc) {
             );
         }
         ExpKind::IndexStr => {
-            let reg = exp2anyreg(fs, val);
+            let reg = exp2anyreg_materialized(fs, val);
             emit_abc(
                 fs,
                 OpCode::OP_SETFIELD,
@@ -642,7 +666,7 @@ pub fn store_var(fs: &mut FuncState, var: &mut ExprDesc, val: &mut ExprDesc) {
             );
         }
         ExpKind::IndexUp => {
-            let reg = exp2anyreg(fs, val);
+            let reg = exp2anyreg_materialized(fs, val);
             emit_abc(
                 fs,
                 OpCode::OP_SETTABUP,
@@ -653,7 +677,7 @@ pub fn store_var(fs: &mut FuncState, var: &mut ExprDesc, val: &mut ExprDesc) {
             );
         }
         ExpKind::Indexed => {
-            let reg = exp2anyreg(fs, val);
+            let reg = exp2anyreg_materialized(fs, val);
             emit_abc(
                 fs,
                 OpCode::OP_SETTABLE,
@@ -664,7 +688,7 @@ pub fn store_var(fs: &mut FuncState, var: &mut ExprDesc, val: &mut ExprDesc) {
             );
         }
         ExpKind::IndexI => {
-            let reg = exp2anyreg(fs, val);
+            let reg = exp2anyreg_materialized(fs, val);
             emit_abc(
                 fs,
                 OpCode::OP_SETI,

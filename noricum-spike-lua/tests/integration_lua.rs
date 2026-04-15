@@ -190,3 +190,49 @@ fn pairs_over_table() {
     "#);
     assert_eq!(out.pop(), Some("3".to_string()));
 }
+
+/// Regression: `{ a = (p and q) }` where the `and` short-circuits on
+/// a falsy `p` used to compile to a JMP whose target was NO_JUMP
+/// (-1), causing an infinite self-loop. The fix is in lcode::store_var
+/// which now materializes t/f jump lists for indexed targets (SETFIELD
+/// / SETTABLE / SETI / SETTABUP) the same way it does for plain
+/// locals.
+#[test]
+fn and_short_circuit_in_named_field_does_not_loop() {
+    let mut out = run(r#"
+        local p = nil
+        local q = "yes"
+        local t = { a = (p and q) }
+        print(t.a == nil, type(t))
+    "#);
+    assert_eq!(out.pop(), Some("true\ttable".to_string()));
+}
+
+/// Second arm of the same bug: with `p` truthy, we must end up with
+/// `q` in the named field. Again exercises the jump-list materialization
+/// path in SETFIELD.
+#[test]
+fn and_short_circuit_truthy_path_stores_right_operand() {
+    let mut out = run(r#"
+        local p = {x = 1}
+        local q = "yes"
+        local t = { a = (p and q) }
+        print(t.a)
+    "#);
+    assert_eq!(out.pop(), Some("yes".to_string()));
+}
+
+/// Same class of bug exercised through SETTABUP (named field on a
+/// non-local table target captured as upvalue by the enclosing
+/// function).
+#[test]
+fn and_short_circuit_in_table_index_through_upvalue() {
+    let mut out = run(r#"
+        local t = {}
+        local p = nil
+        local q = "yes"
+        t.a = (p and q)
+        print(t.a == nil)
+    "#);
+    assert_eq!(out.pop(), Some("true".to_string()));
+}
