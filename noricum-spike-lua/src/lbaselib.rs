@@ -189,8 +189,16 @@ unsafe extern "C" fn lua_tonumber(state: *mut LuaState) -> std::os::raw::c_int {
                 }
                 // Hex prefix support.
                 if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                    if let Ok(i) = i64::from_str_radix(rest, 16) {
-                        state.push_integer(i);
+                    // Hex integer (no dot, no exponent).
+                    if !rest.contains('.') && !rest.contains('p') && !rest.contains('P') {
+                        if let Ok(u) = u64::from_str_radix(rest, 16) {
+                            state.push_integer(u as i64);
+                            return 1;
+                        }
+                    }
+                    // Hex float: 0x1.8p+1, 0xAA.0, 0x1p10, etc.
+                    if let Some(f) = crate::llex::LexState::parse_hex_float_public(s) {
+                        state.push_number(f);
                         return 1;
                     }
                 }

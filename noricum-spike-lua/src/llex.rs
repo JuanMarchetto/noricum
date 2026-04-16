@@ -310,6 +310,10 @@ impl<'a> LexState<'a> {
         }
     }
 
+    pub fn parse_hex_float_public(s: &str) -> Option<f64> {
+        Self::parse_hex_float(s)
+    }
+
     fn parse_hex_float(s: &str) -> Option<f64> {
         let s = &s[2..]; // skip 0x
         let mut result: f64 = 0.0;
