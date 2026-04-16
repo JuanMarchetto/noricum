@@ -86,13 +86,30 @@ unsafe extern "C" fn utf8_codepoint(state: *mut LuaState) -> std::os::raw::c_int
                 count += 1;
                 pos += len;
             }
-            None => break,
+            None => {
+                // Matches C Lua: invalid UTF-8 is an error, not silent
+                // truncation. Raise so pcall/checkerror catches it.
+                let h = state.global.new_string(b"invalid UTF-8 code", 0);
+                state.raise_error_value(TValue::ShortString(h));
+                return 0;
+            }
         }
     }
     count as i32
 }
 
+/// Port of C Lua's `utf8_decode`. Returns (codepoint, bytes_consumed)
+/// or None for invalid sequences. In strict mode, also rejects
+/// surrogates (U+D800..U+DFFF) and values > U+10FFFF, matching the
+/// `!lax` path in lutf8lib.c. Overlong encodings are always rejected.
 fn decode_codepoint(bytes: &[u8], pos: usize) -> Option<(u32, usize)> {
+    decode_codepoint_ex(bytes, pos, /*strict*/ true)
+}
+
+fn decode_codepoint_ex(bytes: &[u8], pos: usize, strict: bool) -> Option<(u32, usize)> {
+    // Minimum codepoint for each continuation-byte count — encoding
+    // below this threshold is overlong and must be rejected.
+    const LIMITS: [u32; 6] = [!0, 0x80, 0x800, 0x10000, 0x200000, 0x4000000];
     if pos >= bytes.len() {
         return None;
     }
@@ -100,27 +117,38 @@ fn decode_codepoint(bytes: &[u8], pos: usize) -> Option<(u32, usize)> {
     if b0 < 0x80 {
         return Some((b0 as u32, 1));
     }
-    let (len, mask) = if b0 & 0xE0 == 0xC0 {
-        (2, 0x1F)
-    } else if b0 & 0xF0 == 0xE0 {
-        (3, 0x0F)
-    } else if b0 & 0xF8 == 0xF0 {
-        (4, 0x07)
-    } else {
-        return None;
-    };
-    if pos + len > bytes.len() {
-        return None;
-    }
-    let mut cp = (b0 & mask) as u32;
-    for i in 1..len {
-        let b = bytes[pos + i];
-        if b & 0xC0 != 0x80 {
+    // Count continuation bytes expected: for each bit set in the lead
+    // byte's 0x40+, one continuation byte is needed. C Lua walks
+    // `c & 0x40` shifting left and uses the POST-shift c for the lead-
+    // byte contribution — that's how overlong encodings get caught:
+    // after the shift loop, a 2-byte lead like 0xC0 has shifted to
+    // 0x80, whose &0x7F is 0, so the final res stays below LIMITS[1].
+    let mut c = b0;
+    let mut count: usize = 0;
+    let mut res: u32 = 0;
+    while c & 0x40 != 0 {
+        count += 1;
+        if pos + count >= bytes.len() {
             return None;
         }
-        cp = (cp << 6) | (b & 0x3F) as u32;
+        let cc = bytes[pos + count];
+        if cc & 0xC0 != 0x80 {
+            return None;
+        }
+        res = (res << 6) | ((cc & 0x3F) as u32);
+        c = c.wrapping_shl(1);
     }
-    Some((cp, len))
+    res |= ((c & 0x7F) as u32) << (count * 5);
+    if count > 5 || res > 0x7FFFFFFF || res < LIMITS[count] {
+        return None;
+    }
+    if strict {
+        // Reject surrogates and out-of-Unicode values.
+        if res > 0x10FFFF || (0xD800..=0xDFFF).contains(&res) {
+            return None;
+        }
+    }
+    Some((res, count + 1))
 }
 
 unsafe extern "C" fn utf8_len(state: *mut LuaState) -> std::os::raw::c_int {
