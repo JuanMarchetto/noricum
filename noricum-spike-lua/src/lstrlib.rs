@@ -633,36 +633,46 @@ fn match_single(c: u8, pat: &[u8], pi: usize) -> bool {
 }
 
 fn match_set(c: u8, pat: &[u8], pi: usize) -> bool {
-    // [set] — walk through characters until ']'.
+    // Port of C Lua's `matchbracketclass`. Walks from [ to ec (the
+    // closing ']'). First character after '[' (or after '[^') is
+    // ALWAYS treated as a literal member of the set — so '[^]]'
+    // means "any char except ]", not "empty set + stray ]".
+    let ec = class_end(pat, pi); // one past the closing ']'
     let mut i = pi + 1;
-    let mut negate = false;
+    let mut sig = true;
     if i < pat.len() && pat[i] == b'^' {
-        negate = true;
+        sig = false;
         i += 1;
     }
-    let mut found = false;
-    while i < pat.len() && pat[i] != b']' {
-        if pat[i] == b'%' && i + 1 < pat.len() {
+    // do-while style: always advance i by 1 first so the first char
+    // (even if it's ']') is examined as a literal member.
+    while i + 1 < ec {
+        if pat[i] == b'%' && i + 1 < ec {
             if match_class(c, pat[i + 1]) {
-                found = true;
+                return sig;
             }
             i += 2;
-        } else if i + 2 < pat.len() && pat[i + 1] == b'-' && pat[i + 2] != b']' {
+        } else if i + 2 < ec && pat[i + 1] == b'-' {
+            // Range x-y — inclusive endpoints.
             if pat[i] <= c && c <= pat[i + 2] {
-                found = true;
+                return sig;
             }
             i += 3;
         } else {
             if pat[i] == c {
-                found = true;
+                return sig;
             }
             i += 1;
         }
     }
-    if negate { !found } else { found }
+    !sig
 }
 
 fn class_end(pat: &[u8], pi: usize) -> usize {
+    // Port of C Lua's `classend`. Returns the index just past the
+    // closing ']' of a character class. The key subtlety: for
+    // bracket classes, the FIRST character after '[' (or '[^') is
+    // always a literal — only SUBSEQUENT ']' closes the set.
     if pi >= pat.len() {
         return pi;
     }
@@ -679,11 +689,19 @@ fn class_end(pat: &[u8], pi: usize) -> usize {
             if i < pat.len() && pat[i] == b'^' {
                 i += 1;
             }
-            while i < pat.len() && pat[i] != b']' {
+            // do-while: consume at least one char before checking ']'.
+            loop {
+                if i >= pat.len() {
+                    // malformed — return whatever we have
+                    return i;
+                }
                 if pat[i] == b'%' && i + 1 < pat.len() {
-                    i += 2;
+                    i += 2; // skip the escape + next char
                 } else {
                     i += 1;
+                }
+                if i >= pat.len() || pat[i] == b']' {
+                    break;
                 }
             }
             i + 1

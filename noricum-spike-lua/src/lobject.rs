@@ -351,10 +351,29 @@ pub fn raw_arith(op: ArithOp, p1: &TValue, p2: &TValue) -> LuaResult<Option<TVal
     use ArithOp::*;
 
     match op {
-        // Integer-only operations.
+        // Integer-only operations. If either operand is a FLOAT with
+        // non-integer value, raise "number has no integer
+        // representation" (matches C Lua's luaG_tointerror). This
+        // differs from "not a number" — the operand IS numeric, just
+        // not convertible losslessly.
         BAnd | BOr | BXor | Shl | Shr | BNot => {
-            let Some(i1) = to_integer_ns(p1) else { return Ok(None) };
-            let Some(i2) = to_integer_ns(p2) else { return Ok(None) };
+            let i1 = match to_integer_ns(p1) {
+                Some(v) => v,
+                None if matches!(p1, TValue::Number(_)) => {
+                    // VM layer catches Runtime(True) as "no int repr"
+                    // (True picked as a cheap sentinel — see
+                    // try_arith_with_string_coercion in lvm.rs).
+                    return Err(LuaError::Runtime(TValue::True));
+                }
+                None => return Ok(None),
+            };
+            let i2 = match to_integer_ns(p2) {
+                Some(v) => v,
+                None if matches!(p2, TValue::Number(_)) => {
+                    return Err(LuaError::Runtime(TValue::True));
+                }
+                None => return Ok(None),
+            };
             int_arith(op, i1, i2).map(|i| Some(TValue::Integer(i)))
         }
 

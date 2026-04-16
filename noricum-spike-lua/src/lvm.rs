@@ -227,9 +227,14 @@ impl LuaState {
                 // pcall/assert show "attempt to perform 'n//0'".
                 let msg = match op {
                     ArithOp::Mod => "attempt to perform 'n%0'",
-                    _ => "attempt to perform 'n//0'",
+                    _ => "attempt to divide by zero",
                 };
                 return Err(self.make_lua_error(msg));
+            }
+            Err(LuaError::Runtime(TValue::True)) => {
+                // Bitwise op with a non-integer float. Mirrors
+                // C Lua's luaG_tointerror.
+                return Err(self.make_lua_error("number has no integer representation"));
             }
             Err(e) => return Err(e),
         }
@@ -242,7 +247,7 @@ impl LuaState {
                 Err(LuaError::Runtime(TValue::Nil)) => {
                     let msg = match op {
                         ArithOp::Mod => "attempt to perform 'n%0'",
-                        _ => "attempt to perform 'n//0'",
+                        _ => "attempt to divide by zero",
                     };
                     return Err(self.make_lua_error(msg));
                 }
