@@ -723,7 +723,17 @@ fn do_match(
         return Some(si);
     }
     if pat[pi] == b'(' {
-        // Start a new capture.
+        // Position capture `()`: marked with end = Some(usize::MAX).
+        // C Lua uses CAP_POSITION = -2 for the same purpose.
+        if pi + 1 < pat.len() && pat[pi + 1] == b')' {
+            captures.push((si, Some(usize::MAX)));
+            let result = do_match(src, si, pat, pi + 2, captures);
+            if result.is_none() {
+                captures.pop();
+            }
+            return result;
+        }
+        // Regular capture: open, end=None until matching ')'.
         captures.push((si, None));
         let result = do_match(src, si, pat, pi + 1, captures);
         if result.is_none() {
@@ -732,7 +742,8 @@ fn do_match(
         return result;
     }
     if pat[pi] == b')' {
-        // Close the last open capture.
+        // Close the last UNFINISHED capture (position captures are
+        // already closed with MAX sentinel).
         let idx = captures.iter().rposition(|(_, e)| e.is_none())?;
         captures[idx].1 = Some(si);
         let result = do_match(src, si, pat, pi + 1, captures);
@@ -811,6 +822,17 @@ fn do_match(
 
 /// Find first match of `pat` in `src` starting at `init` (0-based).
 /// Returns (match_start, match_end, captures).
+/// Push one capture onto the Lua stack. If `ce == usize::MAX` this
+/// is a POSITION capture from `()` — push the 1-based byte offset as
+/// an integer, matching C Lua's CAP_POSITION handling in push_onecapture.
+fn push_capture(state: &mut LuaState, src: &[u8], cs: usize, ce: usize) {
+    if ce == usize::MAX {
+        state.push_integer((cs + 1) as i64);
+    } else {
+        let _ = state.push_lstring(&src[cs..ce]);
+    }
+}
+
 fn pattern_find(
     src: &[u8],
     pat: &[u8],
@@ -882,9 +904,8 @@ unsafe extern "C" fn str_find(state: *mut LuaState) -> std::os::raw::c_int {
             state.push_integer(ms as i64 + 1);
             state.push_integer(me as i64);
             for (cs, ce) in &caps {
-                let slice = &src[*cs..*ce];
-                let _ = state.push_lstring(slice);
-            }
+                    push_capture(state, &src, *cs, *ce);
+                }
             2 + caps.len() as i32
         }
         None => {
@@ -908,7 +929,7 @@ unsafe extern "C" fn str_match(state: *mut LuaState) -> std::os::raw::c_int {
                 1
             } else {
                 for (cs, ce) in &caps {
-                    let _ = state.push_lstring(&src[*cs..*ce]);
+                    push_capture(state, &src, *cs, *ce);
                 }
                 caps.len() as i32
             }
@@ -994,8 +1015,7 @@ unsafe extern "C" fn gmatch_iter(state: *mut LuaState) -> std::os::raw::c_int {
                 1
             } else {
                 for (cs, ce) in &caps {
-                    let slice = &s[*cs..*ce];
-                    let _ = state.push_lstring(slice);
+                    push_capture(state, &s, *cs, *ce);
                 }
                 caps.len() as i32
             }
@@ -1076,8 +1096,8 @@ unsafe extern "C" fn str_gsub(state: *mut LuaState) -> std::os::raw::c_int {
                             1
                         } else {
                             for (cs, ce) in &caps {
-                                let _ = state.push_lstring(&src[*cs..*ce]);
-                            }
+                    push_capture(state, &src, *cs, *ce);
+                }
                             caps.len() as i32
                         };
                         let _ = state.call_value(pre_top_abs, n_args as u32, 1);

@@ -694,9 +694,12 @@ mod tests {
     }
 
     #[test]
-    fn band_on_non_integral_float_fails_softly() {
-        let r = raw_arith(ArithOp::BAnd, &TValue::Number(1.5), &TValue::Integer(3)).unwrap();
-        assert!(r.is_none());
+    fn band_on_non_integral_float_raises_integer_representation_error() {
+        // Mirrors C Lua's luaG_tointerror: bitwise op on a non-integer
+        // float is now a hard runtime error (signaled via Runtime(True)
+        // sentinel) rather than returning None for metamethod fallback.
+        let r = raw_arith(ArithOp::BAnd, &TValue::Number(1.5), &TValue::Integer(3));
+        assert!(matches!(r, Err(LuaError::Runtime(TValue::True))));
     }
 
     #[test]
