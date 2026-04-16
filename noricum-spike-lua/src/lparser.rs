@@ -311,6 +311,20 @@ pub fn parse(
     // Close the main block.
     fs.blocks.pop();
 
+    // Any gotos still pending at this point targeted a label that
+    // never existed (or that went out of scope). Mirror C Lua's
+    // `undefgoto` — raise a semantic error naming the label.
+    if let Some(g) = fs.gotos.first() {
+        let label_name = g
+            .name
+            .map(|h| {
+                String::from_utf8_lossy(&unsafe { &mut *ls.gs }.heap.string(h).bytes).to_string()
+            })
+            .unwrap_or_default();
+        let msg = format!("no visible label '{}' for goto at line {}", label_name, g.line);
+        ls.syntax_error(&msg);
+    }
+
     // Finalize proto.
     fs.proto.max_stack_size = fs.proto.max_stack_size.max(fs.freereg);
     fs.proto.source = Some(name_handle);
@@ -404,6 +418,25 @@ fn labelstat(ls: &mut LexState, fs: &mut FuncState) {
     ls.next_token(); // skip `::`
     let name = check_name(ls);
     check_next(ls, TK_DBCOLON);
+    // Port of C Lua's `checkrepeated`: labels that are still
+    // VISIBLE in the current function must have distinct names.
+    // Visibility includes labels from enclosing blocks — not just
+    // the innermost one — so `::l1:: do ::l1:: end` is an error.
+    // Labels from CLOSED inner blocks are already gone (block()
+    // truncates fs.labels on exit).
+    for existing in &fs.labels[..] {
+        if existing.name == Some(name) {
+            let name_str = String::from_utf8_lossy(
+                &unsafe { &mut *ls.gs }.heap.string(name).bytes,
+            )
+            .to_string();
+            let msg = format!(
+                "label '{}' already defined on line {}",
+                name_str, existing.line
+            );
+            ls.syntax_error(&msg);
+        }
+    }
     let pc = lcode::get_label(fs);
     let line = ls.linenumber;
     fs.labels.push(LabelDesc {
@@ -413,8 +446,18 @@ fn labelstat(ls: &mut LexState, fs: &mut FuncState) {
         nactvar: fs.nactvar,
         close: false,
     });
-    // Resolve any pending gotos that target this label.
-    let mut i = 0;
+    // Resolve pending gotos that target this label, BUT only those
+    // added within the current (innermost) block. Gotos from an
+    // enclosing block can't jump into a nested block — C Lua's
+    // leaveblock moves such gotos OUT (via movegotosout) when the
+    // block closes, not IN. Without the block-scope check,
+    // `goto l1; do ::l1:: end` silently succeeds instead of erroring.
+    let block_firstgoto = fs
+        .blocks
+        .last()
+        .map(|b| b.firstgoto)
+        .unwrap_or(0);
+    let mut i = block_firstgoto;
     while i < fs.gotos.len() {
         if fs.gotos[i].name == Some(name) {
             let g = fs.gotos.remove(i);
@@ -1226,6 +1269,8 @@ fn block(ls: &mut LexState, fs: &mut FuncState) {
     let block_start_nactvar = fs.nactvar;
     statlist(ls, fs);
     let bl = fs.blocks.pop().unwrap();
+    // Labels defined in this block go out of scope now — drop them.
+    fs.labels.truncate(bl.firstlabel);
     // Emit OP_CLOSE at the first-slot-to-close so the VM runs
     // `__close` on TBC locals and closes upvalues captured from
     // this block before the registers are reused.
