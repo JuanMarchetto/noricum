@@ -1066,6 +1066,17 @@ fn free_exps_max_first(fs: &mut FuncState, e1: &ExprDesc, e2: &ExprDesc) {
     }
 }
 
+fn lua_shift(x: i64, y: i64) -> i64 {
+    const NBITS: i64 = 64;
+    if y >= 0 {
+        if y >= NBITS { 0 } else { ((x as u64) << (y as u32)) as i64 }
+    } else if y <= -NBITS {
+        0
+    } else {
+        ((x as u64) >> ((-y) as u32)) as i64
+    }
+}
+
 fn fold_int(op: BinOpr, a: LuaInteger, b: LuaInteger) -> Option<LuaInteger> {
     match op {
         BinOpr::Add => a.checked_add(b),
@@ -1080,8 +1091,12 @@ fn fold_int(op: BinOpr, a: LuaInteger, b: LuaInteger) -> Option<LuaInteger> {
         BinOpr::BAnd => Some(a & b),
         BinOpr::BOr => Some(a | b),
         BinOpr::BXor => Some(a ^ b),
-        BinOpr::Shl => Some(a << (b & 63)),
-        BinOpr::Shr => Some(a >> (b & 63)),
+        // Port of C Lua's luaV_shiftl: negative shift amount means
+        // shift the OTHER direction. Out-of-range (|b| >= 64) yields
+        // 0. Both directions are LOGICAL (zero-fill), so cast
+        // through u64 before shifting.
+        BinOpr::Shl => Some(lua_shift(a, b)),
+        BinOpr::Shr => Some(lua_shift(a, b.wrapping_neg())),
         _ => None,
     }
 }

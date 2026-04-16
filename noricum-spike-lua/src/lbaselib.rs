@@ -187,17 +187,27 @@ unsafe extern "C" fn lua_tonumber(state: *mut LuaState) -> std::os::raw::c_int {
                     state.push_number(f);
                     return 1;
                 }
-                // Hex prefix support.
-                if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                    // Hex integer (no dot, no exponent).
-                    if !rest.contains('.') && !rest.contains('p') && !rest.contains('P') {
-                        if let Ok(u) = u64::from_str_radix(rest, 16) {
-                            state.push_integer(u as i64);
+                // Hex support. Strip optional sign first, then match
+                // '0x'. Accept both integer and float shapes.
+                let (neg, rest0) = match s.as_bytes().first() {
+                    Some(b'+') => (false, &s[1..]),
+                    Some(b'-') => (true, &s[1..]),
+                    _ => (false, s),
+                };
+                let rest0 = rest0.trim_start();
+                if let Some(hex) = rest0
+                    .strip_prefix("0x")
+                    .or_else(|| rest0.strip_prefix("0X"))
+                {
+                    if !hex.contains('.') && !hex.contains('p') && !hex.contains('P') {
+                        if let Ok(u) = u64::from_str_radix(hex, 16) {
+                            let signed = if neg { (u as i64).wrapping_neg() } else { u as i64 };
+                            state.push_integer(signed);
                             return 1;
                         }
                     }
-                    // Hex float: 0x1.8p+1, 0xAA.0, 0x1p10, etc.
-                    if let Some(f) = crate::llex::LexState::parse_hex_float_public(s) {
+                    if let Some(mut f) = crate::llex::LexState::parse_hex_float_public(rest0) {
+                        if neg { f = -f; }
                         state.push_number(f);
                         return 1;
                     }
